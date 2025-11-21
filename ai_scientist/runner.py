@@ -1,0 +1,1898 @@
+"""Runner that wires budgets, fidelity decisions, and minimal reporting (Tasks 4.1 + B.*)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import platform
+import subprocess
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple
+
+import numpy as np
+import yaml
+
+from ai_scientist import adapter
+from ai_scientist import config as ai_config
+from ai_scientist import memory
+from ai_scientist import planner as ai_planner
+from ai_scientist import rag
+from ai_scientist import reporting
+from ai_scientist import tools
+from ai_scientist.optim.surrogate import SimpleSurrogateRanker
+from constellaration.geometry import surface_rz_fourier as surface_module
+from constellaration.initial_guess import generate_rotating_ellipse
+from orchestration import adaptation as adaptation_helpers
+
+FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
+P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
+MIN_SURROGATE_HISTORY = 4
+_BOUNDARY_SEED_CACHE: dict[Path, dict[str, Any]] = {}
+
+
+def _load_seed_boundary(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    cached = _BOUNDARY_SEED_CACHE.get(resolved)
+    if cached is None:
+        raw = json.loads(resolved.read_text(encoding="utf-8"))
+        payload: dict[str, Any] = {
+            "r_cos": np.asarray(raw["r_cos"], dtype=float),
+            "z_sin": np.asarray(raw["z_sin"], dtype=float),
+            "r_sin": np.asarray(raw["r_sin"], dtype=float)
+            if raw.get("r_sin") is not None
+            else None,
+            "z_cos": np.asarray(raw["z_cos"], dtype=float)
+            if raw.get("z_cos") is not None
+            else None,
+            "n_field_periods": int(
+                raw.get("n_field_periods") or raw.get("nfp") or 1
+            ),
+            "is_stellarator_symmetric": bool(
+                raw.get("is_stellarator_symmetric", True)
+            ),
+        }
+        _BOUNDARY_SEED_CACHE[resolved] = payload
+        cached = payload
+    return {
+        key: (np.array(value, copy=True) if isinstance(value, np.ndarray) else value)
+        for key, value in cached.items()
+    }
+
+
+@dataclass(frozen=True)
+class BudgetSnapshot:
+    screen_evals_per_cycle: int
+    promote_top_k: int
+    max_high_fidelity_evals_per_cycle: int
+
+
+@dataclass(frozen=True)
+class CycleBudgetFeedback:
+    hv_delta: float | None
+    feasibility_rate: float | None
+    cache_hit_rate: float | None
+
+
+class BudgetController:
+    def __init__(
+        self,
+        base_budgets: ai_config.BudgetConfig,
+        adaptive_cfg: ai_config.AdaptiveBudgetConfig,
+    ) -> None:
+        self._base = base_budgets
+        self._adaptive_cfg = adaptive_cfg
+        self._last_feedback: CycleBudgetFeedback | None = None
+        self._cache_stats: dict[str, dict[str, int]] = {}
+
+    def snapshot(self) -> BudgetSnapshot:
+        if not self._adaptive_cfg.enabled or self._last_feedback is None:
+            return BudgetSnapshot(
+                screen_evals_per_cycle=self._base.screen_evals_per_cycle,
+                promote_top_k=self._base.promote_top_k,
+                max_high_fidelity_evals_per_cycle=self._base.max_high_fidelity_evals_per_cycle,
+            )
+        return BudgetSnapshot(
+            screen_evals_per_cycle=self._blend_budget(
+                self._base.screen_evals_per_cycle,
+                self._adaptive_cfg.screen_bounds,
+                self._screen_score(self._last_feedback),
+            ),
+            promote_top_k=self._blend_budget(
+                self._base.promote_top_k,
+                self._adaptive_cfg.promote_top_k_bounds,
+                self._promote_score(self._last_feedback),
+            ),
+            max_high_fidelity_evals_per_cycle=self._blend_budget(
+                self._base.max_high_fidelity_evals_per_cycle,
+                self._adaptive_cfg.high_fidelity_bounds,
+                self._high_fidelity_score(self._last_feedback),
+            ),
+        )
+
+    def capture_cache_hit_rate(
+        self,
+        stage: str,
+        stats: Mapping[str, int] | None = None,
+    ) -> float:
+        stats = stats or tools.get_cache_stats(stage)
+        previous = self._cache_stats.get(stage)
+        delta_hits = stats.get("hits", 0)
+        delta_misses = stats.get("misses", 0)
+        if previous:
+            delta_hits -= previous.get("hits", 0)
+            delta_misses -= previous.get("misses", 0)
+        self._cache_stats[stage] = {
+            "hits": stats.get("hits", 0),
+            "misses": stats.get("misses", 0),
+        }
+        total = max(0, delta_hits + delta_misses)
+        if total <= 0:
+            return 0.0
+        return float(max(0.0, min(1.0, delta_hits / total)))
+
+    def record_feedback(self, feedback: CycleBudgetFeedback) -> None:
+        self._last_feedback = feedback
+
+    def _blend_budget(
+        self,
+        base_value: int,
+        bounds: ai_config.BudgetRangeConfig,
+        score: float,
+    ) -> int:
+        constrained_base = max(bounds.min, min(bounds.max, base_value))
+        if bounds.min >= bounds.max:
+            return constrained_base
+        clamped = max(0.0, min(1.0, score))
+        mid = 0.5
+        if clamped == mid:
+            return constrained_base
+        if clamped > mid:
+            ratio = (clamped - mid) * 2.0
+            increment = bounds.max - constrained_base
+            return min(bounds.max, constrained_base + int(round(increment * ratio)))
+        ratio = (mid - clamped) * 2.0
+        decrement = constrained_base - bounds.min
+        return max(bounds.min, constrained_base - int(round(decrement * ratio)))
+
+    def _normalize(self, value: float | None, target: float) -> float:
+        if value is None or target <= 0.0:
+            return 0.0
+        ratio = float(value) / float(target)
+        return max(0.0, min(1.0, ratio))
+
+    def _screen_score(self, feedback: CycleBudgetFeedback) -> float:
+        progress = max(0.0, feedback.hv_delta or 0.0)
+        normalized = self._normalize(progress, self._adaptive_cfg.hv_slope_reference)
+        feasibility = self._normalize(
+            feedback.feasibility_rate, self._adaptive_cfg.feasibility_target
+        )
+        return 1.0 - (0.6 * normalized + 0.4 * feasibility)
+
+    def _promote_score(self, feedback: CycleBudgetFeedback) -> float:
+        progress = max(0.0, feedback.hv_delta or 0.0)
+        normalized = self._normalize(progress, self._adaptive_cfg.hv_slope_reference)
+        feasibility = self._normalize(
+            feedback.feasibility_rate, self._adaptive_cfg.feasibility_target
+        )
+        return 0.6 * normalized + 0.4 * feasibility
+
+    def _high_fidelity_score(self, feedback: CycleBudgetFeedback) -> float:
+        progress = max(0.0, feedback.hv_delta or 0.0)
+        normalized = self._normalize(progress, self._adaptive_cfg.hv_slope_reference)
+        cache = self._normalize(
+            feedback.cache_hit_rate, self._adaptive_cfg.cache_hit_target
+        )
+        return 0.5 * normalized + 0.5 * cache
+
+
+def _repo_relative(path: Path) -> str | None:
+    allowed_prefixes = (
+        "docs/",
+        "constellaration/",
+        "Jr.AI-Scientist/",
+        "reports/",
+        "tests/",
+    )
+    try:
+        rel = path.resolve().relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        return None
+    for prefix in allowed_prefixes:
+        if rel.startswith(prefix):
+            return rel
+    return None
+
+
+class ProblemEvaluator(Protocol):
+    def __call__(
+        self,
+        boundary_params: Mapping[str, Any],
+        *,
+        stage: str,
+        use_cache: bool = True,
+    ) -> dict[str, Any]: ...
+
+
+class WorldModelLike(Protocol):
+    def log_statement(
+        self,
+        experiment_id: int,
+        cycle: int,
+        stage: str,
+        text: str,
+        status: str,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+        *,
+        metrics_id: int | None = None,
+        seed: int | None = None,
+        git_sha: str,
+        repro_cmd: str,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> int: ...
+
+
+_PROBLEM_EVALUATORS: dict[str, tuple[str, ProblemEvaluator]] = {
+    "p1": ("evaluate_p1", tools.evaluate_p1),
+    "p2": ("evaluate_p2", tools.evaluate_p2),
+    "p3": ("evaluate_p3", tools.evaluate_p3),
+}
+
+
+def _problem_evaluator(problem: str) -> ProblemEvaluator:
+    try:
+        return _PROBLEM_EVALUATORS[problem][1]
+    except KeyError as exc:
+        raise NotImplementedError(
+            "Problem '%s' is not supported; choose one of %s."
+            % (problem, ", ".join(sorted(_PROBLEM_EVALUATORS)))
+        ) from exc
+
+
+def _problem_tool_name(problem: str) -> str:
+    try:
+        return _PROBLEM_EVALUATORS[problem][0]
+    except KeyError as exc:
+        raise NotImplementedError(
+            "Problem '%s' is not supported; choose one of %s."
+            % (problem, ", ".join(sorted(_PROBLEM_EVALUATORS)))
+        ) from exc
+
+
+@dataclass
+class RunnerCLIConfig:
+    config_path: Path
+    problem: str | None
+    cycles: int | None
+    memory_db: Path | None
+    eval_budget: int | None
+    workers: int | None
+    pool_type: str | None
+    screen_only: bool
+    promote_only: bool
+    slow: bool
+    verbose: bool
+    log_cache_stats: bool
+    run_preset: str | None
+    planner: str
+
+
+def _build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "AI Scientist runner (per docs/TASKS_CODEX_MINI.md:191-195). "
+            "Set AI_SCIENTIST_PEFT=1 to load adapter bundles from reports/adapters."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=ai_config.DEFAULT_EXPERIMENT_CONFIG_PATH,
+        help="Path to the experiment configuration YAML (defaults to configs/experiment.yaml).",
+    )
+    parser.add_argument(
+        "--problem",
+        choices=["p1", "p2", "p3"],
+        help=(
+            "Problem identifier that overrides the config (p1=GeometricalProblem, "
+            "p2=SimpleToBuildQIStellarator, p3=MHDStableQIStellarator)."
+        ),
+    )
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        help="Number of governance cycles to run (overrides config; each cycle includes screening → reporting).",
+    )
+    parser.add_argument(
+        "--memory-db",
+        type=Path,
+        help="Path to the shared SQLite world model (overrides config).",
+    )
+    parser.add_argument(
+        "--eval-budget",
+        type=int,
+        help="Override the per-cycle screening budget (screen_evals_per_cycle).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="Override n_workers from the config (also powers multiprocessing pools).",
+    )
+    parser.add_argument(
+        "--pool-type",
+        choices=["thread", "process"],
+        help="Choose the executor pool type used when n_workers > 1.",
+    )
+    parser.add_argument(
+        "--screen",
+        action="store_true",
+        help=(
+            "Run only the screening stage (governance S1) and skip promotions. "
+            "Cannot be combined with --promote or presets that advance directly to S2."
+        ),
+    )
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help=(
+            "Start governance in promote/refine mode (S2+) and report promotions. "
+            "Cannot be combined with --screen or presets that force S1-only behavior."
+        ),
+    )
+    parser.add_argument(
+        "--slow",
+        action="store_true",
+        help="Throttle loop iterations for deterministic, long-wall-clock logging and traceability.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Emit additional runner diagnostics (candidate mixes, gating decisions).",
+    )
+    parser.add_argument(
+        "--log-cache-stats",
+        action="store_true",
+        help="Write per-stage cache stats to reports/cache_stats.jsonl for Phase 5 observability.",
+    )
+    parser.add_argument(
+        "--run-preset",
+        type=str,
+        help="Name of a preset from configs/run_presets.yaml that toggles --screen/--promote/--slow.",
+    )
+    parser.add_argument(
+        "--planner",
+        choices=["deterministic", "agent"],
+        default="deterministic",
+        help="Choose the planning driver (deterministic loop or Phase 3 agent).",
+    )
+    return parser
+
+
+def parse_args(args: Sequence[str] | None = None) -> RunnerCLIConfig:
+    parser = _build_argument_parser()
+    namespace = parser.parse_args(args)
+    if namespace.screen and namespace.promote:
+        parser.error("--screen cannot be combined with --promote.")
+    return RunnerCLIConfig(
+        config_path=namespace.config,
+        problem=namespace.problem,
+        cycles=namespace.cycles,
+        memory_db=namespace.memory_db,
+        eval_budget=namespace.eval_budget,
+        workers=namespace.workers,
+        pool_type=namespace.pool_type,
+        screen_only=bool(namespace.screen),
+        promote_only=bool(namespace.promote),
+        slow=bool(namespace.slow),
+        verbose=bool(namespace.verbose),
+        log_cache_stats=bool(namespace.log_cache_stats),
+        run_preset=namespace.run_preset,
+        planner=namespace.planner,
+    )
+
+
+def _validate_runtime_flags(runtime: RunnerCLIConfig) -> None:
+    if runtime.screen_only and runtime.promote_only:
+        raise ValueError(
+            "--screen (S1-only) cannot be combined with promote-only mode (S2+) "
+            f"(presets: {runtime.run_preset or '<none>'}). Remove one flag/preset."
+        )
+
+
+def _generate_candidate_params(
+    template: ai_config.BoundaryTemplateConfig, seed: int
+) -> dict[str, Any]:
+    rng = np.random.default_rng(seed)
+    seed_data: dict[str, Any] | None = None
+    if template.seed_path is not None:
+        seed_data = _load_seed_boundary(template.seed_path)
+        r_cos = seed_data["r_cos"]
+        z_sin = seed_data["z_sin"]
+        r_sin = seed_data["r_sin"]
+        z_cos = seed_data["z_cos"]
+        n_field_periods = int(seed_data["n_field_periods"])
+        is_stellarator_symmetric = bool(seed_data["is_stellarator_symmetric"])
+    else:
+        base_surface = generate_rotating_ellipse(
+            aspect_ratio=4.0,
+            elongation=1.5,
+            rotational_transform=1.2,
+            n_field_periods=template.n_field_periods,
+        )
+        max_poloidal = max(1, template.n_poloidal_modes - 1)
+        max_toroidal = max(1, (template.n_toroidal_modes - 1) // 2)
+        expanded = surface_module.set_max_mode_numbers(
+            base_surface,
+            max_poloidal_mode=max_poloidal,
+            max_toroidal_mode=max_toroidal,
+        )
+        r_cos = np.asarray(expanded.r_cos, dtype=float)
+        z_sin = np.asarray(expanded.z_sin, dtype=float)
+        center_idx = r_cos.shape[1] // 2
+        r_cos[0, center_idx] = template.base_major_radius
+        if r_cos.shape[0] > 1:
+            z_sin[1, center_idx] = template.base_minor_radius
+
+        r_sin = None
+        z_cos = None
+        n_field_periods = template.n_field_periods
+        is_stellarator_symmetric = True
+
+    r_cos += rng.normal(scale=template.perturbation_scale, size=r_cos.shape)
+    z_sin += rng.normal(scale=template.perturbation_scale / 2, size=z_sin.shape)
+    if seed_data is not None:
+        if r_sin is not None:
+            r_sin += rng.normal(scale=template.perturbation_scale / 2, size=r_sin.shape)
+        if z_cos is not None:
+            z_cos += rng.normal(scale=template.perturbation_scale / 2, size=z_cos.shape)
+
+    if is_stellarator_symmetric:
+        n_cols = r_cos.shape[1]
+        center_idx = n_cols // 2
+        if center_idx > 0:
+            r_cos[0, :center_idx] = 0.0
+        z_sin[0, :] = 0.0
+
+    params = {
+        "r_cos": r_cos.tolist(),
+        "z_sin": z_sin.tolist(),
+        "n_field_periods": template.n_field_periods or n_field_periods,
+        "is_stellarator_symmetric": is_stellarator_symmetric,
+    }
+    if r_sin is not None:
+        params["r_sin"] = r_sin.tolist()
+    if z_cos is not None:
+        params["z_cos"] = z_cos.tolist()
+
+    return {
+        "seed": seed,
+        "params": params,
+        "design_hash": tools.design_hash(params),
+    }
+
+
+def _propose_p3_candidates_for_cycle(
+    cfg: ai_config.ExperimentConfig,
+    cycle_index: int,
+    world_model: memory.WorldModel,
+    experiment_id: int,
+    *,
+    screen_budget: int,
+    total_candidates: int | None = None,
+) -> tuple[list[Mapping[str, Any]], int, int]:
+    """Blend constraint-aware sampling and random noise per roadmap Phase 1 guidance.
+
+    If total_candidates is omitted, screen_budget drives the pool size.
+    See /Users/suhjungdae/code/software/proxima_fusion/RL-feasible-designs/ai_scientist/roadmap.md for the Phase 1 candidate-generation recipe that introduced this helper.
+    """
+
+    pool_size = total_candidates if total_candidates is not None else screen_budget
+    total_candidates = int(pool_size)
+    if total_candidates <= 0:
+        return [], 0, 0
+
+    mix = cfg.proposal_mix
+    ratio_sum = mix.constraint_ratio + mix.exploration_ratio
+    if ratio_sum <= 0.0:
+        sampler_target = 0
+    else:
+        sampler_target = int(
+            round(total_candidates * (mix.constraint_ratio / ratio_sum))
+        )
+    sampler_target = min(sampler_target, total_candidates)
+
+    stage_limit = max(total_candidates * 4, 16)
+    stage_records = world_model.recent_stage_candidates(
+        experiment_id=experiment_id,
+        problem=cfg.problem,
+        stage=cfg.fidelity_ladder.promote,
+        limit=int(stage_limit),
+    )
+
+    if stage_records and sampler_target > 0:
+        base_designs = [record[0] for record in stage_records]
+        feasibilities = [max(0.0, float(record[1])) for record in stage_records]
+        max_feas = max(feasibilities, default=0.0)
+        normalized_distances = [
+            0.0 if max_feas <= 0.0 else min(1.0, value / max_feas)
+            for value in feasibilities
+        ]
+        rng_seed = cfg.random_seed + cycle_index + total_candidates
+        sampler_params = tools.normalized_constraint_distance_sampler(
+            base_designs,
+            normalized_distances=normalized_distances,
+            proposal_count=sampler_target,
+            jitter_scale=mix.jitter_scale,
+            rng=np.random.default_rng(rng_seed),
+        )
+    else:
+        sampler_params = []
+
+    candidate_seeds = [
+        cfg.random_seed + cycle_index * total_candidates + i
+        for i in range(total_candidates)
+    ]
+    seed_iter = iter(candidate_seeds)
+    sampler_results: list[Mapping[str, Any]] = []
+    for params in sampler_params:
+        try:
+            seed = next(seed_iter)
+        except StopIteration:
+            break
+        sampler_results.append(
+            {
+                "seed": seed,
+                "params": params,
+                "design_hash": tools.design_hash(params),
+            }
+        )
+
+    remaining = total_candidates - len(sampler_results)
+    random_results: list[Mapping[str, Any]] = []
+    for _ in range(remaining):
+        seed = next(seed_iter)
+        random_results.append(_generate_candidate_params(cfg.boundary_template, seed))
+
+    candidates = sampler_results + random_results
+    return candidates, len(sampler_results), len(random_results)
+
+
+def _surrogate_candidate_pool_size(
+    screen_budget: int,
+    surrogate_pool_multiplier: float,
+) -> int:
+    if screen_budget <= 0:
+        return 0
+    multiplier = max(1.0, surrogate_pool_multiplier)
+    proposed = int(math.ceil(screen_budget * multiplier))
+    return max(proposed, screen_budget)
+
+
+def _surrogate_rank_screen_candidates(
+    cfg: ai_config.ExperimentConfig,
+    screen_budget: int,
+    candidates: list[Mapping[str, Any]],
+    world_model: memory.WorldModel,
+    *,
+    verbose: bool = False,
+) -> list[Mapping[str, Any]]:
+    """Train SimpleSurrogateRanker on cached history and trim the pool (see /Users/suhjungdae/code/software/proxima_fusion/RL-feasible-designs/ai_scientist/roadmap.md)."""
+
+    if not candidates or screen_budget <= 0:
+        return candidates
+
+    history = world_model.surrogate_training_data(target="hv", problem=cfg.problem)
+    required_history = max(MIN_SURROGATE_HISTORY, screen_budget)
+    if len(history) < required_history:
+        return candidates
+
+    metrics_list, target_values = zip(*history)
+    ranker = SimpleSurrogateRanker()
+    ranker.fit(metrics_list, target_values)
+
+    pool_entries: list[Mapping[str, Any]] = []
+    for idx, candidate in enumerate(candidates):
+        pool_entries.append(
+            {
+                "candidate_params": candidate["params"],
+                "__surrogate_candidate_index": idx,
+            }
+        )
+
+    ranked = ranker.rank(pool_entries)
+    selected: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+    needed = screen_budget
+    for rank in ranked:
+        idx = int(rank.metrics.get("__surrogate_candidate_index", -1))
+        if idx < 0 or idx in seen:
+            continue
+        seen.add(idx)
+        selected.append(candidates[idx])
+        if len(selected) >= needed:
+            break
+
+    if not selected:
+        return candidates[:needed]
+
+    if verbose:
+        dropped = len(candidates) - len(selected)
+        print(
+            f"[runner][surrogate] trained on {len(history)} rows, "
+            f"selected {len(selected)}/{len(candidates)} candidates (dropped {dropped})"
+        )
+
+    return selected
+
+
+def _time_exceeded(start: float, limit_minutes: float) -> bool:
+    elapsed = time.perf_counter() - start
+    return elapsed >= limit_minutes * 60
+
+
+@dataclass
+class CycleSummary:
+    cycle: int
+    objective: float | None
+    feasibility: float | None
+    hv: float | None
+    stage: str
+
+
+def _stage_rank(stage: str | None, promote_stage: str) -> int:
+    if stage == promote_stage:
+        return 2
+    if stage:
+        return 1
+    return 0
+
+
+def _feasibility_value(entry: Mapping[str, Any]) -> float:
+    return float(entry["evaluation"].get("feasibility", float("inf")))
+
+
+def _oriented_objective(entry: Mapping[str, Any]) -> float:
+    evaluation = entry["evaluation"]
+    objective = evaluation.get("objective")
+    if objective is None:
+        return float("inf")
+    minimize = evaluation.get("minimize_objective", True)
+    value = float(objective)
+    return value if minimize else -value
+
+
+def _prefer_entry(
+    current: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    promote_stage: str,
+) -> Mapping[str, Any]:
+    current_rank = _stage_rank(current["evaluation"].get("stage"), promote_stage)
+    candidate_rank = _stage_rank(candidate["evaluation"].get("stage"), promote_stage)
+    if candidate_rank > current_rank:
+        return candidate
+    if candidate_rank < current_rank:
+        return current
+
+    current_feas = _feasibility_value(current)
+    candidate_feas = _feasibility_value(candidate)
+    if candidate_feas < current_feas:
+        return candidate
+    if candidate_feas > current_feas:
+        return current
+
+    current_obj = _oriented_objective(current)
+    candidate_obj = _oriented_objective(candidate)
+    if candidate_obj < current_obj:
+        return candidate
+    return current
+
+
+def _close_metric(value_a: float | None, value_b: float | None) -> bool:
+    if value_a is None or value_b is None:
+        return value_a is None and value_b is None
+    return math.isclose(value_a, value_b, rel_tol=1e-3, abs_tol=1e-3)
+
+
+def _verify_best_claim(
+    world_model: WorldModelLike,
+    experiment_id: int,
+    cycle_number: int,
+    best_entry: Mapping[str, Any],
+    best_eval: Mapping[str, Any],
+    evaluation_fn: ProblemEvaluator,
+    tool_name: str,
+    best_seed: int,
+    git_sha: str,
+    reproduction_command: str,
+    *,
+    stage: str,
+    metrics_id: int | None,
+) -> str:
+    tool_input = {"params": best_entry["params"], "stage": stage}
+    replay_eval = evaluation_fn(
+        best_entry["params"],
+        stage=stage,
+        use_cache=False,
+    )
+    differences: list[str] = []
+    for metric in ("objective", "feasibility", "hv"):
+        if not _close_metric(best_eval.get(metric), replay_eval.get(metric)):
+            differences.append(metric)
+    status = "SUPPORTED" if not differences else "REFUTED"
+    statement_text = f"Replayed {tool_name} evaluation for design {best_entry.get('design_hash', '')[:8]} at stage {stage}."
+    world_model.log_statement(
+        experiment_id=experiment_id,
+        cycle=cycle_number,
+        stage=stage,
+        text=statement_text,
+        status=status,
+        tool_name=tool_name,
+        tool_input=tool_input,
+        metrics_id=metrics_id,
+        seed=best_seed,
+        git_sha=git_sha,
+        repro_cmd=reproduction_command,
+    )
+    print(
+        f"[runner][verifier] statement status={status} differences={differences} for cycle {cycle_number}"
+    )
+    return status
+
+
+def _latest_evaluations_by_design(
+    aggregated: Sequence[Mapping[str, Any]], promote_stage: str
+) -> dict[str, Mapping[str, Any]]:
+    latest: dict[str, Mapping[str, Any]] = {}
+    for entry in aggregated:
+        design_hash = entry.get("design_hash")
+        if not design_hash:
+            continue
+        existing = latest.get(design_hash)
+        if existing is None:
+            latest[design_hash] = entry
+            continue
+        latest[design_hash] = _prefer_entry(
+            existing,
+            entry,
+            promote_stage,
+        )
+    return latest
+
+
+def _extract_objectives(entry: Mapping[str, Any]) -> tuple[float, float]:
+    metrics = entry["evaluation"]["metrics"]
+    gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
+    aspect = float(metrics["aspect_ratio"])
+    return gradient, aspect
+
+
+def _crowding_distance(
+    entries_by_design: Mapping[str, Mapping[str, Any]],
+) -> dict[str, float]:
+    if not entries_by_design:
+        return {}
+    values: list[tuple[str, float, float]] = []
+    for design_hash, entry in entries_by_design.items():
+        gradient, aspect = _extract_objectives(entry)
+        values.append((design_hash, float(gradient), float(aspect)))
+    distances = {design_hash: 0.0 for design_hash in entries_by_design}
+    if len(values) <= 2:
+        for design_hash in distances:
+            distances[design_hash] = float("inf")
+        return distances
+    sorted_grad = sorted(values, key=lambda item: item[1], reverse=True)
+    grad_values = [item[1] for item in sorted_grad]
+    grad_span = max(max(grad_values) - min(grad_values), 1e-9)
+    distances[sorted_grad[0][0]] = float("inf")
+    distances[sorted_grad[-1][0]] = float("inf")
+    for pos in range(1, len(sorted_grad) - 1):
+        prev_val = sorted_grad[pos - 1][1]
+        next_val = sorted_grad[pos + 1][1]
+        distances[sorted_grad[pos][0]] += abs(next_val - prev_val) / grad_span
+
+    sorted_aspect = sorted(values, key=lambda item: item[2], reverse=False)
+    aspect_values = [item[2] for item in sorted_aspect]
+    aspect_span = max(max(aspect_values) - min(aspect_values), 1e-9)
+    distances[sorted_aspect[0][0]] = float("inf")
+    distances[sorted_aspect[-1][0]] = float("inf")
+    for pos in range(1, len(sorted_aspect) - 1):
+        prev_val = sorted_aspect[pos - 1][2]
+        next_val = sorted_aspect[pos + 1][2]
+        distances[sorted_aspect[pos][0]] += abs(next_val - prev_val) / aspect_span
+    return distances
+
+
+def _rank_candidates_for_promotion(
+    entries_by_design: Mapping[str, Mapping[str, Any]],
+    promote_limit: int,
+    reference_point: Tuple[float, float],
+) -> list[Mapping[str, Any]]:
+    if not entries_by_design:
+        return []
+    summary = tools.summarize_p3_candidates(
+        list(entries_by_design.values()), reference_point=reference_point
+    )
+    ordered_hashes = [entry.design_hash for entry in summary.pareto_entries]
+    ranked: list[Mapping[str, Any]] = [
+        entries_by_design[h] for h in ordered_hashes if h in entries_by_design
+    ]
+    if len(ranked) >= promote_limit:
+        return ranked[:promote_limit]
+    remaining = {
+        design_hash: entry
+        for design_hash, entry in entries_by_design.items()
+        if design_hash not in {entry.design_hash for entry in summary.pareto_entries}
+    }
+    crowding = _crowding_distance(remaining)
+
+    def _sort_key(design_hash: str) -> tuple[float, float, float]:
+        entry = remaining[design_hash]
+        feas = _feasibility_value(entry)
+        feasible_flag = 0.0 if feas <= FEASIBILITY_CUTOFF else 1.0
+        return (
+            feasible_flag,
+            -crowding.get(design_hash, 0.0),
+            feas,
+        )
+
+    for design_hash in sorted(remaining, key=_sort_key):
+        ranked.append(remaining[design_hash])
+        if len(ranked) >= promote_limit:
+            break
+    return ranked
+
+
+def _persist_pareto_archive(
+    *,
+    world_model: memory.WorldModel,
+    experiment_id: int,
+    cycle_number: int,
+    problem: str,
+    entries_by_design: Mapping[str, Mapping[str, Any]],
+    p3_summary: tools.P3Summary,
+    git_sha: str,
+    constellaration_sha: str,
+) -> tuple[Set[str], dict[str, int]]:
+    """Persist Phase 6 Pareto deliverables and return the logged design hashes."""
+
+    logged_hashes: Set[str] = set()
+    archive_rows: list[Mapping[str, Any]] = []
+    metrics_by_hash: dict[str, int] = {}
+    for entry in p3_summary.pareto_entries:
+        design_hash = entry.design_hash
+        latest = entries_by_design.get(design_hash)
+        if latest is None:
+            continue
+        evaluation = latest["evaluation"]
+        candidate_id, metrics_id = world_model.log_candidate(
+            experiment_id=experiment_id,
+            problem=problem,
+            params=latest["params"],
+            seed=int(latest.get("seed", -1)),
+            status=evaluation.get("stage", "unknown"),
+            evaluation=evaluation,
+            design_hash=design_hash,
+            commit=False,
+        )
+        logged_hashes.add(design_hash)
+        metrics_by_hash[design_hash] = metrics_id
+        settings_json = json.dumps(
+            evaluation.get("settings", {}), separators=(",", ":")
+        )
+        archive_rows.append(
+            {
+                "design_hash": design_hash,
+                "fidelity": evaluation.get("stage", "unknown"),
+                "gradient": entry.gradient,
+                "aspect": entry.aspect_ratio,
+                "metrics_id": metrics_id,
+                "git_sha": git_sha,
+                "constellaration_sha": constellaration_sha,
+                "settings_json": settings_json,
+                "seed": int(latest.get("seed", -1)),
+            }
+        )
+        world_model.upsert_pareto(experiment_id, candidate_id)
+    if archive_rows:
+        world_model.record_pareto_archive(
+            experiment_id,
+            cycle_number,
+            archive_rows,
+            commit=False,
+        )
+    return logged_hashes, metrics_by_hash
+
+
+def _relative_objective_improvement(
+    history: list[CycleSummary], lookback: int
+) -> float:
+    if len(history) <= lookback:
+        return 0.0
+    earlier = history[-lookback - 1].objective
+    latest = history[-1].objective
+    if earlier is None or latest is None:
+        return 0.0
+    diff = earlier - latest
+    denom = abs(earlier) if abs(earlier) > 1e-6 else 1.0
+    return float(diff / denom)
+
+
+def _should_transition_s1_to_s2(
+    history: list[CycleSummary], gate_cfg: ai_config.StageGateConfig
+) -> bool:
+    if not history:
+        return False
+    last = history[-1]
+    if last.feasibility is not None:
+        triggered = last.feasibility <= gate_cfg.s1_to_s2_feasibility_margin
+        print(
+            f"[runner][stage-gate] S1→S2 feasibility check: margin={last.feasibility:.5f} "
+            f"<= {gate_cfg.s1_to_s2_feasibility_margin:.5f} -> {triggered}"
+        )
+        if triggered:
+            return True
+    improvement = _relative_objective_improvement(
+        history, gate_cfg.s1_to_s2_lookback_cycles
+    )
+    triggered_improvement = improvement >= gate_cfg.s1_to_s2_objective_improvement
+    print(
+        f"[runner][stage-gate] S1→S2 objective improvement check: "
+        f"{improvement:.4f} >= {gate_cfg.s1_to_s2_objective_improvement:.4f} -> {triggered_improvement}"
+    )
+    return triggered_improvement
+
+
+def _should_transition_s2_to_s3(
+    history: list[CycleSummary],
+    gate_cfg: ai_config.StageGateConfig,
+    governance_cfg: ai_config.GovernanceConfig,
+    world_model: memory.WorldModel,
+    experiment_id: int,
+    current_cycle: int,
+    total_cycles: int,
+) -> bool:
+    avg_delta = world_model.average_recent_hv_delta(
+        experiment_id, governance_cfg.hv_lookback
+    )
+    if avg_delta is not None:
+        triggered_delta = avg_delta <= gate_cfg.s2_to_s3_hv_delta
+        print(
+            f"[runner][stage-gate] S2→S3 average HV delta over "
+            f"{governance_cfg.hv_lookback} cycles: {avg_delta:.4f} <= {gate_cfg.s2_to_s3_hv_delta:.4f} -> {triggered_delta}"
+        )
+        if triggered_delta:
+            return True
+    else:
+        print(
+            f"[runner][stage-gate] insufficient HV delta history ({len(history)} cycles) "
+            f"to evaluate lookback={governance_cfg.hv_lookback}; deferring promotion"
+        )
+    exhausted = current_cycle >= total_cycles
+    print(
+        f"[runner][stage-gate] S2→S3 budget check: cycle={current_cycle} >= total={total_cycles} -> {exhausted}"
+    )
+    return exhausted
+
+
+def _process_worker_initializer() -> None:
+    """Limit OpenMP threads inside process workers (Phase 5 observability safeguard)."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+
+def _evaluate_stage(
+    candidates: Iterable[Mapping[str, Any]],
+    stage: str,
+    budgets: ai_config.BudgetConfig,
+    cycle_start: float,
+    evaluate_fn: ProblemEvaluator,
+    *,
+    sleep_per_eval: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Evaluate candidates at a given fidelity, respecting wall-clock budget."""
+
+    results: list[dict[str, Any]] = []
+    wall_limit = budgets.wall_clock_minutes
+
+    if budgets.n_workers <= 1:
+        for candidate in candidates:
+            if _time_exceeded(cycle_start, wall_limit):
+                break
+            params = candidate["params"]
+            design_id = candidate.get("design_hash") or tools.design_hash(params)
+            evaluation = evaluate_fn(params, stage=stage)
+            results.append(
+                {
+                    "params": params,
+                    "evaluation": evaluation,
+                    "seed": int(candidate["seed"]),
+                    "design_hash": design_id,
+                }
+            )
+            if sleep_per_eval > 0:
+                time.sleep(sleep_per_eval)
+        return results
+
+    future_payloads = {}
+    executor_cls = (
+        ThreadPoolExecutor if budgets.pool_type == "thread" else ProcessPoolExecutor
+    )
+    executor_kwargs: dict[str, Any] = {"max_workers": budgets.n_workers}
+    if executor_cls is ProcessPoolExecutor:
+        executor_kwargs["initializer"] = _process_worker_initializer
+    with executor_cls(**executor_kwargs) as executor:
+        for candidate in candidates:
+            if _time_exceeded(cycle_start, wall_limit):
+                break
+            design_id = candidate.get("design_hash")
+            future = executor.submit(evaluate_fn, candidate["params"], stage=stage)
+            future_payloads[future] = (candidate, design_id)
+
+        for future in as_completed(future_payloads):
+            candidate, design_id = future_payloads[future]
+            exc = future.exception()
+            if exc is not None:
+                design_hash = design_id or tools.design_hash(candidate["params"])
+                print(
+                    f"[runner][stage-eval] Failed evaluation for design {design_hash} "
+                    f"(seed={candidate['seed']} stage={stage}): {exc}"
+                )
+                continue
+
+            results.append(
+                {
+                    "params": candidate["params"],
+                    "evaluation": future.result(),
+                    "seed": int(candidate["seed"]),
+                    "design_hash": design_id or tools.design_hash(candidate["params"]),
+                }
+            )
+    return results
+
+
+def _cache_stats_log_path(report_dir: Path | str) -> Path:
+    return Path(report_dir) / "cache_stats.jsonl"
+
+
+def _maybe_log_cache_stats(
+    runtime: RunnerCLIConfig | None,
+    cfg: ai_config.ExperimentConfig,
+    cycle_index: int,
+    stage: str,
+    stats: Mapping[str, int],
+) -> None:
+    """Emit per-cycle cache stats for Phase 5 observability (see ai_scientist/roadmap.md & ai_scientist/improvement-plan.md)."""
+    if not (runtime and runtime.log_cache_stats):
+        return
+    entry = {
+        "cycle": cycle_index + 1,
+        "stage": stage,
+        "timestamp": datetime.utcnow().isoformat(),
+        "stats": stats,
+    }
+    log_path = _cache_stats_log_path(cfg.reporting_dir)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+def _run_cycle(
+    cfg: ai_config.ExperimentConfig,
+    cycle_index: int,
+    world_model: memory.WorldModel,
+    experiment_id: int,
+    governance_stage: str,
+    git_sha: str,
+    constellaration_sha: str,
+    *,
+    runtime: RunnerCLIConfig | None = None,
+    budget_controller: BudgetController,
+) -> tuple[Path | None, dict[str, Any] | None, tools.P3Summary | None]:
+    tool_name = _problem_tool_name(cfg.problem)
+    base_evaluate = _problem_evaluator(cfg.problem)
+    evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
+    cycle_start = time.perf_counter()
+    cycle_number = cycle_index + 1
+    sleep_per_eval = 0.05 if runtime and runtime.slow else 0.0
+    screen_only = bool(runtime and runtime.screen_only)
+    budget_snapshot = budget_controller.snapshot()
+    active_budgets = replace(
+        cfg.budgets,
+        screen_evals_per_cycle=budget_snapshot.screen_evals_per_cycle,
+        promote_top_k=budget_snapshot.promote_top_k,
+        max_high_fidelity_evals_per_cycle=budget_snapshot.max_high_fidelity_evals_per_cycle,
+    )
+    if cfg.adaptive_budgets.enabled and runtime and runtime.verbose:
+        print(
+            f"[runner][budget] cycle={cycle_number} override "
+            f"screen={budget_snapshot.screen_evals_per_cycle} "
+            f"promote_top_k={budget_snapshot.promote_top_k} "
+            f"max_high_fidelity={budget_snapshot.max_high_fidelity_evals_per_cycle}"
+        )
+    cache_hit_rate = 0.0
+    pool_size = _surrogate_candidate_pool_size(
+        budget_snapshot.screen_evals_per_cycle,
+        cfg.proposal_mix.surrogate_pool_multiplier,
+    )
+    sampler_count = 0
+    random_count = 0
+    if pool_size <= 0:
+        if runtime and runtime.verbose:
+            print(
+                f"[runner][cycle={cycle_number}] screen budget zero; skipping candidate generation"
+            )
+        candidate_pool: list[Mapping[str, Any]] = []
+        candidates: list[Mapping[str, Any]] = []
+    else:
+        candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
+            cfg,
+            cycle_index,
+            world_model,
+            experiment_id,
+            screen_budget=budget_snapshot.screen_evals_per_cycle,
+            total_candidates=pool_size,
+        )
+        if runtime and runtime.verbose:
+            print(
+                f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count}"
+            )
+        candidates = _surrogate_rank_screen_candidates(
+            cfg,
+            budget_snapshot.screen_evals_per_cycle,
+            candidate_pool,
+            world_model,
+            verbose=bool(runtime and runtime.verbose),
+        )
+
+    screen_stage = cfg.fidelity_ladder.screen
+    if candidates:
+        screen_results = _evaluate_stage(
+            candidates,
+            stage=screen_stage,
+            budgets=active_budgets,
+            cycle_start=cycle_start,
+            evaluate_fn=evaluate_fn,
+            sleep_per_eval=sleep_per_eval,
+        )
+    else:
+        screen_results = []
+    screen_cache_stats = tools.get_cache_stats(screen_stage)
+    cache_hit_rate = budget_controller.capture_cache_hit_rate(
+        screen_stage, stats=screen_cache_stats
+    )
+    _maybe_log_cache_stats(runtime, cfg, cycle_index, screen_stage, screen_cache_stats)
+
+    screen_design_map = _latest_evaluations_by_design(screen_results, screen_stage)
+    screen_summary = tools.summarize_p3_candidates(
+        list(screen_design_map.values()), reference_point=P3_REFERENCE_POINT
+    )
+    allow_promote = (
+        screen_summary.feasible_count >= cfg.governance.min_feasible_for_promotion
+    )
+    promote_limit = 0
+    to_promote: list[Mapping[str, Any]] = []
+    if allow_promote and screen_design_map:
+        prioritized_screen = _rank_candidates_for_promotion(
+            screen_design_map, active_budgets.promote_top_k, P3_REFERENCE_POINT
+        )
+        promote_limit = min(
+            active_budgets.promote_top_k,
+            active_budgets.max_high_fidelity_evals_per_cycle,
+            len(screen_design_map),
+        )
+        to_promote = prioritized_screen[:promote_limit]
+    elif not allow_promote and screen_design_map and runtime and runtime.verbose:
+        print(
+            "[runner][stage-gate] insufficient feasible screen results "
+            f"({screen_summary.feasible_count} < {cfg.governance.min_feasible_for_promotion}); skipping promotions"
+        )
+
+    promote_stage = cfg.fidelity_ladder.promote
+    promote_results: list[dict[str, Any]] = []
+    if not screen_only and promote_limit > 0:
+        promote_results = _evaluate_stage(
+            to_promote,
+            stage=promote_stage,
+            budgets=active_budgets,
+            cycle_start=cycle_start,
+            evaluate_fn=evaluate_fn,
+            sleep_per_eval=sleep_per_eval,
+        )
+        promote_cache_stats = tools.get_cache_stats(promote_stage)
+        _maybe_log_cache_stats(
+            runtime, cfg, cycle_index, promote_stage, promote_cache_stats
+        )
+    elif screen_only:
+        print("[runner] screen-only flag active; skipping promotion evaluations.")
+
+    aggregated = screen_results + promote_results
+    if not aggregated:
+        world_model.record_stage_history(
+            experiment_id=experiment_id,
+            cycle=cycle_number,
+            stage=governance_stage,
+        )
+        return None, None, None
+
+    latest_by_design = _latest_evaluations_by_design(
+        aggregated, cfg.fidelity_ladder.promote
+    )
+    if not latest_by_design:
+        world_model.record_stage_history(
+            experiment_id=experiment_id,
+            cycle=cycle_number,
+            stage=governance_stage,
+        )
+        return None, None, None
+
+    p3_summary = tools.summarize_p3_candidates(
+        list(latest_by_design.values()), reference_point=P3_REFERENCE_POINT
+    )
+    total_designs = len(latest_by_design)
+    feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))
+    p3_summary_path = adaptation_helpers.write_p3_summary(
+        base_dir=cfg.reporting_dir,
+        cycle=cycle_number,
+        summary=p3_summary,
+    )
+
+    best_entry = min(latest_by_design.values(), key=_oriented_objective)
+    best_eval = dict(best_entry["evaluation"])
+    metrics_payload = best_eval.setdefault("metrics", {})
+    metrics_payload["cycle_hv"] = p3_summary.hv_score
+    best_eval["cycle_hv"] = p3_summary.hv_score
+    best_eval["design_hash"] = best_entry.get("design_hash", "")
+    cycle_duration = time.perf_counter() - cycle_start
+    best_seed = int(best_entry.get("seed", cfg.random_seed))
+    previous_baseline = world_model.previous_best_hv(experiment_id, cycle_number)
+    current_hv = float(p3_summary.hv_score)
+    hv_delta = (
+        current_hv - previous_baseline if previous_baseline is not None else current_hv
+    )
+    budget_controller.record_feedback(
+        CycleBudgetFeedback(
+            hv_delta=hv_delta,
+            feasibility_rate=feasibility_rate,
+            cache_hit_rate=cache_hit_rate,
+        )
+    )
+    best_metrics_id: int | None = None
+    logged_hashes: Set[str] = set()
+    config_snapshot = dict(
+        _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha)
+    )
+    config_snapshot["cycle_seed"] = best_seed
+    with world_model.transaction():
+        world_model.record_cycle(
+            experiment_id=experiment_id,
+            cycle_number=cycle_number,
+            screen_evals=len(screen_results),
+            promoted_evals=len(promote_results),
+            high_fidelity_evals=len(promote_results),
+            wall_seconds=cycle_duration,
+            best_params=best_entry["params"],
+            best_evaluation=best_eval,
+            seed=best_seed,
+            log_best_candidate=False,
+            problem=cfg.problem,
+            commit=False,
+        )
+        world_model.record_cycle_hv(
+            experiment_id=experiment_id,
+            cycle_number=cycle_number,
+            hv_score=p3_summary.hv_score,
+            reference_point=p3_summary.reference_point,
+            pareto_entries=[entry.as_mapping() for entry in p3_summary.pareto_entries],
+            n_feasible=p3_summary.feasible_count,
+            n_archive=p3_summary.archive_size,
+            hv_lookback=cfg.governance.hv_lookback,
+            commit=False,
+        )
+        logged_hashes, metrics_by_hash = _persist_pareto_archive(
+            world_model=world_model,
+            experiment_id=experiment_id,
+            cycle_number=cycle_number,
+            problem=cfg.problem,
+            entries_by_design=latest_by_design,
+            p3_summary=p3_summary,
+            git_sha=git_sha,
+            constellaration_sha=constellaration_sha,
+        )
+        if (
+            best_entry.get("design_hash")
+            and best_entry["design_hash"] not in logged_hashes
+        ):
+            _, metrics_id = world_model.log_candidate(
+                experiment_id=experiment_id,
+                problem=cfg.problem,
+                params=best_entry["params"],
+                seed=best_seed,
+                status=best_eval.get("stage", "unknown"),
+                evaluation=best_eval,
+                design_hash=best_entry["design_hash"],
+                commit=False,
+            )
+            best_metrics_id = metrics_id
+        world_model.record_deterministic_snapshot(
+            experiment_id=experiment_id,
+            cycle_number=cycle_number,
+            snapshot=config_snapshot,
+            constellaration_sha=constellaration_sha,
+            seed=best_seed,
+            commit=False,
+        )
+    if best_metrics_id is None:
+        best_metrics_id = metrics_by_hash.get(best_entry.get("design_hash", ""))
+    repro_command = (
+        f"python -m ai_scientist.runner --config {cfg.source_config} --problem {cfg.problem} "
+        f"--cycles {cfg.cycles} --eval-budget {active_budgets.screen_evals_per_cycle} "
+        f"--workers {active_budgets.n_workers} --pool-type {active_budgets.pool_type}"
+    )
+    env_block = (
+        f"- Python: {sys.version.splitlines()[0]}\n"
+        f"- Platform: {platform.platform()}\n"
+        f"- Executable: {sys.executable}\n"
+        f"- Host: {platform.node()}\n"
+        f"- CPU: {platform.processor() or 'unknown'} | cores: {os.cpu_count() or 'unknown'}\n"
+    )
+    pareto_entries = p3_summary.pareto_entries
+    if pareto_entries:
+        pareto_lines = "\n".join(
+            f"- design {entry.design_hash[:8]} seed={entry.seed} stage={entry.stage}: "
+            f"gradient={entry.gradient:.4f}, aspect={entry.aspect_ratio:.4f}, "
+            f"feasibility={entry.feasibility:.4f}"
+            for entry in pareto_entries
+        )
+    else:
+        pareto_lines = "- none (pareto front empty)"
+    if pareto_entries:
+        replay_entry = pareto_entries[0]
+        reproduction_snippet = (
+            "```bash\n"
+            "python - <<'PY'\n"
+            "import json, sqlite3\n"
+            "from ai_scientist import tools\n"
+            f"conn = sqlite3.connect('{cfg.memory_db}')\n"
+            "row = conn.execute(\n"
+            '    "SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1",\n'
+            f"    ('{replay_entry.design_hash}',),\n"
+            ").fetchone()\n"
+            "assert row, 'Design hash not found in world model'\n"
+            "params = json.loads(row[0])\n"
+            f"print(tools.{tool_name}(params, stage='{replay_entry.stage or cfg.fidelity_ladder.promote}'))\n"
+            "PY\n"
+            "```\n"
+        )
+    else:
+        reproduction_snippet = (
+            "No Pareto archive entries available to replay this cycle.\n"
+        )
+    stage_label = best_eval.get("stage") or cfg.fidelity_ladder.promote
+    reproduction_steps = [
+        repro_command,
+        f"git checkout {git_sha}",
+        f"(cd constellaration && git checkout {constellaration_sha})",
+        f"tools.{tool_name}(params, stage='{stage_label}')",
+    ]
+    tool_input = {"params": best_entry["params"], "stage": stage_label}
+    tool_input_hash = memory.hash_payload(tool_input)
+    statement_status = _verify_best_claim(
+        world_model=world_model,
+        experiment_id=experiment_id,
+        cycle_number=cycle_number,
+        best_entry=best_entry,
+        best_eval=best_eval,
+        evaluation_fn=evaluate_fn,
+        tool_name=tool_name,
+        best_seed=best_seed,
+        git_sha=git_sha,
+        reproduction_command=repro_command,
+        stage=stage_label,
+        metrics_id=best_metrics_id,
+    )
+    preference_pairs_path = adaptation_helpers.append_preference_pair(
+        base_dir=cfg.reporting_dir,
+        cycle=cycle_number,
+        stage=stage_label,
+        status=statement_status,
+        tool_name=tool_name,
+        tool_input_hash=tool_input_hash,
+        reproduction_command=repro_command,
+        metrics=best_eval.get("metrics", {}),
+        design_hash=best_entry.get("design_hash"),
+        problem=cfg.problem,
+        seed=best_seed,
+    )
+    trajectory_path = adaptation_helpers.append_trajectory_entry(
+        base_dir=cfg.reporting_dir,
+        cycle=cycle_number,
+        stage=stage_label,
+        seed=best_seed,
+        tool_name=tool_name,
+        tool_input_hash=tool_input_hash,
+        reproduction_steps=reproduction_steps,
+        reproduction_snippet=reproduction_snippet,
+        reproduction_command=repro_command,
+        params=best_entry["params"],
+        metrics=best_eval.get("metrics", {}),
+        problem=cfg.problem,
+        design_hash=best_entry.get("design_hash", ""),
+    )
+    preference_pairs_anchor = _repo_relative(preference_pairs_path)
+    p3_summary_anchor = _repo_relative(p3_summary_path)
+    trajectory_anchor = _repo_relative(trajectory_path)
+    baseline_display = (
+        f"{previous_baseline:.6f}" if previous_baseline is not None else "n/a"
+    )
+    preference_pairs_display = preference_pairs_anchor or preference_pairs_path.name
+    trajectory_display = trajectory_anchor or trajectory_path.name
+    p3_summary_display = p3_summary_anchor or p3_summary_path.name
+    hv_text = (
+        f"Cycle {cycle_number} hypervolume {current_hv:.6f} vs baseline "
+        f"{baseline_display} (delta {hv_delta:+.6f}) recorded in cycle_hv "
+        f"and adaptation logs {preference_pairs_display} and {trajectory_display} "
+        f"with summary {p3_summary_display} (docs/TASKS_CODEX_MINI.md:238; docs/MASTER_PLAN_AI_SCIENTIST.md:226-247)."
+    )
+    hv_tool_input = {
+        "cycle": cycle_number,
+        "stage": stage_label,
+        "current_hv": current_hv,
+        "baseline_hv": previous_baseline,
+        "delta": hv_delta,
+        "preference_pairs_anchor": preference_pairs_anchor,
+        "p3_summary_anchor": p3_summary_anchor,
+        "trajectory_anchor": trajectory_anchor,
+    }
+    world_model.log_statement(
+        experiment_id=experiment_id,
+        cycle=cycle_number,
+        stage=stage_label,
+        text=hv_text,
+        status="PENDING",
+        tool_name="hv_delta_comparison",
+        tool_input=hv_tool_input,
+        metrics_id=best_metrics_id,
+        seed=best_seed,
+        git_sha=git_sha,
+        repro_cmd=repro_command,
+    )
+    adaptation_helpers.append_preference_pair(
+        base_dir=cfg.reporting_dir,
+        cycle=cycle_number,
+        stage=stage_label,
+        status=statement_status,
+        tool_name=tool_name,
+        tool_input_hash=tool_input_hash,
+        reproduction_command=repro_command,
+        metrics=best_eval.get("metrics", {}),
+        design_hash=best_entry.get("design_hash"),
+        problem=cfg.problem,
+        seed=best_seed,
+    )
+    statements = world_model.statements_for_cycle(experiment_id, cycle_number)
+    figure_path = reporting.save_pareto_figure(
+        p3_summary.pareto_entries,
+        cfg.reporting_dir,
+        title=cfg.problem,
+        cycle_index=cycle_index,
+    )
+    figure_paths = [figure_path] if figure_path else []
+    metrics_payload = best_eval.get("metrics", {})
+    metrics_path = adaptation_helpers.write_metrics_snapshot(
+        base_dir=cfg.reporting_dir,
+        cycle=cycle_number,
+        metrics=metrics_payload,
+    )
+    artifact_entries: list[tuple[str, Path]] = [("metrics_snapshot", metrics_path)]
+    world_model.log_artifact(
+        experiment_id=experiment_id,
+        path=metrics_path,
+        kind="metrics_snapshot",
+    )
+    artifact_entries.append(("p3_summary", p3_summary_path))
+    world_model.log_artifact(
+        experiment_id=experiment_id,
+        path=p3_summary_path,
+        kind="p3_summary",
+    )
+    artifact_entries.append(("preference_pairs", preference_pairs_path))
+    world_model.log_artifact(
+        experiment_id=experiment_id,
+        path=preference_pairs_path,
+        kind="preference_pairs",
+    )
+    artifact_entries.append(("trajectory_entry", trajectory_path))
+    world_model.log_artifact(
+        experiment_id=experiment_id,
+        path=trajectory_path,
+        kind="trajectory_entry",
+    )
+    if figure_path:
+        artifact_entries.append(("pareto_figure", figure_path))
+        world_model.log_artifact(
+            experiment_id=experiment_id,
+            path=figure_path,
+            kind="pareto_figure",
+        )
+    world_model.record_stage_history(
+        experiment_id=experiment_id,
+        cycle=cycle_number,
+        stage=governance_stage,
+    )
+    stage_history_entries = world_model.stage_history(experiment_id)
+    adaptation_figures = reporting.collect_adaptation_figures(cfg.reporting_dir)
+    anchor_candidates = (
+        ("preference_pairs", preference_pairs_anchor),
+        ("p3_summary", p3_summary_anchor),
+        ("trajectory", trajectory_anchor),
+    )
+    positioning_artifacts = {
+        name: anchor for name, anchor in anchor_candidates if anchor is not None
+    }
+    if not positioning_artifacts:
+        positioning_artifacts = None
+    references = [
+        "docs/TASKS_CODEX_MINI.md:200-248",
+        "docs/TASKS_CODEX_MINI.md:206-238",
+        "docs/MASTER_PLAN_AI_SCIENTIST.md:247-368",
+    ]
+    for anchor in (preference_pairs_anchor, p3_summary_anchor, trajectory_anchor):
+        if anchor:
+            references.append(anchor)
+    reproduction_steps = [
+        repro_command,
+        f"git checkout {git_sha}",
+        f"(cd constellaration && git checkout {constellaration_sha})",
+        f"tools.{tool_name}(params, stage='{stage_label}')",
+    ]
+    content = reporting.build_cycle_report(
+        cycle_index=cycle_index,
+        problem=cfg.problem,
+        screened=len(screen_results),
+        promoted=len(promote_results),
+        governance_stage=governance_stage,
+        best_metrics=best_eval["metrics"],
+        config_snapshot=config_snapshot,
+        reproduction_steps=reproduction_steps,
+        reproduction_snippet=reproduction_snippet,
+        environment_block=env_block,
+        pareto_lines=pareto_lines,
+        p3_summary={
+            "hv_score": p3_summary.hv_score,
+            "reference_point": p3_summary.reference_point,
+            "feasible_count": p3_summary.feasible_count,
+            "archive_size": p3_summary.archive_size,
+        },
+        statements=statements,
+        references=references,
+        positioning_artifacts=positioning_artifacts,
+        stage_history=stage_history_entries,
+        artifact_entries=artifact_entries,
+        adaptation_figures=adaptation_figures,
+        figure_paths=figure_paths,
+        out_dir=cfg.reporting_dir,
+    )
+
+    title = f"{cfg.problem}_cycle_{cycle_index + 1}"
+    report_path = reporting.write_report(title, content, out_dir=cfg.reporting_dir)
+    return report_path, best_eval, p3_summary
+
+
+def run(
+    cfg: ai_config.ExperimentConfig, runtime: RunnerCLIConfig | None = None
+) -> None:
+    index_status = rag.ensure_index()
+    runtime_label = (
+        f"screen_only={runtime.screen_only} promote_only={runtime.promote_only} "
+        f"log_cache_stats={runtime.log_cache_stats} slow={runtime.slow} "
+        f"planner={runtime.planner} preset={runtime.run_preset or 'none'}"
+        if runtime
+        else "default"
+    )
+    print(
+        f"[runner] RAG index ready: {index_status.chunks_indexed} chunks ({index_status.index_path}); runtime={runtime_label}"
+    )
+    tools.clear_evaluation_cache()
+    planner_mode = (
+        runtime.planner.lower() if runtime and runtime.planner else "deterministic"
+    )
+    planning_agent = ai_planner.PlanningAgent() if planner_mode == "agent" else None
+    budget_controller = BudgetController(cfg.budgets, cfg.adaptive_budgets)
+    last_p3_summary: tools.P3Summary | None = None
+    with memory.WorldModel(cfg.memory_db) as world_model:
+        git_sha = _resolve_git_sha()
+        constellaration_sha = _resolve_git_sha("constellaration")
+        experiment_id = world_model.start_experiment(
+            _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha),
+            git_sha,
+            constellaration_sha=constellaration_sha,
+        )
+        governance_stage = "s1"
+        if runtime and runtime.promote_only:
+            governance_stage = "s2"
+            print("[runner] promote-only flag engaged; starting governance in S2.")
+        stage_history: list[CycleSummary] = []
+        last_best_objective: float | None = None
+        for idx in range(cfg.cycles):
+            print(
+                f"[runner] starting cycle {idx + 1} stage={governance_stage.upper()} "
+                f"screen_budget={cfg.budgets.screen_evals_per_cycle}"
+            )
+            if planning_agent:
+                stage_records = world_model.stage_history(experiment_id)
+                stage_payload = [
+                    {
+                        "cycle": entry.cycle,
+                        "stage": entry.stage,
+                        "selected_at": entry.selected_at,
+                    }
+                    for entry in stage_records
+                ]
+                plan_outcome = planning_agent.plan_cycle(
+                    cfg=cfg,
+                    cycle_index=idx,
+                    stage_history=stage_payload,
+                    last_summary=last_p3_summary,
+                )
+                context_snapshot = json.dumps(plan_outcome.context, indent=2)
+                print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
+            report_path, best_eval, p3_summary = _run_cycle(
+                cfg,
+                idx,
+                world_model,
+                experiment_id,
+                governance_stage,
+                git_sha,
+                constellaration_sha,
+                runtime=runtime,
+                budget_controller=budget_controller,
+            )
+            last_p3_summary = p3_summary
+            if report_path:
+                print(f"[runner] cycle {idx + 1} report saved to {report_path}")
+            else:
+                print(f"[runner] cycle {idx + 1} aborted (wall-clock or budget).")
+            summary = CycleSummary(
+                cycle=idx + 1,
+                objective=best_eval.get("objective") if best_eval else None,
+                feasibility=best_eval.get("feasibility") if best_eval else None,
+                hv=best_eval.get("cycle_hv") if best_eval else None,
+                stage=governance_stage,
+            )
+            stage_history.append(summary)
+            if best_eval:
+                current_objective = best_eval.get("objective")
+                reward_diff = 0.0
+                if current_objective is not None and last_best_objective is not None:
+                    reward_diff = float(current_objective) - float(last_best_objective)
+                adaptation_helpers.append_preference_record(
+                    base_dir=cfg.reporting_dir,
+                    cycle=idx + 1,
+                    stage=governance_stage,
+                    candidate_hash=best_eval.get("design_hash", "") or "",
+                    reward_diff=reward_diff,
+                )
+                if current_objective is not None:
+                    last_best_objective = float(current_objective)
+            next_stage = governance_stage
+            if governance_stage == "s1":
+                if _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
+                    next_stage = "s2"
+                    print(
+                        f"[runner][stage-gate] governance stage advanced to S2 after cycle {idx + 1}"
+                    )
+            elif governance_stage == "s2":
+                if _should_transition_s2_to_s3(
+                    stage_history,
+                    cfg.stage_gates,
+                    cfg.governance,
+                    world_model,
+                    experiment_id,
+                    idx + 1,
+                    cfg.cycles,
+                ):
+                    next_stage = "s3"
+                    print(
+                        f"[runner][stage-gate] governance stage advanced to S3 after cycle {idx + 1}"
+                    )
+            governance_stage = next_stage
+        batch_summary_path = _export_batch_reports(cfg.reporting_dir, stage_history)
+        world_model.log_artifact(
+            experiment_id=experiment_id,
+            path=batch_summary_path,
+            kind="batch_summary",
+        )
+        usage = world_model.budget_usage(experiment_id)
+        print(
+            f"[runner] logged {usage.screen_evals} screen + {usage.promoted_evals} promote evaluations ("
+            f"{usage.high_fidelity_evals} high-fidelity) into {cfg.memory_db}",
+        )
+
+
+def _serialize_experiment_config(
+    cfg: ai_config.ExperimentConfig, constellaration_sha: str | None = None
+) -> dict[str, Any]:
+    boundary_template = asdict(cfg.boundary_template)
+    seed_path = boundary_template.get("seed_path")
+    if seed_path is not None:
+        boundary_template["seed_path"] = str(seed_path)
+    return {
+        "problem": cfg.problem,
+        "cycles": cfg.cycles,
+        "random_seed": cfg.random_seed,
+        "budgets": asdict(cfg.budgets),
+        "adaptive_budgets": asdict(cfg.adaptive_budgets),
+        "proposal_mix": asdict(cfg.proposal_mix),
+        "fidelity_ladder": asdict(cfg.fidelity_ladder),
+        "boundary_template": boundary_template,
+        "stage_gates": asdict(cfg.stage_gates),
+        "governance": asdict(cfg.governance),
+        "source_config": str(cfg.source_config),
+        "reporting_dir": str(cfg.reporting_dir),
+        "memory_db": str(cfg.memory_db),
+        "constellaration_sha": constellaration_sha or "unknown",
+    }
+
+
+_RUN_PRESETS_PATH = Path("configs/run_presets.yaml")
+
+
+def _load_run_presets(path: Path | str | None = None) -> dict[str, dict[str, bool]]:
+    target = Path(path or _RUN_PRESETS_PATH)
+    if not target.exists():
+        return {}
+    raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    presets: dict[str, dict[str, bool]] = {}
+    for key, values in raw.items():
+        if not isinstance(values, dict):
+            continue
+        presets[key] = {
+            "screen_only": bool(values.get("screen_only", False)),
+            "promote_only": bool(values.get("promote_only", False)),
+            "slow": bool(values.get("slow", False)),
+        }
+    return presets
+
+
+def _apply_run_preset(cli: RunnerCLIConfig) -> RunnerCLIConfig:
+    preset_name = cli.run_preset or os.getenv("AI_SCIENTIST_RUN_PRESET")
+    if not preset_name:
+        return cli
+    presets = _load_run_presets()
+    preset = presets.get(preset_name)
+    if preset is None:
+        raise ValueError(
+            "Unknown run preset '%s'; available presets are %s."
+            % (preset_name, ", ".join(sorted(presets or ["<none>"])))
+        )
+    return replace(
+        cli,
+        screen_only=cli.screen_only or preset["screen_only"],
+        promote_only=cli.promote_only or preset["promote_only"],
+        slow=cli.slow or preset["slow"],
+    )
+
+
+def _export_batch_reports(
+    report_dir: Path | str, history: Sequence[CycleSummary]
+) -> Path:
+    base_path = Path(report_dir)
+    figures_dir = base_path / "figures"
+    stage_dir = figures_dir / "batch_stage_summaries"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    stage_entries: dict[str, list[CycleSummary]] = {}
+    for cycle_summary in history:
+        stage_entries.setdefault(cycle_summary.stage, []).append(cycle_summary)
+    stage_refs: dict[str, dict[str, Any]] = {}
+    for stage, entries in stage_entries.items():
+        objectives = [
+            entry.objective for entry in entries if entry.objective is not None
+        ]
+        feasibilities = [
+            entry.feasibility for entry in entries if entry.feasibility is not None
+        ]
+        hv_values = [entry.hv for entry in entries if entry.hv is not None]
+        stage_payload = {
+            "stage": stage,
+            "cycles": len(entries),
+            "best_objective": max(objectives) if objectives else None,
+            "best_feasibility": min(feasibilities) if feasibilities else None,
+            "max_hv": max(hv_values) if hv_values else None,
+            "entries": [
+                {
+                    "cycle": entry.cycle,
+                    "objective": entry.objective,
+                    "feasibility": entry.feasibility,
+                    "hv": entry.hv,
+                }
+                for entry in entries
+            ],
+        }
+        stage_path = stage_dir / f"{stage}_summary.json"
+        stage_path.write_text(json.dumps(stage_payload, indent=2), encoding="utf-8")
+        stage_refs[stage] = {
+            "cycles": len(entries),
+            "path": str(stage_path.resolve()),
+        }
+    summary_payload = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "total_cycles": len(history),
+        "stage_files": stage_refs,
+    }
+    summary_path = figures_dir / "batch_summary.json"
+    summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    return summary_path
+
+
+def _resolve_git_sha(repo_path: str | None = None) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", repo_path, "rev-parse", "HEAD"]
+            if repo_path
+            else ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return "unknown"
+
+
+def main() -> None:
+    try:
+        cli = _apply_run_preset(parse_args())
+        _validate_runtime_flags(cli)
+    except ValueError as exc:
+        print(f"[runner] invalid CLI flags: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    experiment = ai_config.load_experiment_config(cli.config_path)
+    if cli.problem:
+        experiment = replace(experiment, problem=cli.problem)
+    if cli.cycles:
+        experiment = replace(experiment, cycles=cli.cycles)
+    if cli.memory_db:
+        experiment = replace(experiment, memory_db=cli.memory_db)
+    if cli.eval_budget is not None:
+        experiment = replace(
+            experiment,
+            budgets=replace(experiment.budgets, screen_evals_per_cycle=cli.eval_budget),
+        )
+    if cli.workers is not None:
+        experiment = replace(
+            experiment,
+            budgets=replace(experiment.budgets, n_workers=cli.workers),
+        )
+    if cli.pool_type is not None:
+        experiment = replace(
+            experiment,
+            budgets=replace(experiment.budgets, pool_type=cli.pool_type),
+        )
+    if cli.slow:
+        experiment = replace(
+            experiment,
+            budgets=replace(
+                experiment.budgets,
+                wall_clock_minutes=experiment.budgets.wall_clock_minutes * 1.5,
+            ),
+        )
+    preset_label = cli.run_preset or os.getenv("AI_SCIENTIST_RUN_PRESET") or "none"
+    print(
+        f"[runner] starting problem={experiment.problem} cycles={experiment.cycles} "
+        f"screen_budget={experiment.budgets.screen_evals_per_cycle} "
+        f"screen_only={cli.screen_only} promote_only={cli.promote_only} "
+        f"log_cache_stats={cli.log_cache_stats} slow={cli.slow} preset={preset_label}"
+    )
+    run(experiment, runtime=cli)
+
+
+if __name__ == "__main__":
+    main()

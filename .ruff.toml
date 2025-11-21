@@ -1,0 +1,1 @@
+exclude = ["constellaration", ".venv", "vmecpp", "orchestration", "tests/orchestration"]

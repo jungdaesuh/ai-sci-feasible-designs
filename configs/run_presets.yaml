@@ -1,0 +1,19 @@
+defaults:
+  screen_only: false
+  promote_only: false
+  slow: false
+
+screen_only:
+  screen_only: true
+  promote_only: false
+  slow: false
+
+promote_only:
+  screen_only: false
+  promote_only: true
+  slow: true
+
+slow_screen:
+  screen_only: true
+  promote_only: false
+  slow: true

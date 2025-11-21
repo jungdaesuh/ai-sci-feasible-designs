@@ -1,0 +1,16 @@
+{
+  "args": {
+    "tag": "demo_smoke",
+    "budget": 2,
+    "seed": 7,
+    "fidelity": "very_low_fidelity",
+    "step_scale": 0.01,
+    "scale_decay": 0.97,
+    "init_A": 4.0,
+    "init_E": 1.5,
+    "init_iota": 1.2,
+    "init_nfp": 3
+  },
+  "git_commit": "ab0f7bd9e8117b9e4e30176b6bfc7b253275cfb2",
+  "problem": "P1"
+}

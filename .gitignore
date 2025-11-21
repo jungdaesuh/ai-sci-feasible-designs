@@ -1,0 +1,21 @@
+# Runtime artifacts (kept out of VCS)
+artifacts/
+reports/
+.cache/
+
+# Logs
+constellaration/runs/*.jsonl
+
+# Python venvs
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*/__pycache__/
+*.py[cod]
+
+# OS/editor junk
+.DS_Store
+*.swp
+*.swo

@@ -1,0 +1,51 @@
+model:
+  base_url: http://127.0.0.1
+  # instruct_model: kimi-k2-instruct
+  instruct_model: "kwaipilot/kat-coder-pro:free-short-loop"
+  # thinking_model: kimi-k2-thinking
+  thinking_model: "kwaipilot/kat-coder-pro:free"
+  request_timeout_seconds: 120
+  rate_limit_per_minute: 240
+  context_length: 256000 # kwaipilot/kat-coder-pro:free context window
+  dtype: bf16 # Stats expected by Phase 1 detection
+  tensor_parallel: 1
+  provider: openrouter
+  providers:
+    openrouter:
+      base_url: https://openrouter.ai/api/v1
+      chat_path: /chat/completions
+      auth_env: OPENROUTER_API_KEY
+      # default_model: kimi-k2-instruct
+      default_model: "kwaipilot/kat-coder-pro:free"
+      extra_headers:
+        HTTP-Referer: https://openrouter.ai/docs
+        X-Title: "ConStellaration K2"
+    moonshot:
+      base_url: https://api.moonshot.ai/v1
+      chat_path: /chat/completions
+      auth_env: MOONSHOT_API_KEY
+      default_model: kimi-k2-0711-preview
+    streamlake:
+      base_url: https://wanqing.streamlakeapi.com/api/gateway/v1/endpoints
+      chat_path: /chat/completions
+      auth_env: WQ_API_KEY
+  agent_gates:
+    "kwaipilot/kat-coder-pro:free-short-loop":
+      provider_model: "kwaipilot/kat-coder-pro:free"
+      allowed_tools:
+        - make_boundary
+        - evaluate_p1
+        - evaluate_p2
+        - evaluate_p3
+        - log_citation
+        - write_report
+      system_prompt: "Focus on short-loop tool usage and cite docs/MASTER_PLAN_AI_SCIENTIST.md when writing the report."
+    "kwaipilot/kat-coder-pro:free":
+      allowed_tools:
+        - make_boundary
+        - evaluate_p1
+        - evaluate_p2
+        - evaluate_p3
+        - retrieve_rag
+        - write_report
+      system_prompt: "Synthesize cycle-level summaries, reference docs/TASKS_CODEX_MINI.md:157-190, and plan the next wave."
