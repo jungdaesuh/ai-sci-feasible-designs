@@ -151,12 +151,14 @@ def _derive_schema_from_params(
     return FlattenSchema(mpol=mpol, ntor=ntor, schema_version=schema_version, rounding=rounding)
 
 
-def _coefficient_from_matrix(matrix: np.ndarray, m: int, n: int, ntor: int) -> float:
-    if matrix.ndim != 2 or m < 0 or n < -ntor or n > ntor:
+def _coefficient_from_matrix(matrix: np.ndarray, m: int, n: int, schema_ntor: int) -> float:
+    if matrix.ndim != 2 or m < 0 or n < -schema_ntor or n > schema_ntor:
         return 0.0
     if m >= matrix.shape[0]:
         return 0.0
-    column = n + ntor
+
+    matrix_ntor = max(0, (matrix.shape[1] - 1) // 2)
+    column = n + matrix_ntor
     if column < 0 or column >= matrix.shape[1]:
         return 0.0
     return float(matrix[m, column])
