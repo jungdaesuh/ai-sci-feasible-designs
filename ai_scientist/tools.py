@@ -19,9 +19,21 @@ from constellaration.geometry import surface_rz_fourier
 
 _DEFAULT_RELATIVE_TOLERANCE = 1e-2
 _CANONICAL_PRECISION = 1e-8
+_DEFAULT_SCHEMA_VERSION = 1
+_DEFAULT_ROUNDING = 1e-6
 _EVALUATION_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _CACHE_STATS: Dict[str, Dict[str, int]] = defaultdict(lambda: {"hits": 0, "misses": 0})
 _P3_REFERENCE_POINT: Tuple[float, float] = (1.0, 20.0)
+
+
+@dataclass(frozen=True)
+class FlattenSchema:
+    """Schema describing the intended Fourier truncation and hash version."""
+
+    mpol: int
+    ntor: int
+    schema_version: int = _DEFAULT_SCHEMA_VERSION
+    rounding: float = _DEFAULT_ROUNDING
 
 
 @dataclass(frozen=True)
@@ -62,31 +74,54 @@ class ParetoEntry:
         }
 
 
-def _quantize_float(value: float) -> float:
-    return float(round(value / _CANONICAL_PRECISION) * _CANONICAL_PRECISION)
+def _quantize_float(value: float, *, precision: float = _CANONICAL_PRECISION) -> float:
+    if precision <= 0.0:
+        return float(value)
+    return float(round(value / precision) * precision)
 
 
-def _canonicalize_value(value: Any) -> Any:
+def _canonicalize_value(value: Any, *, precision: float = _CANONICAL_PRECISION) -> Any:
     if isinstance(value, Mapping):
-        return {k: _canonicalize_value(v) for k, v in sorted(value.items())}
+        return {k: _canonicalize_value(v, precision=precision) for k, v in sorted(value.items())}
     if isinstance(value, np.ndarray):
-        return _canonicalize_value(value.tolist())
+        return _canonicalize_value(value.tolist(), precision=precision)
     if isinstance(value, (list, tuple)):
-        return [_canonicalize_value(v) for v in value]
+        return [_canonicalize_value(v, precision=precision) for v in value]
     if isinstance(value, float):
-        return _quantize_float(value)
+        return _quantize_float(value, precision=precision)
     if isinstance(value, (int, str, bool)) or value is None:
         return value
     return str(value)
 
 
-def _hash_params(params: Mapping[str, Any]) -> str:
-    return design_hash(params)
+def _hash_params(
+    params: Mapping[str, Any], *, schema: FlattenSchema | None = None, rounding: float | None = None
+) -> str:
+    return design_hash(params, schema=schema, rounding=rounding)
 
 
-def design_hash(params: Mapping[str, Any] | BoundaryParams) -> str:
+def design_hash(
+    params: Mapping[str, Any] | BoundaryParams,
+    *,
+    schema: FlattenSchema | None = None,
+    rounding: float | None = None,
+) -> str:
     params_map = _ensure_mapping(params)
-    normalized = _canonicalize_value(params_map)
+    precision = rounding if rounding is not None else _CANONICAL_PRECISION
+    payload: Mapping[str, Any]
+    if schema is None:
+        payload = params_map
+    else:
+        payload = {
+            "schema_version": schema.schema_version,
+            "mpol": schema.mpol,
+            "ntor": schema.ntor,
+            "rounding": schema.rounding,
+            "params": params_map,
+        }
+        precision = rounding if rounding is not None else schema.rounding
+
+    normalized = _canonicalize_value(payload, precision=precision)
     digest = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(digest.encode("utf-8")).hexdigest()
 
@@ -97,16 +132,76 @@ def _ensure_mapping(params: Mapping[str, Any] | BoundaryParams) -> Mapping[str, 
     return params
 
 
+def _derive_schema_from_params(
+    params: Mapping[str, Any], *, schema_version: int = _DEFAULT_SCHEMA_VERSION, rounding: float = _DEFAULT_ROUNDING
+) -> FlattenSchema:
+    r_cos = np.asarray(params.get("r_cos", []), dtype=float)
+    z_sin = np.asarray(params.get("z_sin", []), dtype=float)
+    mpol_candidates = []
+    ntor_candidates = []
+    if r_cos.size:
+        mpol_candidates.append(max(0, r_cos.shape[0] - 1))
+        ntor_candidates.append(max(0, (r_cos.shape[1] - 1) // 2))
+    if z_sin.size:
+        mpol_candidates.append(max(0, z_sin.shape[0] - 1))
+        ntor_candidates.append(max(0, (z_sin.shape[1] - 1) // 2))
+
+    mpol = max(mpol_candidates) if mpol_candidates else 0
+    ntor = max(ntor_candidates) if ntor_candidates else 0
+    return FlattenSchema(mpol=mpol, ntor=ntor, schema_version=schema_version, rounding=rounding)
+
+
+def _coefficient_from_matrix(matrix: np.ndarray, m: int, n: int, ntor: int) -> float:
+    if matrix.ndim != 2 or m < 0 or n < -ntor or n > ntor:
+        return 0.0
+    if m >= matrix.shape[0]:
+        return 0.0
+    column = n + ntor
+    if column < 0 or column >= matrix.shape[1]:
+        return 0.0
+    return float(matrix[m, column])
+
+
+def structured_flatten(
+    params: Mapping[str, Any] | BoundaryParams,
+    schema: FlattenSchema | None = None,
+) -> tuple[np.ndarray, FlattenSchema]:
+    """Flatten Fourier coefficients with deterministic ordering and schema metadata.
+
+    The layout is `[r_cos modes..., z_sin modes...]` with n ranging from `-ntor`
+    to `ntor` for each m in `[0, mpol]`. Missing coefficients are zero-padded and
+    values are rounded to the schema precision to stabilize hashes and caches.
+    """
+
+    params_map = _ensure_mapping(params)
+    active_schema = schema or _derive_schema_from_params(params_map)
+    rounding = active_schema.rounding
+
+    r_cos = np.asarray(params_map.get("r_cos", []), dtype=float)
+    z_sin = np.asarray(params_map.get("z_sin", []), dtype=float)
+
+    values: list[float] = []
+    for matrix in (r_cos, z_sin):
+        for m in range(active_schema.mpol + 1):
+            for n in range(-active_schema.ntor, active_schema.ntor + 1):
+                coefficient = _coefficient_from_matrix(matrix, m, n, active_schema.ntor)
+                values.append(_quantize_float(coefficient, precision=rounding))
+
+    return np.asarray(values, dtype=float), active_schema
+
+
 def _evaluate_cached_stage(
     boundary_params: Mapping[str, Any] | BoundaryParams,
     *,
     stage: str,
     compute: Callable[[Mapping[str, Any]], Dict[str, Any]],
+    maximize: bool,
     use_cache: bool = True,
 ) -> Dict[str, Any]:
     params_map = _ensure_mapping(boundary_params)
     stage_lower = stage.lower()
-    cache_key = (stage_lower, _hash_params(params_map))
+    schema = _derive_schema_from_params(params_map)
+    cache_key = (stage_lower, _hash_params(params_map, schema=schema, rounding=schema.rounding))
     stats = _CACHE_STATS[stage_lower]
     if use_cache:
         cached = _EVALUATION_CACHE.get(cache_key)
@@ -115,7 +210,7 @@ def _evaluate_cached_stage(
             return cached
 
     stats["misses"] += 1
-    result = compute(params_map)
+    result = _safe_evaluate(lambda: compute(params_map), stage=stage_lower, maximize=maximize)
     if use_cache:
         _EVALUATION_CACHE[cache_key] = result
     return result
@@ -154,10 +249,142 @@ def _normalize_between_bounds(
     return float(np.clip(normalized, 0.0, 1.0))
 
 
+def _max_violation(margins: Mapping[str, float]) -> float:
+    if not margins:
+        return float("inf")
+    return float(max(0.0, *[max(0.0, value) for value in margins.values()]))
+
+
+def compute_constraint_margins(
+    metrics: Mapping[str, Any] | forward_model.ConstellarationMetrics,
+    problem: str,
+) -> dict[str, float]:
+    metrics_map = metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
+    problem_key = problem.lower()
+
+    def _log10_margin(target: float) -> float:
+        return _log10_or_large(metrics_map.get("qi")) - target
+
+    margins: dict[str, float] = {}
+
+    if problem_key.startswith("p1"):
+        margins = {
+            "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 4.0,
+            "average_triangularity": float(metrics_map.get("average_triangularity", float("nan"))) - (-0.5),
+            "edge_rotational_transform": 0.3
+            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+        }
+    elif problem_key.startswith("p2"):
+        margins = {
+            "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 10.0,
+            "edge_rotational_transform": 0.25
+            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            "edge_magnetic_mirror_ratio": float(
+                metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
+            )
+            - 0.2,
+            "max_elongation": float(metrics_map.get("max_elongation", float("nan"))) - 5.0,
+            "qi_log10": _log10_margin(-4.0),
+        }
+    else:
+        flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
+        flux_margin = (
+            float(flux_value) - 0.9
+            if flux_value is not None
+            else 0.0
+        )
+        margins = {
+            "edge_rotational_transform": 0.25
+            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            "edge_magnetic_mirror_ratio": float(
+                metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
+            )
+            - 0.25,
+            "vacuum_well": -float(metrics_map.get("vacuum_well", float("nan"))),
+            "flux_compression": flux_margin,
+            "qi_log10": _log10_margin(-3.5),
+        }
+
+    return margins
+
+
 def _log10_or_large(value: float | None) -> float:
     if value is None or value <= 0.0:
         return 10.0
     return float(math.log10(value))
+
+
+def _contains_invalid_number(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        return any(_contains_invalid_number(value) for value in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_contains_invalid_number(value) for value in node)
+    if isinstance(node, np.ndarray):
+        return not np.all(np.isfinite(node))
+    if isinstance(node, float):
+        return not math.isfinite(node)
+    return False
+
+
+def _replace_invalid_numbers(node: Any, replacement: float) -> Any:
+    if isinstance(node, Mapping):
+        return {key: _replace_invalid_numbers(value, replacement) for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_replace_invalid_numbers(value, replacement) for value in node]
+    if isinstance(node, np.ndarray):
+        sanitized = np.where(np.isfinite(node), node, replacement)
+        return sanitized.tolist()
+    if isinstance(node, float) and not math.isfinite(node):
+        return float(replacement)
+    return node
+
+
+def _penalized_result(
+    *, stage: str, maximize: bool, penalty: float, error: str | None = None
+) -> Dict[str, Any]:
+    return {
+        "stage": stage,
+        "objective": penalty,
+        "minimize_objective": not maximize,
+        "feasibility": float("inf"),
+        "score": 0.0,
+        "constraint_margins": {},
+        "max_violation": float("inf"),
+        "metrics": {},
+        "error": error,
+        "penalized": True,
+    }
+
+
+def _safe_evaluate(
+    compute: Callable[[], Dict[str, Any]],
+    stage: str,
+    *,
+    maximize: bool = False,
+) -> Dict[str, Any]:
+    penalty = -1e9 if maximize else 1e9
+    try:
+        result = compute()
+    except Exception as exc:  # noqa: BLE001
+        return _penalized_result(stage=stage, maximize=maximize, penalty=penalty, error=str(exc))
+
+    invalid = _contains_invalid_number(result)
+    if invalid:
+        sanitized = _replace_invalid_numbers(result, penalty)
+        sanitized["objective"] = penalty
+        sanitized["feasibility"] = float("inf")
+        sanitized["score"] = 0.0
+        sanitized["constraint_margins"] = {}
+        sanitized["max_violation"] = float("inf")
+        sanitized.setdefault("metrics", {})
+        sanitized["penalized"] = True
+        sanitized["stage"] = stage
+        sanitized["minimize_objective"] = not maximize
+        return sanitized
+
+    result.setdefault("stage", stage)
+    result.setdefault("minimize_objective", not maximize)
+    return result
 
 
 def _gradient_score(metrics: forward_model.ConstellarationMetrics) -> float:
@@ -167,31 +394,13 @@ def _gradient_score(metrics: forward_model.ConstellarationMetrics) -> float:
 
 
 def _p2_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
-    violations = [
-        metrics.aspect_ratio - 10.0,
-        max(0.0, 0.25 - metrics.edge_rotational_transform_over_n_field_periods),
-        metrics.edge_magnetic_mirror_ratio - 0.2,
-        max(0.0, metrics.max_elongation - 5.0),
-        max(0.0, _log10_or_large(metrics.qi) + 4.0),
-    ]
-    return float(max(violations + [0.0]))
+    margins = compute_constraint_margins(metrics, "p2")
+    return _max_violation(margins)
 
 
 def _p3_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
-    flux_violation = 0.0
-    if metrics.flux_compression_in_regions_of_bad_curvature is not None:
-        flux_violation = max(
-            0.0, metrics.flux_compression_in_regions_of_bad_curvature - 0.9
-        )
-
-    constraints = [
-        max(0.0, 0.25 - metrics.edge_rotational_transform_over_n_field_periods),
-        max(0.0, metrics.edge_magnetic_mirror_ratio - 0.25),
-        max(0.0, -metrics.vacuum_well),
-        flux_violation,
-        max(0.0, _log10_or_large(metrics.qi) + 3.5),
-    ]
-    return float(max(constraints + [0.0]))
+    margins = compute_constraint_margins(metrics, "p3")
+    return _max_violation(margins)
 
 
 def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
@@ -343,23 +552,6 @@ def make_boundary_from_params(
     return surface_rz_fourier.SurfaceRZFourier(**payload)
 
 
-def _constraint_metrics(
-    metrics: forward_model.ConstellarationMetrics,
-) -> Tuple[float, float]:
-    targets = np.array([4.0, -0.5, 0.3], dtype=float)
-    violations = np.array(
-        [
-            metrics.aspect_ratio - targets[0],
-            metrics.average_triangularity - targets[1],
-            targets[2] - metrics.edge_rotational_transform_over_n_field_periods,
-        ],
-        dtype=float,
-    )
-    normalized = violations / np.abs(targets)
-    feasibility = float(np.max(np.maximum(normalized, 0.0)))
-    return feasibility, float(np.max(normalized))
-
-
 def evaluate_p1(
     boundary_params: Mapping[str, Any] | BoundaryParams,
     *,
@@ -372,7 +564,8 @@ def evaluate_p1(
         boundary = make_boundary_from_params(params_map)
         settings = _settings_for_stage(stage, skip_qi=True)
         metrics, _ = forward_model.forward_model(boundary, settings=settings)
-        feasibility, _ = _constraint_metrics(metrics)
+        constraint_margins = compute_constraint_margins(metrics, "p1")
+        feasibility = _max_violation(constraint_margins)
         score = 0.0
         if feasibility <= _DEFAULT_RELATIVE_TOLERANCE:
             normalized = _normalize_between_bounds(
@@ -388,10 +581,16 @@ def evaluate_p1(
             "score": score,
             "metrics": metrics.model_dump(),
             "settings": settings.model_dump(),
+            "constraint_margins": constraint_margins,
+            "max_violation": feasibility,
         }
 
     return _evaluate_cached_stage(
-        boundary_params, stage=stage, compute=compute, use_cache=use_cache
+        boundary_params,
+        stage=stage,
+        compute=compute,
+        maximize=False,
+        use_cache=use_cache,
     )
 
 
@@ -407,7 +606,8 @@ def evaluate_p2(
         boundary = make_boundary_from_params(params_map)
         settings = _settings_for_stage(stage)
         metrics, _ = forward_model.forward_model(boundary, settings=settings)
-        feasibility = _p2_feasibility(metrics)
+        constraint_margins = compute_constraint_margins(metrics, "p2")
+        feasibility = _max_violation(constraint_margins)
         gradient = float(metrics.minimum_normalized_magnetic_gradient_scale_length)
         score = _gradient_score(metrics)
 
@@ -420,10 +620,16 @@ def evaluate_p2(
             "hv": float(max(0.0, gradient - 1.0)),
             "metrics": metrics.model_dump(),
             "settings": settings.model_dump(),
+            "constraint_margins": constraint_margins,
+            "max_violation": feasibility,
         }
 
     return _evaluate_cached_stage(
-        boundary_params, stage=stage, compute=compute, use_cache=use_cache
+        boundary_params,
+        stage=stage,
+        compute=compute,
+        maximize=True,
+        use_cache=use_cache,
     )
 
 
@@ -439,7 +645,8 @@ def evaluate_p3(
         boundary = make_boundary_from_params(params_map)
         settings = _settings_for_stage(stage)
         metrics, _ = forward_model.forward_model(boundary, settings=settings)
-        feasibility = _p3_feasibility(metrics)
+        constraint_margins = compute_constraint_margins(metrics, "p3")
+        feasibility = _max_violation(constraint_margins)
         score = _gradient_score(metrics)
 
         return {
@@ -455,10 +662,16 @@ def evaluate_p3(
             ),
             "metrics": metrics.model_dump(),
             "settings": settings.model_dump(),
+            "constraint_margins": constraint_margins,
+            "max_violation": feasibility,
         }
 
     return _evaluate_cached_stage(
-        boundary_params, stage=stage, compute=compute, use_cache=use_cache
+        boundary_params,
+        stage=stage,
+        compute=compute,
+        maximize=False,
+        use_cache=use_cache,
     )
 
 
