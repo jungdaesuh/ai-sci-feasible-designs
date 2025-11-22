@@ -27,10 +27,10 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Tests: NaN produces penalty; minimize/maximize flags correct; flatten keeps R_cos(1,0) index stable across mpol/ntor.
 
 ### 2) World-Model (SQLite) + Logging
-- [ ] Tables: `boundaries(hash, p, nfp, r_cos_blob, z_sin_blob, source, parent_id, created_at)`, `evaluations(boundary_id, stage, vmec_status, runtime_sec, metrics..., margins..., is_feasible, created_at)`, `cycles(cycle_idx, phase, p, new_evals, new_feasible, cumulative_feasible, hv, notes, created_at)`.
-- [ ] Hash canonicalization (round 1e-6) before insert; store schema_version per record.
-- [ ] Helpers: add/query feasible, near-feasible by `l2` margin, latest archive, cache stats.
-- [ ] Tests: read/write roundtrip; resume keeps archive/HV identical on stub model.
+- [x] Tables: `boundaries(hash, p, nfp, r_cos_blob, z_sin_blob, source, parent_id, created_at)`, `evaluations(boundary_id, stage, vmec_status, runtime_sec, metrics..., margins..., is_feasible, created_at)`, `cycles(cycle_idx, phase, p, new_evals, new_feasible, cumulative_feasible, hv, notes, created_at)`.
+- [x] Hash canonicalization (round 1e-6) before insert; store schema_version per record.
+- [x] Helpers: add/query feasible, near-feasible by `l2` margin, latest archive, cache stats.
+- [x] Tests: read/write roundtrip; resume keeps archive/HV identical on stub model.
 
 ### 3) Surrogates (Unified)
 - [ ] `SurrogateBundle`: vectorizer (structured_flatten), scaler, RF classifier (feasibility prob), RF regressor (objective/HV); PyTorch ensemble behind flag.
