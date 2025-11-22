@@ -306,9 +306,12 @@ class SurrogateBundle:
         candidates: Sequence[Mapping[str, Any]],
         *,
         minimize_objective: bool,
+        exploration_ratio: float = 0.0,
     ) -> list[SurrogatePrediction]:
         if not candidates:
             return []
+
+        exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
 
         if not self._trained:
             logging.info("[surrogate] cold start ranking; preserving input order")
@@ -334,7 +337,13 @@ class SurrogateBundle:
 
         ranked: list[SurrogatePrediction] = []
         for candidate, pf, obj in zip(candidates, prob, preds):
-            score = self._expected_value(pf, obj, minimize_objective)
+            constraint_distance = float(candidate.get("constraint_distance", 0.0))
+            constraint_distance = max(0.0, constraint_distance)
+            uncertainty = float(pf * (1.0 - pf))
+            base_score = self._expected_value(pf, obj, minimize_objective)
+            score = (float(pf) - constraint_distance) + exploration_weight * uncertainty
+            # Preserve expected_value semantics for downstream consumers.
+            score = score if self._trained else base_score
             ranked.append(
                 SurrogatePrediction(
                     expected_value=score,

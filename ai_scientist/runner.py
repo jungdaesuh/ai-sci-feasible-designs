@@ -412,8 +412,13 @@ def _generate_candidate_params(
 ) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     seed_data: dict[str, Any] | None = None
-    if template.seed_path is not None:
-        seed_data = _load_seed_boundary(template.seed_path)
+    seed_path = template.seed_path
+    if seed_path is None:
+        default_seed = Path("configs/seeds/rotating_ellipse_p3.json")
+        seed_path = default_seed if default_seed.exists() else None
+
+    if seed_path is not None:
+        seed_data = _load_seed_boundary(seed_path)
         r_cos = seed_data["r_cos"]
         z_sin = seed_data["z_sin"]
         r_sin = seed_data["r_sin"]
@@ -532,6 +537,7 @@ def _propose_p3_candidates_for_cycle(
             proposal_count=sampler_target,
             jitter_scale=mix.jitter_scale,
             rng=np.random.default_rng(rng_seed),
+            include_distances=True,
         )
     else:
         sampler_params = []
@@ -547,11 +553,19 @@ def _propose_p3_candidates_for_cycle(
             seed = next(seed_iter)
         except StopIteration:
             break
+        if isinstance(params, Mapping) and "params" in params:
+            payload = params.get("params", {})
+            constraint_distance = float(params.get("normalized_constraint_distance", 0.0))
+        else:
+            payload = params
+            constraint_distance = 0.0
         sampler_results.append(
             {
                 "seed": seed,
-                "params": params,
-                "design_hash": tools.design_hash(params),
+                "params": payload,
+                "design_hash": tools.design_hash(payload),
+                "constraint_distance": constraint_distance,
+                "source": "constraint_sampler",
             }
         )
 
@@ -559,7 +573,13 @@ def _propose_p3_candidates_for_cycle(
     random_results: list[Mapping[str, Any]] = []
     for _ in range(remaining):
         seed = next(seed_iter)
-        random_results.append(_generate_candidate_params(cfg.boundary_template, seed))
+        random_results.append(
+            {
+                **_generate_candidate_params(cfg.boundary_template, seed),
+                "constraint_distance": 1.0,
+                "source": "random",
+            }
+        )
 
     candidates = sampler_results + random_results
     return candidates, len(sampler_results), len(random_results)
@@ -617,12 +637,16 @@ def _surrogate_rank_screen_candidates(
         pool_entries.append(
             {
                 "candidate_params": candidate["params"],
+                "constraint_distance": candidate.get("constraint_distance", 0.0),
+                "source": candidate.get("source"),
                 "__surrogate_candidate_index": idx,
             }
         )
 
     ranked_predictions = _SURROGATE_BUNDLE.rank_candidates(
-        pool_entries, minimize_objective=minimize_objective
+        pool_entries,
+        minimize_objective=minimize_objective,
+        exploration_ratio=cfg.proposal_mix.exploration_ratio,
     )
 
     selected: list[Mapping[str, Any]] = []
@@ -1022,7 +1046,27 @@ def _evaluate_stage(
                 break
             params = candidate["params"]
             design_id = candidate.get("design_hash") or tools.design_hash(params)
-            evaluation = evaluate_fn(params, stage=stage)
+            try:
+                evaluation = evaluate_fn(params, stage=stage)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner][stage-eval] Failed evaluation for design {design_id} "
+                    f"(seed={candidate['seed']} stage={stage}): {exc}"
+                )
+                evaluation = {
+                    "stage": stage,
+                    "feasibility": float("inf"),
+                    "max_violation": float("inf"),
+                    "objective": float("inf"),
+                    "is_feasible": False,
+                    "metrics": {
+                        "minimum_normalized_magnetic_gradient_scale_length": 0.0,
+                        "aspect_ratio": float("inf"),
+                        "max_elongation": float("inf"),
+                        "constraint_margins": {},
+                        "max_violation": float("inf"),
+                    },
+                }
             results.append(
                 {
                     "params": params,
@@ -1058,6 +1102,28 @@ def _evaluate_stage(
                 print(
                     f"[runner][stage-eval] Failed evaluation for design {design_hash} "
                     f"(seed={candidate['seed']} stage={stage}): {exc}"
+                )
+                failure_eval = {
+                    "stage": stage,
+                    "feasibility": float("inf"),
+                    "max_violation": float("inf"),
+                    "objective": float("inf"),
+                    "is_feasible": False,
+                    "metrics": {
+                        "minimum_normalized_magnetic_gradient_scale_length": 0.0,
+                        "aspect_ratio": float("inf"),
+                        "max_elongation": float("inf"),
+                        "constraint_margins": {},
+                        "max_violation": float("inf"),
+                    },
+                }
+                results.append(
+                    {
+                        "params": candidate["params"],
+                        "evaluation": failure_eval,
+                        "seed": int(candidate["seed"]),
+                        "design_hash": design_hash,
+                    }
                 )
                 continue
 
@@ -1253,6 +1319,12 @@ def _run_cycle(
     )
     total_designs = len(latest_by_design)
     feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))
+    hv_display = (
+        f"{p3_summary.hv_score:.6f}" if p3_summary.feasible_count > 0 else "n/a"
+    )
+    print(
+        f"[runner][cycle={cycle_number}] feasible={p3_summary.feasible_count}/{total_designs} hv={hv_display}"
+    )
     p3_summary_path = adaptation_helpers.write_p3_summary(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
@@ -1285,6 +1357,19 @@ def _run_cycle(
         _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha)
     )
     config_snapshot["cycle_seed"] = best_seed
+    cycle_json = {
+        "cycle": cycle_number,
+        "stage": governance_stage,
+        "feasible_count": p3_summary.feasible_count,
+        "hv": p3_summary.hv_score,
+        "reference_point": p3_summary.reference_point,
+        "archive_size": p3_summary.archive_size,
+        "screened": len(screen_results),
+        "promoted": len(promote_results),
+        "feasibility_rate": feasibility_rate,
+    }
+    cycle_json_path = Path(cfg.reporting_dir) / f"cycle_{cycle_number}.json"
+
     with world_model.transaction():
         world_model.record_cycle(
             experiment_id=experiment_id,
@@ -1298,6 +1383,14 @@ def _run_cycle(
             seed=best_seed,
             log_best_candidate=False,
             problem=cfg.problem,
+            commit=False,
+        )
+        world_model.record_cycle_summary(
+            experiment_id=experiment_id,
+            cycle_number=cycle_number,
+            stage=governance_stage,
+            feasible_count=p3_summary.feasible_count,
+            hv_score=p3_summary.hv_score,
             commit=False,
         )
         world_model.record_cycle_hv(
@@ -1346,6 +1439,8 @@ def _run_cycle(
         )
     if best_metrics_id is None:
         best_metrics_id = metrics_by_hash.get(best_entry.get("design_hash", ""))
+    cycle_json_path.parent.mkdir(parents=True, exist_ok=True)
+    cycle_json_path.write_text(json.dumps(cycle_json, indent=2), encoding="utf-8")
     repro_command = (
         f"python -m ai_scientist.runner --config {cfg.source_config} --problem {cfg.problem} "
         f"--cycles {cfg.cycles} --eval-budget {active_budgets.screen_evals_per_cycle} "

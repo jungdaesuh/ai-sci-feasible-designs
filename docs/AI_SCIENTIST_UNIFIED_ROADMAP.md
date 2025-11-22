@@ -40,10 +40,10 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Tests: feasible-high > infeasible-high for P2 (maximize) and inverse for P1 (minimize); perf: RF fit+predict 200 samples, schema 6x6 <0.2s CPU.
 
 ### 4) Feasibility-First Loop (Updated)
-- [ ] Sampling: seed JSONs (rotating ellipse P3) + Gaussian low-mode perturbations; oversample 2× budget.
-- [ ] Ranking: feasibility prob − constraint-distance + small uncertainty bonus; exploration ratio from config.
-- [ ] Evaluate top-K at `stage="screen"`; failures → infeasible with max violation; log per-cycle feasible count + HV if feasible exists.
-- [ ] Retrain per policy; record cycle summaries in `cycles` table and `reports/cycle_<n>.json`.
+- [x] Sampling: seed JSONs (rotating ellipse P3) + Gaussian low-mode perturbations; oversample 2× budget.
+- [x] Ranking: feasibility prob − constraint-distance + small uncertainty bonus; exploration ratio from config.
+- [x] Evaluate top-K at `stage="screen"`; failures → infeasible with max violation; log per-cycle feasible count + HV if feasible exists.
+- [x] Retrain per policy; record cycle summaries in `cycles` table and `reports/cycle_<n>.json`.
 
 ### 5) HV / Objective Phase
 - [ ] P2: maximize `L∇B` with feasibility prob ≥ threshold.

@@ -736,6 +736,7 @@ def normalized_constraint_distance_sampler(
     proposal_count: int,
     jitter_scale: float = 0.01,
     rng: np.random.Generator | None = None,
+    include_distances: bool = False,
 ) -> list[Mapping[str, float | Sequence[float]]]:
     """Constraint-aware sampler for Task X.6 (docs/TASKS_CODEX_MINI.md:233).
 
@@ -779,7 +780,15 @@ def normalized_constraint_distance_sampler(
                 perturbed[key] = float(proposal_array)
             else:
                 perturbed[key] = proposal_array.tolist()
-        proposals.append(perturbed)
+        if include_distances:
+            proposals.append(
+                {
+                    "params": perturbed,
+                    "normalized_constraint_distance": float(clipped[idx]),
+                }
+            )
+        else:
+            proposals.append(perturbed)
 
     return proposals
 

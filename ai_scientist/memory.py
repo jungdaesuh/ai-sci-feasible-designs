@@ -125,6 +125,18 @@ CREATE TABLE IF NOT EXISTS budgets (
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
 
+CREATE TABLE IF NOT EXISTS cycles (
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    feasible_count INTEGER NOT NULL,
+    hv_score REAL,
+    hv_exists INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, cycle),
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
 CREATE TABLE IF NOT EXISTS cycle_stats (
     experiment_id INTEGER NOT NULL,
     cycle INTEGER NOT NULL,
@@ -375,6 +387,43 @@ class WorldModel:
                     payload,
                     constellaration_sha,
                     seed,
+                    timestamp,
+                ),
+            )
+
+        if commit:
+            with self._conn:
+                _write()
+        else:
+            _write()
+
+    def record_cycle_summary(
+        self,
+        experiment_id: int,
+        cycle_number: int,
+        stage: str,
+        feasible_count: int,
+        hv_score: float | None,
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> None:
+        timestamp = created_at or datetime.utcnow().isoformat()
+        hv_exists = 0 if hv_score is None else 1
+
+        def _write() -> None:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO cycles (experiment_id, cycle, stage, feasible_count, hv_score, hv_exists, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    cycle_number,
+                    stage,
+                    int(feasible_count),
+                    hv_score,
+                    hv_exists,
                     timestamp,
                 ),
             )
