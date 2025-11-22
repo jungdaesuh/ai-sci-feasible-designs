@@ -1,18 +1,24 @@
-"""Lightweight surrogate ranking helpers for candidate screening.
+"""Surrogate helpers for candidate screening and feasibility-aware ranking.
 
-Per docs/MASTER_PLAN_AI_SCIENTIST.md:332 and docs/TASKS_CODEX_MINI.md:151 the
-ranker now trains on cached metrics (KRR/MLP-style features) so Phase 4/5
-memory data can beat random ordering before promotion.
+Per the unified roadmap (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md) the production
+surrogate is a bundled vectorizer + scaler + RF classifier/regressor that
+estimates feasibility and objective jointly. The legacy linear ranker remains
+for backward compatibility, but SurrogateBundle is the default path going
+forward.
 """
 
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
 
-from ai_scientist import memory
+from ai_scientist import memory, tools
 
 
 def _flatten_boundary_params(params: Mapping[str, Any]) -> np.ndarray:
@@ -113,3 +119,230 @@ class SimpleSurrogateRanker:
             score = float(np.dot(features, weights) + self._bias)
             ranked.append(SurrogateRank(score=score, metrics=metrics))
         return sorted(ranked, key=lambda item: item.score, reverse=True)
+
+
+@dataclass(frozen=True)
+class SurrogatePrediction:
+    """Bundle of surrogate scores for a single candidate."""
+
+    expected_value: float
+    prob_feasible: float
+    predicted_objective: float
+    minimize_objective: bool
+    metadata: Mapping[str, Any]
+
+
+class SurrogateBundle:
+    """Feasibility-first surrogate bundle with RF heads and structured features.
+
+    - Vectorizes boundary params with tools.structured_flatten using a persisted
+      schema (mpol, ntor, schema_version, rounding).
+    - Standard-scales the flattened vector.
+    - Fits a RF classifier for feasibility probability and a RF regressor for
+      objective/HV. PyTorch ensemble is intentionally kept behind the
+      `enable_torch` flag but not initialized here.
+    - Training policy: fit only when >= `min_samples`; otherwise emit a cold
+      start log and keep caller order. The regressor trains on feasible-only
+      points when there are >= `min_feasible_for_regressor` feasible rows.
+    - Ranking uses E[value] = P(feasible) * corrected_objective where the sign
+      is inverted for minimize problems so that higher is always better.
+    - Fit/predict run inside a timeout guard to avoid surprises in CI.
+    - Retrain cadence: either `points_cadence` new rows or `cycle_cadence`
+      elapsed cycles since the last fit.
+    """
+
+    def __init__(
+        self,
+        *,
+        min_samples: int = 8,
+        min_feasible_for_regressor: int = 4,
+        feasibility_tolerance: float = tools._DEFAULT_RELATIVE_TOLERANCE,
+        timeout_seconds: float = 1.0,
+        points_cadence: int = 16,
+        cycle_cadence: int = 1,
+        enable_torch: bool = False,
+    ) -> None:
+        self._min_samples = int(min_samples)
+        self._min_feasible_for_regressor = int(min_feasible_for_regressor)
+        self._feasibility_tolerance = float(feasibility_tolerance)
+        self._timeout_seconds = float(timeout_seconds)
+        self._points_cadence = int(points_cadence)
+        self._cycle_cadence = int(cycle_cadence)
+        self._enable_torch = bool(enable_torch)
+
+        self._scaler: StandardScaler | None = None
+        self._classifier: RandomForestClassifier | None = None
+        self._regressor: RandomForestRegressor | None = None
+        self._schema: tools.FlattenSchema | None = None
+        self._trained = False
+        self._last_fit_count = 0
+        self._last_fit_cycle = 0
+
+    def _with_timeout(self, func):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(func)
+            return future.result(timeout=self._timeout_seconds)
+
+    def _vectorize(self, params: Mapping[str, Any]) -> np.ndarray:
+        vector, schema = tools.structured_flatten(
+            params, schema=self._schema
+        )
+        if self._schema is None:
+            self._schema = schema
+        return vector
+
+    def _feature_matrix(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        vectors: list[np.ndarray] = []
+        for metrics in metrics_list:
+            params = metrics.get("candidate_params") or metrics.get("params")
+            if not isinstance(params, Mapping):
+                params = {}
+            vectors.append(self._vectorize(params))
+        if not vectors:
+            return np.zeros((0, 0), dtype=float)
+        return np.vstack(vectors)
+
+    def _label_feasibility(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        labels: list[int] = []
+        for metrics in metrics_list:
+            feasibility = metrics.get("feasibility")
+            if feasibility is None:
+                feasibility = metrics.get("max_violation", float("inf"))
+            labels.append(int(float(feasibility) <= self._feasibility_tolerance))
+        return np.asarray(labels, dtype=int)
+
+    def fit(
+        self,
+        metrics_list: Sequence[Mapping[str, Any]],
+        target_values: Sequence[float],
+        *,
+        minimize_objective: bool,
+        cycle: int | None = None,
+    ) -> None:
+        sample_count = len(metrics_list)
+        self._last_fit_count = sample_count
+        if cycle is not None:
+            self._last_fit_cycle = int(cycle)
+
+        if sample_count < self._min_samples:
+            logging.info("[surrogate] cold start: %d samples (< %d)", sample_count, self._min_samples)
+            self._trained = False
+            return
+
+        features = self._feature_matrix(metrics_list)
+        if features.size == 0:
+            self._trained = False
+            return
+
+        feasibility_labels = self._label_feasibility(metrics_list)
+        regression_targets = np.asarray(target_values, dtype=float)
+
+        feasible_mask = feasibility_labels == 1
+        if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
+            features_reg = features[feasible_mask]
+            regression_targets = regression_targets[feasible_mask]
+        else:
+            features_reg = features
+
+        # Align classifier features to all rows; regressor uses features_reg.
+        def _train_bundle() -> None:
+            scaler = StandardScaler()
+            scaled_class = scaler.fit_transform(features)
+            clf = RandomForestClassifier(
+                n_estimators=12,
+                max_depth=6,
+                random_state=0,
+                n_jobs=1,
+            )
+            clf.fit(scaled_class, feasibility_labels)
+
+            scaled_reg = scaler.transform(features_reg)
+            reg = RandomForestRegressor(
+                n_estimators=12,
+                max_depth=6,
+                random_state=0,
+                n_jobs=1,
+            )
+            reg.fit(scaled_reg, regression_targets)
+
+            self._scaler = scaler
+            self._classifier = clf
+            self._regressor = reg
+            self._trained = True
+
+        self._with_timeout(_train_bundle)
+
+    def should_retrain(self, sample_count: int, cycle: int | None = None) -> bool:
+        if not self._trained:
+            return True
+        delta_points = sample_count - self._last_fit_count
+        if delta_points >= self._points_cadence:
+            return True
+        if cycle is None:
+            return False
+        return (cycle - self._last_fit_cycle) >= self._cycle_cadence
+
+    def _predict_batch(self, feature_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        assert self._classifier is not None
+        assert self._regressor is not None
+        assert self._scaler is not None
+
+        def _predict() -> tuple[np.ndarray, np.ndarray]:
+            scaled = self._scaler.transform(feature_matrix)
+            prob = self._classifier.predict_proba(scaled)[:, 1]
+            preds = self._regressor.predict(scaled)
+            return prob, preds
+
+        return self._with_timeout(_predict)
+
+    def _expected_value(
+        self, prob_feasible: float, predicted_objective: float, minimize_objective: bool
+    ) -> float:
+        oriented = -float(predicted_objective) if minimize_objective else float(predicted_objective)
+        return float(prob_feasible) * oriented
+
+    def rank_candidates(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+        *,
+        minimize_objective: bool,
+    ) -> list[SurrogatePrediction]:
+        if not candidates:
+            return []
+
+        if not self._trained:
+            logging.info("[surrogate] cold start ranking; preserving input order")
+            return [
+                SurrogatePrediction(
+                    expected_value=0.0,
+                    prob_feasible=0.0,
+                    predicted_objective=0.0,
+                    minimize_objective=minimize_objective,
+                    metadata=candidate,
+                )
+                for candidate in candidates
+            ]
+
+        metrics_list: list[Mapping[str, Any]] = []
+        for candidate in candidates:
+            params = candidate.get("candidate_params")
+            if params is None:
+                params = candidate.get("params", {})
+            metrics_list.append({"candidate_params": params})
+        feature_matrix = self._feature_matrix(metrics_list)
+        prob, preds = self._predict_batch(feature_matrix)
+
+        ranked: list[SurrogatePrediction] = []
+        for candidate, pf, obj in zip(candidates, prob, preds):
+            score = self._expected_value(pf, obj, minimize_objective)
+            ranked.append(
+                SurrogatePrediction(
+                    expected_value=score,
+                    prob_feasible=float(pf),
+                    predicted_objective=float(obj),
+                    minimize_objective=minimize_objective,
+                    metadata=candidate,
+                )
+            )
+
+        return sorted(ranked, key=lambda item: item.expected_value, reverse=True)

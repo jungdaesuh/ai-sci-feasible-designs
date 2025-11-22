@@ -33,11 +33,11 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Tests: read/write roundtrip; resume keeps archive/HV identical on stub model.
 
 ### 3) Surrogates (Unified)
-- [ ] `SurrogateBundle`: vectorizer (structured_flatten), scaler, RF classifier (feasibility prob), RF regressor (objective/HV); PyTorch ensemble behind flag.
-- [ ] Training policy: fit if ≥8 samples; if <8 log “cold start” and preserve input order; regressors use feasible-only if ≥4 feasible else all.
-- [ ] Ranking score: `E[value] = P(feasible) * corrected_objective`, sign inverted for minimize to keep higher=better.
-- [ ] Timeout guard on fit/predict; retrain cadence K new points or every N cycles.
-- [ ] Tests: feasible-high > infeasible-high for P2 (maximize) and inverse for P1 (minimize); perf: RF fit+predict 200 samples, schema 6x6 <0.2s CPU.
+- [x] `SurrogateBundle`: vectorizer (structured_flatten), scaler, RF classifier (feasibility prob), RF regressor (objective/HV); PyTorch ensemble behind flag.
+- [x] Training policy: fit if ≥8 samples; if <8 log “cold start” and preserve input order; regressors use feasible-only if ≥4 feasible else all.
+- [x] Ranking score: `E[value] = P(feasible) * corrected_objective`, sign inverted for minimize to keep higher=better.
+- [x] Timeout guard on fit/predict; retrain cadence K new points or every N cycles.
+- [x] Tests: feasible-high > infeasible-high for P2 (maximize) and inverse for P1 (minimize); perf: RF fit+predict 200 samples, schema 6x6 <0.2s CPU.
 
 ### 4) Feasibility-First Loop (Updated)
 - [ ] Sampling: seed JSONs (rotating ellipse P3) + Gaussian low-mode perturbations; oversample 2× budget.

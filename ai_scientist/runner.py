@@ -26,15 +26,15 @@ from ai_scientist import planner as ai_planner
 from ai_scientist import rag
 from ai_scientist import reporting
 from ai_scientist import tools
-from ai_scientist.optim.surrogate import SimpleSurrogateRanker
+from ai_scientist.optim.surrogate import SurrogateBundle
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_rotating_ellipse
 from orchestration import adaptation as adaptation_helpers
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
 P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
-MIN_SURROGATE_HISTORY = 4
 _BOUNDARY_SEED_CACHE: dict[Path, dict[str, Any]] = {}
+_SURROGATE_BUNDLE = SurrogateBundle()
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -582,21 +582,35 @@ def _surrogate_rank_screen_candidates(
     candidates: list[Mapping[str, Any]],
     world_model: memory.WorldModel,
     *,
+    cycle: int,
     verbose: bool = False,
 ) -> list[Mapping[str, Any]]:
-    """Train SimpleSurrogateRanker on cached history and trim the pool (see /Users/suhjungdae/code/software/proxima_fusion/RL-feasible-designs/ai_scientist/roadmap.md)."""
+    """Train SurrogateBundle on cached history and trim the pool."""
 
     if not candidates or screen_budget <= 0:
         return candidates
 
-    history = world_model.surrogate_training_data(target="hv", problem=cfg.problem)
-    required_history = max(MIN_SURROGATE_HISTORY, screen_budget)
-    if len(history) < required_history:
-        return candidates
+    problem = (cfg.problem or "").lower()
+    target_column = "hv" if problem == "p3" else "objective"
+    minimize_objective = problem == "p1"
 
-    metrics_list, target_values = zip(*history)
-    ranker = SimpleSurrogateRanker()
-    ranker.fit(metrics_list, target_values)
+    history = world_model.surrogate_training_data(
+        target=target_column, problem=cfg.problem
+    )
+    metrics_list: tuple[Mapping[str, Any], ...]
+    target_values: tuple[float, ...]
+    if history:
+        metrics_list, target_values = zip(*history)
+        if _SURROGATE_BUNDLE.should_retrain(len(history), cycle=cycle):
+            _SURROGATE_BUNDLE.fit(
+                metrics_list,
+                target_values,
+                minimize_objective=minimize_objective,
+                cycle=cycle,
+            )
+    else:
+        metrics_list = tuple()
+        target_values = tuple()
 
     pool_entries: list[Mapping[str, Any]] = []
     for idx, candidate in enumerate(candidates):
@@ -607,15 +621,16 @@ def _surrogate_rank_screen_candidates(
             }
         )
 
-    ranked = ranker.rank(pool_entries)
+    ranked_predictions = _SURROGATE_BUNDLE.rank_candidates(
+        pool_entries, minimize_objective=minimize_objective
+    )
+
     selected: list[Mapping[str, Any]] = []
-    seen: set[int] = set()
     needed = screen_budget
-    for rank in ranked:
-        idx = int(rank.metrics.get("__surrogate_candidate_index", -1))
-        if idx < 0 or idx in seen:
+    for prediction in ranked_predictions:
+        idx = int(prediction.metadata.get("__surrogate_candidate_index", -1))
+        if idx < 0:
             continue
-        seen.add(idx)
         selected.append(candidates[idx])
         if len(selected) >= needed:
             break
@@ -1148,6 +1163,7 @@ def _run_cycle(
             budget_snapshot.screen_evals_per_cycle,
             candidate_pool,
             world_model,
+            cycle=cycle_number,
             verbose=bool(runtime and runtime.verbose),
         )
 
