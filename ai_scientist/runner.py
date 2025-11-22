@@ -648,6 +648,19 @@ def _surrogate_rank_screen_candidates(
         minimize_objective=minimize_objective,
         exploration_ratio=cfg.proposal_mix.exploration_ratio,
     )
+    if cfg.problem.lower() == "p2":
+        # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
+        # gate P2 promotions on feasibility probability before objective.
+        prob_threshold = max(
+            0.0, min(1.0, cfg.adaptive_budgets.feasibility_target)
+        )
+        filtered_predictions = [
+            prediction
+            for prediction in ranked_predictions
+            if prediction.prob_feasible >= prob_threshold
+        ]
+        if filtered_predictions:
+            ranked_predictions = filtered_predictions
 
     selected: list[Mapping[str, Any]] = []
     needed = screen_budget
@@ -813,6 +826,11 @@ def _extract_objectives(entry: Mapping[str, Any]) -> tuple[float, float]:
     return gradient, aspect
 
 
+def _objective_proxy(entry: Mapping[str, Any]) -> float:
+    gradient, aspect = _extract_objectives(entry)
+    return gradient - aspect
+
+
 def _crowding_distance(
     entries_by_design: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, float]:
@@ -859,10 +877,21 @@ def _rank_candidates_for_promotion(
     summary = tools.summarize_p3_candidates(
         list(entries_by_design.values()), reference_point=reference_point
     )
+    # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
+    # rank promotions by feasibility first, then objective proxy.
     ordered_hashes = [entry.design_hash for entry in summary.pareto_entries]
-    ranked: list[Mapping[str, Any]] = [
-        entries_by_design[h] for h in ordered_hashes if h in entries_by_design
-    ]
+    ranked: list[Mapping[str, Any]] = sorted(
+        (
+            entries_by_design[h]
+            for h in ordered_hashes
+            if h in entries_by_design
+        ),
+        key=lambda entry: (
+            0.0 if _feasibility_value(entry) <= FEASIBILITY_CUTOFF else 1.0,
+            _feasibility_value(entry),
+            -_objective_proxy(entry),
+        ),
+    )
     if len(ranked) >= promote_limit:
         return ranked[:promote_limit]
     remaining = {
@@ -880,6 +909,7 @@ def _rank_candidates_for_promotion(
             feasible_flag,
             -crowding.get(design_hash, 0.0),
             feas,
+            -_objective_proxy(entry),
         )
 
     for design_hash in sorted(remaining, key=_sort_key):

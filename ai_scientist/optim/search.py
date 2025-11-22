@@ -16,7 +16,7 @@ import numpy as np
 
 from ai_scientist import tools
 
-_Method = Literal["nelder_mead", "cma_es"]
+_Method = Literal["nelder_mead", "cma_es", "nsga2", "ngopt"]
 
 
 @dataclass(frozen=True)
@@ -193,6 +193,74 @@ class P3SearchWrapper:
         aspect = float(metrics["aspect_ratio"])
         return gradient - aspect
 
+    def _crowding_distance(
+        self, fronts: list[list[int]], objectives: list[tuple[float, float]]
+    ) -> list[float]:
+        distances = [0.0 for _ in objectives]
+        for front in fronts:
+            if len(front) <= 2:
+                for idx in front:
+                    distances[idx] = float("inf")
+                continue
+            grad_sorted = sorted(front, key=lambda idx: objectives[idx][0], reverse=True)
+            aspect_sorted = sorted(front, key=lambda idx: objectives[idx][1])
+            grad_values = [objectives[idx][0] for idx in grad_sorted]
+            aspect_values = [objectives[idx][1] for idx in aspect_sorted]
+            grad_span = max(max(grad_values) - min(grad_values), 1e-9)
+            aspect_span = max(max(aspect_values) - min(aspect_values), 1e-9)
+            distances[grad_sorted[0]] = float("inf")
+            distances[grad_sorted[-1]] = float("inf")
+            distances[aspect_sorted[0]] = float("inf")
+            distances[aspect_sorted[-1]] = float("inf")
+            for pos in range(1, len(grad_sorted) - 1):
+                prev_val = objectives[grad_sorted[pos - 1]][0]
+                next_val = objectives[grad_sorted[pos + 1]][0]
+                distances[grad_sorted[pos]] += abs(next_val - prev_val) / grad_span
+            for pos in range(1, len(aspect_sorted) - 1):
+                prev_val = objectives[aspect_sorted[pos - 1]][1]
+                next_val = objectives[aspect_sorted[pos + 1]][1]
+                distances[aspect_sorted[pos]] += abs(next_val - prev_val) / aspect_span
+        return distances
+
+    def _nondominated_fronts(
+        self, objectives: list[tuple[float, float]], feasibilities: list[float]
+    ) -> list[list[int]]:
+        feasible_idx = [
+            idx
+            for idx, feas in enumerate(feasibilities)
+            if feas <= tools._DEFAULT_RELATIVE_TOLERANCE
+        ]
+        if not feasible_idx:
+            return [list(range(len(objectives)))]
+        fronts: list[list[int]] = []
+        remaining = set(feasible_idx)
+        while remaining:
+            front: list[int] = []
+            for idx in list(remaining):
+                dominates_any = False
+                dominated = False
+                for other in list(remaining):
+                    if idx == other:
+                        continue
+                    grad, aspect = objectives[idx]
+                    o_grad, o_aspect = objectives[other]
+                    if (o_grad >= grad and o_aspect <= aspect) and (
+                        o_grad > grad or o_aspect < aspect
+                    ):
+                        dominated = True
+                        break
+                    if (grad >= o_grad and aspect <= o_aspect) and (
+                        grad > o_grad or aspect < o_aspect
+                    ):
+                        dominates_any = True
+                if not dominated:
+                    front.append(idx)
+            if not front:
+                break
+            fronts.append(front)
+            remaining -= set(front)
+        return fronts if fronts else [list(range(len(objectives)))]
+
     def _update_state(
         self, best_vector: np.ndarray, hv_score: float, improved: bool
     ) -> None:
@@ -218,12 +286,45 @@ class P3SearchWrapper:
         metrics_seq = evaluation.get("metrics_list", [])
         if not metrics_seq:
             return []
-        scored: list[tuple[Mapping[str, Any], float]] = []
-        for candidate, metrics in zip(candidates, metrics_seq):
-            proxy_score = self._score_metrics(metrics)
-            scored.append((candidate, proxy_score))
+        if self._method in {"nsga2", "ngopt"}:
+            # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
+            # emulate NSGA-II style ordering with feasibility-first fronts.
+            objectives = [
+                (
+                    float(m["minimum_normalized_magnetic_gradient_scale_length"]),
+                    float(m["aspect_ratio"]),
+                )
+                for m in metrics_seq
+            ]
+            feasibilities = [float(f) for f in evaluation.get("feasibilities", [])]
+            fronts = self._nondominated_fronts(objectives, feasibilities)
+            distances = self._crowding_distance(fronts, objectives)
+            ordering: list[int] = []
+            for front in fronts:
+                ordering.extend(
+                    sorted(
+                        front,
+                        key=lambda idx: (
+                            -distances[idx],
+                            -self._score_metrics(metrics_seq[idx]),
+                        ),
+                    )
+                )
+            scored = [
+                (candidates[idx], self._score_metrics(metrics_seq[idx]))
+                for idx in ordering
+            ]
+        else:
+            scored = sorted(
+                [
+                    (candidate, self._score_metrics(metrics))
+                    for candidate, metrics in zip(candidates, metrics_seq)
+                ],
+                key=lambda item: item[1],
+                reverse=True,
+            )
         best_idx = max(range(len(scored)), key=lambda idx: scored[idx][1])
         best_vector = self._vectorizer.flatten(candidates[best_idx])
         improved = evaluation["hv_score"] >= self._best_score
         self._update_state(best_vector, float(evaluation["hv_score"]), improved)
-        return sorted(scored, key=lambda item: item[1], reverse=True)
+        return scored

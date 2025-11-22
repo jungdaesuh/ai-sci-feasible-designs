@@ -46,9 +46,9 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Retrain per policy; record cycle summaries in `cycles` table and `reports/cycle_<n>.json`.
 
 ### 5) HV / Objective Phase
-- [ ] P2: maximize `L∇B` with feasibility prob ≥ threshold.
-- [ ] P3: maintain Pareto archive on (Aspect Ratio, L∇B); compute HV each cycle; optimizer NSGA-II or NGOpt; promote top-K from surrogate batch to `refine/final` by feasibility then objective.
-- [ ] BudgetController adapts stage budgets using HV delta, feasibility rate, cache hit rate.
+- [x] P2: maximize `L∇B` with feasibility prob ≥ threshold.
+- [x] P3: maintain Pareto archive on (Aspect Ratio, L∇B); compute HV each cycle; optimizer NSGA-II or NGOpt; promote top-K from surrogate batch to `refine/final` by feasibility then objective.
+- [x] BudgetController adapts stage budgets using HV delta, feasibility rate, cache hit rate.
 
 ### 6) Planner & Agents (Autonomy + RPF)
 - [ ] Planner flag `--planner agent`; deterministic remains default.
