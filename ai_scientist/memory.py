@@ -7,7 +7,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -215,6 +215,15 @@ CREATE TABLE IF NOT EXISTS deterministic_snapshots (
     PRIMARY KEY (experiment_id, cycle),
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
+
+CREATE TABLE IF NOT EXISTS literature_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
 """
 
 DEFAULT_RELATIVE_TOLERANCE = 1e-2
@@ -296,7 +305,7 @@ class WorldModel:
         cursor = self._conn.execute(
             "INSERT INTO experiments (started_at, config_json, git_sha, constellaration_sha, notes) VALUES (?, ?, ?, ?, ?)",
             (
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 payload,
                 git_sha,
                 constellaration_sha or "unknown",
@@ -372,7 +381,7 @@ class WorldModel:
         commit: bool = True,
     ) -> None:
         payload = json.dumps(_normalize_to_json(snapshot), separators=(",", ":"))
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
 
         def _write() -> None:
             self._conn.execute(
@@ -408,7 +417,7 @@ class WorldModel:
         created_at: str | None = None,
         commit: bool = True,
     ) -> None:
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
         hv_exists = 0 if hv_score is None else 1
 
         def _write() -> None:
@@ -592,7 +601,7 @@ class WorldModel:
         commit: bool = True,
     ) -> int:
         digest = _hash_payload(tool_input)
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
         cursor = self._conn.execute(
             """
             INSERT INTO statements
@@ -619,6 +628,42 @@ class WorldModel:
         if commit:
             self._conn.commit()
         return statement_id
+
+    def log_note(
+        self,
+        experiment_id: int,
+        cycle: int,
+        content: str,
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        cursor = self._conn.execute(
+            "INSERT INTO literature_notes (experiment_id, cycle, content, created_at) VALUES (?, ?, ?, ?)",
+            (experiment_id, cycle, content, timestamp),
+        )
+        note_id = cursor.lastrowid
+        assert note_id is not None
+        if commit:
+            self._conn.commit()
+        return note_id
+
+    def notes(
+        self, experiment_id: int, cycle: int | None = None
+    ) -> list[Mapping[str, Any]]:
+        """Retrieve stored literature notes, optionally filtered by cycle."""
+        if cycle is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM literature_notes WHERE experiment_id = ? AND cycle = ? ORDER BY id ASC",
+                (experiment_id, cycle),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM literature_notes WHERE experiment_id = ? ORDER BY id ASC",
+                (experiment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def statements_for_cycle(
         self, experiment_id: int, cycle: int
@@ -672,6 +717,37 @@ class WorldModel:
             for row in rows
         ]
 
+    def cycle_summaries(self, experiment_id: int) -> list[dict[str, Any]]:
+        """Return cycle-level summaries combining stage history, budgets, and cycles tables."""
+
+        rows = self._conn.execute(
+            """
+            SELECT s.cycle,
+                   s.stage,
+                   b.best_objective,
+                   b.best_feasibility,
+                   c.hv_score
+            FROM stage_history s
+            LEFT JOIN budgets b
+              ON s.experiment_id = b.experiment_id AND s.cycle = b.cycle
+            LEFT JOIN cycles c
+              ON s.experiment_id = c.experiment_id AND s.cycle = c.cycle
+            WHERE s.experiment_id = ?
+            ORDER BY s.cycle ASC
+            """,
+            (experiment_id,),
+        ).fetchall()
+        return [
+            {
+                "cycle": row["cycle"],
+                "stage": row["stage"],
+                "objective": row["best_objective"],
+                "feasibility": row["best_feasibility"],
+                "hv": row["hv_score"],
+            }
+            for row in rows
+        ]
+
     def record_stage_history(
         self,
         experiment_id: int,
@@ -681,7 +757,7 @@ class WorldModel:
         selected_at: str | None = None,
         commit: bool = True,
     ) -> None:
-        timestamp = selected_at or datetime.utcnow().isoformat()
+        timestamp = selected_at or datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
             INSERT OR REPLACE INTO stage_history (experiment_id, cycle, stage, selected_at)
@@ -966,6 +1042,20 @@ class WorldModel:
             candidate_node = f"candidate:{pareto['candidate_id']}"
             if graph.has_node(candidate_node):
                 graph.add_edge(exp_node, candidate_node, relation="pareto_member")
+        note_rows = self._conn.execute(
+            "SELECT * FROM literature_notes WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchall()
+        for note in note_rows:
+            note_node = f"note:{note['id']}"
+            graph.add_node(
+                note_node,
+                type="note",
+                cycle=note["cycle"],
+                content=note["content"],
+                created_at=note["created_at"],
+            )
+            graph.add_edge(exp_node, note_node, relation="literature_note")
         return graph
 
     def surrogate_training_data(

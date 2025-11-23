@@ -14,6 +14,7 @@ import numpy as np
 from pymoo.indicators import hv as pymoo_hv
 
 from ai_scientist import rag
+from ai_scientist import memory
 from constellaration import forward_model
 from constellaration.geometry import surface_rz_fourier
 
@@ -804,3 +805,43 @@ def clear_evaluation_cache() -> None:
 
     _EVALUATION_CACHE.clear()
     _CACHE_STATS.clear()
+
+
+def write_note(
+    content: str,
+    *,
+    filename: str | None = None,
+    out_dir: Path | str | None = None,
+    world_model: Any | None = None,
+    experiment_id: int,
+    cycle: int,
+    memory_db: str | Path | None = None,
+) -> str:
+    """Write a literature note to disk and, if context is provided, persist it in the world model."""
+
+    target_dir = Path(out_dir) if out_dir else Path("reports/notes")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if not filename:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
+        filename = f"note_{digest}.md"
+
+    path = target_dir / filename
+    path.write_text(content, encoding="utf-8")
+
+    target_wm = world_model
+    owned = False
+    if target_wm is None and memory_db is not None:
+        target_wm = memory.WorldModel(memory_db)
+        owned = True
+    if target_wm is None:
+        raise ValueError("write_note requires world_model or memory_db for persistence.")
+    try:
+        target_wm.log_note(experiment_id=experiment_id, cycle=cycle, content=content)
+    except Exception as exc:  # pragma: no cover - safety for agent path
+        print(f"[write_note] failed to log note to world_model: {exc}")
+    finally:
+        if owned:
+            target_wm.close()
+
+    return f"Note saved to {path}: {content[:50]}..."

@@ -8,6 +8,7 @@ from typing import Mapping
 from unittest.mock import patch
 
 from ai_scientist import config as ai_config, memory, runner, tools
+from ai_scientist.runner import BudgetController, CycleBudgetFeedback
 
 
 class _DummyWorldModel:
@@ -223,3 +224,36 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
     snapshot_b, seed_b = capture_snapshot()
     assert seed_a == seed_b
     assert snapshot_a == snapshot_b
+
+
+def test_budget_controller_serialization_roundtrip():
+    base = ai_config.BudgetConfig(
+        screen_evals_per_cycle=4,
+        promote_top_k=2,
+        max_high_fidelity_evals_per_cycle=1,
+        wall_clock_minutes=1.0,
+        n_workers=1,
+        pool_type="thread",
+    )
+    adaptive = ai_config.AdaptiveBudgetConfig(
+        enabled=True,
+        hv_slope_reference=0.1,
+        feasibility_target=0.5,
+        cache_hit_target=0.5,
+        screen_bounds=ai_config.BudgetRangeConfig(min=1, max=8),
+        promote_top_k_bounds=ai_config.BudgetRangeConfig(min=1, max=4),
+        high_fidelity_bounds=ai_config.BudgetRangeConfig(min=1, max=2),
+    )
+    bc = BudgetController(base, adaptive)
+    bc.capture_cache_hit_rate("screen", stats={"hits": 5, "misses": 3})
+    bc.record_feedback(
+        CycleBudgetFeedback(hv_delta=0.2, feasibility_rate=0.7, cache_hit_rate=0.6)
+    )
+    data = bc.to_dict()
+    assert data["state_version"] == BudgetController.STATE_VERSION
+    assert data["adaptive_cfg"]["enabled"] is True
+    clone = BudgetController(base, adaptive)
+    clone.restore(data)
+    assert clone._last_feedback.hv_delta == 0.2
+    assert clone._last_feedback.feasibility_rate == 0.7
+    assert clone._cache_stats == bc._cache_stats

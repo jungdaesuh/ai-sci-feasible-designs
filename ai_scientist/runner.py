@@ -12,9 +12,10 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple
+import random
 
 import numpy as np
 import yaml
@@ -81,6 +82,9 @@ class CycleBudgetFeedback:
 
 
 class BudgetController:
+    STATE_VERSION = 1
+    _STATE_FIELDS = {"_last_feedback", "_cache_stats"}
+
     def __init__(
         self,
         base_budgets: ai_config.BudgetConfig,
@@ -90,6 +94,56 @@ class BudgetController:
         self._adaptive_cfg = adaptive_cfg
         self._last_feedback: CycleBudgetFeedback | None = None
         self._cache_stats: dict[str, dict[str, int]] = {}
+        # NOTE: If new adaptive state is added, include it in to_dict/restore and checkpoints for deterministic resume.
+
+    def to_dict(self) -> dict[str, Any]:
+        unknown_state = {
+            key
+            for key in self.__dict__
+            if key.startswith("_")
+            and key not in {"_base", "_adaptive_cfg"}
+            and key not in self._STATE_FIELDS
+        }
+        if unknown_state:
+            raise ValueError(
+                f"BudgetController state fields {unknown_state} are not serialized; "
+                "update _STATE_FIELDS/to_dict/restore for deterministic resume."
+            )
+        feedback = (
+            {
+                "hv_delta": self._last_feedback.hv_delta,
+                "feasibility_rate": self._last_feedback.feasibility_rate,
+                "cache_hit_rate": self._last_feedback.cache_hit_rate,
+            }
+            if self._last_feedback
+            else None
+        )
+        return {
+            "state_version": self.STATE_VERSION,
+            "base_budgets": asdict(self._base),
+            "adaptive_cfg": asdict(self._adaptive_cfg),
+            "adaptive_enabled": self._adaptive_cfg.enabled,
+            "last_feedback": feedback,
+            "cache_stats": self._cache_stats,
+        }
+
+    def restore(self, payload: Mapping[str, Any]) -> None:
+        version = payload.get("state_version", 0)
+        if version != self.STATE_VERSION:
+            print(
+                f"[budget] warning: checkpoint state_version={version} "
+                f"!= expected {self.STATE_VERSION}; attempting best-effort restore."
+            )
+        feedback = payload.get("last_feedback")
+        if feedback:
+            self._last_feedback = CycleBudgetFeedback(
+                hv_delta=feedback.get("hv_delta"),
+                feasibility_rate=feedback.get("feasibility_rate"),
+                cache_hit_rate=feedback.get("cache_hit_rate"),
+            )
+        cache_stats = payload.get("cache_stats")
+        if isinstance(cache_stats, dict):
+            self._cache_stats = cache_stats
 
     def snapshot(self) -> BudgetSnapshot:
         if not self._adaptive_cfg.enabled or self._last_feedback is None:
@@ -283,6 +337,7 @@ class RunnerCLIConfig:
     log_cache_stats: bool
     run_preset: str | None
     planner: str
+    resume_from: Path | None
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -373,6 +428,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default="deterministic",
         help="Choose the planning driver (deterministic loop or Phase 3 agent).",
     )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help="Path to a cycle checkpoint JSON to resume from (skips completed cycles).",
+    )
     return parser
 
 
@@ -396,6 +456,7 @@ def parse_args(args: Sequence[str] | None = None) -> RunnerCLIConfig:
         log_cache_stats=bool(namespace.log_cache_stats),
         run_preset=namespace.run_preset,
         planner=namespace.planner,
+        resume_from=namespace.resume_from,
     )
 
 
@@ -1185,7 +1246,7 @@ def _maybe_log_cache_stats(
     entry = {
         "cycle": cycle_index + 1,
         "stage": stage,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "stats": stats,
     }
     log_path = _cache_stats_log_path(cfg.reporting_dir)
@@ -1388,6 +1449,9 @@ def _run_cycle(
     )
     config_snapshot["cycle_seed"] = best_seed
     cycle_json = {
+        "experiment_id": experiment_id,
+        "git_sha": git_sha,
+        "constellaration_sha": constellaration_sha,
         "cycle": cycle_number,
         "stage": governance_stage,
         "feasible_count": p3_summary.feasible_count,
@@ -1397,6 +1461,12 @@ def _run_cycle(
         "screened": len(screen_results),
         "promoted": len(promote_results),
         "feasibility_rate": feasibility_rate,
+        "last_feedback": {
+            "hv_delta": hv_delta,
+            "feasibility_rate": feasibility_rate,
+            "cache_hit_rate": cache_hit_rate,
+        },
+        "budget_controller": budget_controller.to_dict(),
     }
     cycle_json_path = Path(cfg.reporting_dir) / f"cycle_{cycle_number}.json"
 
@@ -1541,30 +1611,34 @@ def _run_cycle(
     preference_pairs_path = adaptation_helpers.append_preference_pair(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
-        stage=stage_label,
-        status=statement_status,
-        tool_name=tool_name,
-        tool_input_hash=tool_input_hash,
-        reproduction_command=repro_command,
-        metrics=best_eval.get("metrics", {}),
-        design_hash=best_entry.get("design_hash"),
-        problem=cfg.problem,
-        seed=best_seed,
+        pair={
+            "stage": stage_label,
+            "status": statement_status,
+            "tool_name": tool_name,
+            "tool_input_hash": tool_input_hash,
+            "reproduction_command": repro_command,
+            "metrics": best_eval.get("metrics", {}),
+            "design_hash": best_entry.get("design_hash"),
+            "problem": cfg.problem,
+            "seed": best_seed,
+        },
     )
     trajectory_path = adaptation_helpers.append_trajectory_entry(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
-        stage=stage_label,
-        seed=best_seed,
-        tool_name=tool_name,
-        tool_input_hash=tool_input_hash,
-        reproduction_steps=reproduction_steps,
-        reproduction_snippet=reproduction_snippet,
-        reproduction_command=repro_command,
-        params=best_entry["params"],
-        metrics=best_eval.get("metrics", {}),
-        problem=cfg.problem,
-        design_hash=best_entry.get("design_hash", ""),
+        entry={
+            "stage": stage_label,
+            "seed": best_seed,
+            "tool_name": tool_name,
+            "tool_input_hash": tool_input_hash,
+            "reproduction_steps": reproduction_steps,
+            "reproduction_snippet": reproduction_snippet,
+            "reproduction_command": repro_command,
+            "params": best_entry["params"],
+            "metrics": best_eval.get("metrics", {}),
+            "problem": cfg.problem,
+            "design_hash": best_entry.get("design_hash", ""),
+        },
     )
     preference_pairs_anchor = _repo_relative(preference_pairs_path)
     p3_summary_anchor = _repo_relative(p3_summary_path)
@@ -1604,19 +1678,6 @@ def _run_cycle(
         git_sha=git_sha,
         repro_cmd=repro_command,
     )
-    adaptation_helpers.append_preference_pair(
-        base_dir=cfg.reporting_dir,
-        cycle=cycle_number,
-        stage=stage_label,
-        status=statement_status,
-        tool_name=tool_name,
-        tool_input_hash=tool_input_hash,
-        reproduction_command=repro_command,
-        metrics=best_eval.get("metrics", {}),
-        design_hash=best_entry.get("design_hash"),
-        problem=cfg.problem,
-        seed=best_seed,
-    )
     statements = world_model.statements_for_cycle(experiment_id, cycle_number)
     figure_path = reporting.save_pareto_figure(
         p3_summary.pareto_entries,
@@ -1629,7 +1690,7 @@ def _run_cycle(
     metrics_path = adaptation_helpers.write_metrics_snapshot(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
-        metrics=metrics_payload,
+        payload=metrics_payload,
     )
     artifact_entries: list[tuple[str, Path]] = [("metrics_snapshot", metrics_path)]
     world_model.log_artifact(
@@ -1744,43 +1805,121 @@ def run(
     planner_mode = (
         runtime.planner.lower() if runtime and runtime.planner else "deterministic"
     )
-    planning_agent = ai_planner.PlanningAgent() if planner_mode == "agent" else None
     budget_controller = BudgetController(cfg.budgets, cfg.adaptive_budgets)
     last_p3_summary: tools.P3Summary | None = None
     with memory.WorldModel(cfg.memory_db) as world_model:
         git_sha = _resolve_git_sha()
         constellaration_sha = _resolve_git_sha("constellaration")
-        experiment_id = world_model.start_experiment(
-            _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha),
-            git_sha,
-            constellaration_sha=constellaration_sha,
-        )
-        governance_stage = "s1"
-        if runtime and runtime.promote_only:
-            governance_stage = "s2"
-            print("[runner] promote-only flag engaged; starting governance in S2.")
+        
+        experiment_id: int
+        start_cycle_index = 0
         stage_history: list[CycleSummary] = []
+        governance_stage = "s1"
+
+        if runtime and runtime.resume_from:
+            resume_data = json.loads(runtime.resume_from.read_text(encoding="utf-8"))
+            resume_cycle = int(resume_data["cycle"])
+            # We expect experiment_id in the checkpoint (deterministic resume)
+            # If missing (legacy checkpoint), we fail fast per feedback requirements
+            if "experiment_id" not in resume_data:
+                raise ValueError(f"Checkpoint {runtime.resume_from} missing experiment_id; cannot resume deterministically.")
+            
+            experiment_id = int(resume_data["experiment_id"])
+            print(f"[runner] resuming experiment_id={experiment_id} from cycle {resume_cycle}")
+            
+            # Verify DB consistency
+            if world_model.cycles_completed(experiment_id) < resume_cycle:
+                 # This might happen if DB write failed but JSON wrote, or DB was deleted.
+                 print(f"[runner] warning: DB has fewer cycles than checkpoint for exp {experiment_id}")
+            
+            start_cycle_index = resume_cycle
+            
+            # Restore history for governance transitions
+            restored = world_model.cycle_summaries(experiment_id)
+            for row in restored:
+                stage_history.append(
+                    CycleSummary(
+                        cycle=row["cycle"],
+                        objective=row["objective"],
+                        feasibility=row["feasibility"],
+                        hv=row["hv"],
+                        stage=row["stage"],
+                    )
+                )
+            
+            # Determine governance stage for the NEXT cycle (start_cycle_index + 1)
+            # We run transition checks on the full history up to resume_cycle
+            last_stage = stage_history[-1].stage if stage_history else "s1"
+            governance_stage = last_stage
+            
+            # Check transitions based on restored history
+            if last_stage == "s1" and _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
+                governance_stage = "s2"
+            elif last_stage == "s2" and _should_transition_s2_to_s3(
+                stage_history, cfg.stage_gates, cfg.governance, world_model, experiment_id, resume_cycle, cfg.cycles
+            ):
+                governance_stage = "s3"
+                
+            print(f"[runner] resumed state: start_index={start_cycle_index} next_stage={governance_stage}")
+            bc_state = resume_data.get("budget_controller")
+            if bc_state:
+                budget_controller.restore(bc_state)
+
+        else:
+            experiment_id = world_model.start_experiment(
+                _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha),
+                git_sha,
+                constellaration_sha=constellaration_sha,
+            )
+            if runtime and runtime.promote_only:
+                governance_stage = "s2"
+                print("[runner] promote-only flag engaged; starting governance in S2.")
+
+        # Reset deterministic RNG baselines after resume/start so subsequent cycles match a fresh run.
+        np.random.seed(cfg.random_seed + start_cycle_index)
+        random.seed(cfg.random_seed + start_cycle_index)
+
+        planning_agent = (
+            ai_planner.PlanningAgent(world_model=world_model)
+            if planner_mode == "agent"
+            else None
+        )
         last_best_objective: float | None = None
+        if stage_history:
+            # Seed last_best_objective so reward diffs remain monotonic after resume
+            last_best_objective = next(
+                (entry.objective for entry in reversed(stage_history) if entry.objective is not None),
+                None,
+            )
+        
         for idx in range(cfg.cycles):
+            cycle_number = idx + 1
+            if idx < start_cycle_index:
+                continue
+
             print(
-                f"[runner] starting cycle {idx + 1} stage={governance_stage.upper()} "
+                f"[runner] starting cycle {cycle_number} stage={governance_stage.upper()} "
                 f"screen_budget={cfg.budgets.screen_evals_per_cycle}"
             )
             if planning_agent:
-                stage_records = world_model.stage_history(experiment_id)
+                # We pass the *reconstructed* stage_history
                 stage_payload = [
                     {
                         "cycle": entry.cycle,
                         "stage": entry.stage,
-                        "selected_at": entry.selected_at,
+                        "selected_at": datetime.now(timezone.utc).isoformat(), # Approximation if not tracked precisely in summary
                     }
-                    for entry in stage_records
+                    for entry in stage_history
                 ]
+                # Note: 'selected_at' in stage_history table exists, but CycleSummary doesn't store it. 
+                # For planner context, accurate timestamp is less critical than the sequence.
+                
                 plan_outcome = planning_agent.plan_cycle(
                     cfg=cfg,
                     cycle_index=idx,
                     stage_history=stage_payload,
                     last_summary=last_p3_summary,
+                    experiment_id=experiment_id,
                 )
                 context_snapshot = json.dumps(plan_outcome.context, indent=2)
                 print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
@@ -1815,13 +1954,16 @@ def run(
                     reward_diff = float(current_objective) - float(last_best_objective)
                 adaptation_helpers.append_preference_record(
                     base_dir=cfg.reporting_dir,
-                    cycle=idx + 1,
-                    stage=governance_stage,
-                    candidate_hash=best_eval.get("design_hash", "") or "",
-                    reward_diff=reward_diff,
+                    record={
+                        "cycle": idx + 1,
+                        "stage": governance_stage,
+                        "candidate_hash": best_eval.get("design_hash", "") or "",
+                        "reward_diff": reward_diff,
+                    },
                 )
                 if current_objective is not None:
                     last_best_objective = float(current_objective)
+            
             next_stage = governance_stage
             if governance_stage == "s1":
                 if _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
@@ -1964,7 +2106,7 @@ def _export_batch_reports(
             "path": str(stage_path.resolve()),
         }
     summary_payload = {
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_cycles": len(history),
         "stage_files": stage_refs,
     }

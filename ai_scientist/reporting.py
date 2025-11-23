@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -27,7 +27,7 @@ _POSITIONING_SOURCES = DEFAULT_INDEX_SOURCES + (
 
 
 def write_report(title: str, content: str, out_dir: str | Path = "reports") -> Path:
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_name = title.replace(" ", "_")
     out_path = Path(out_dir) / f"{ts}_{safe_name}.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)

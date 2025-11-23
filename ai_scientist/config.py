@@ -53,6 +53,7 @@ class ModelConfig:
     default_provider: str
     providers: Tuple["ProviderConfig", ...]
     agent_gates: Tuple[AgentGateConfig, ...]
+    role_map: Mapping[str, str]
 
     def get_provider(self, name: str | None = None) -> "ProviderConfig":
         alias = (name or self.default_provider).lower()
@@ -89,6 +90,9 @@ def load_model_config(path: str | Path | None = None) -> ModelConfig:
     instruct_alias = _env_override("AI_SCIENTIST_INSTRUCT_MODEL", instruct_alias)
     thinking_alias = str(model_data.get("thinking_model", "kimi-k2-thinking"))
     thinking_alias = _env_override("AI_SCIENTIST_THINKING_MODEL", thinking_alias)
+    role_map = model_data.get("role_map") or {}
+    if not isinstance(role_map, dict):
+        role_map = {}
     return ModelConfig(
         base_url=str(model_data.get("base_url", "http://localhost:8000")),
         instruct_model=instruct_alias,
@@ -101,6 +105,7 @@ def load_model_config(path: str | Path | None = None) -> ModelConfig:
         default_provider=default_provider,
         providers=providers,
         agent_gates=agent_gates,
+        role_map=role_map,
     )
 
 

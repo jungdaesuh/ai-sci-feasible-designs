@@ -7,7 +7,7 @@ import argparse
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -85,7 +85,7 @@ def _build_adapter_payload(
     return {
         "tool": tool,
         "stage": stage,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
         "preference_pair_count": len(entries),
         "dataset_path": dataset_path.as_posix(),
         "statuses": statuses,

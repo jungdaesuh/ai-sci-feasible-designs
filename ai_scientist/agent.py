@@ -18,6 +18,8 @@ _ROLE_ALIAS_MAP = {
     "planning": lambda cfg: cfg.thinking_model,
     "report": lambda cfg: cfg.thinking_model,
     "verification": lambda cfg: cfg.thinking_model,
+    "literature": lambda cfg: cfg.role_map.get("literature", cfg.thinking_model),
+    "analysis": lambda cfg: cfg.role_map.get("analysis", cfg.thinking_model),
 }
 
 

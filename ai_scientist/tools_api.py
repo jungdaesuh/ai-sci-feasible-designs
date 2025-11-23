@@ -114,6 +114,35 @@ _TOOL_DEFINITIONS: Sequence[ToolSchema] = (
         },
     },
     {
+        "name": "write_note",
+        "description": (
+            "Write a literature note or analysis insight to the world model and reports/notes/."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Markdown content of the note.",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional filename (e.g. 'analysis_cycle_1.md').",
+                },
+                "experiment_id": {
+                    "type": "integer",
+                    "description": "Optional experiment id for world-model persistence.",
+                },
+                "cycle": {
+                    "type": "integer",
+                    "description": "Optional cycle number for world-model persistence.",
+                },
+            },
+            "required": ["content", "experiment_id", "cycle"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "log_citation",
         "description": (
             "Register a doc citation for the current report draft (anchor optional, but include repo path)."

@@ -10,9 +10,10 @@ from typing import Any, Mapping, Sequence
 
 from ai_scientist import agent as agent_module
 from ai_scientist import config as ai_config
+from ai_scientist import memory
+from ai_scientist import rag
 from ai_scientist import tools
 from ai_scientist import tools_api
-from ai_scientist import rag
 
 
 class PlanningOutcome:
@@ -24,11 +25,13 @@ class PlanningOutcome:
         evaluation_summary: Mapping[str, Any],
         boundary_summary: Mapping[str, Any],
         rag_snippets: Sequence[Mapping[str, str]],
+        graph_summary: Mapping[str, Any] | None = None,
     ) -> None:
         self.context = context
         self.evaluation_summary = evaluation_summary
         self.boundary_summary = boundary_summary
         self.rag_snippets = rag_snippets
+        self.graph_summary = graph_summary
 
 
 def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | None:
@@ -58,20 +61,33 @@ class PlanningAgent:
         *,
         config: ai_config.ModelConfig | None = None,
         rag_index: Path | str | None = None,
+        world_model: memory.WorldModel | None = None,
     ) -> None:
         self.config = config or ai_config.load_model_config()
-        self.gate = agent_module.provision_model_tier(
+        self.planning_gate = agent_module.provision_model_tier(
             role="planning", config=self.config
         )
+        self.literature_gate = agent_module.provision_model_tier(
+            role="literature", config=self.config
+        )
+        self.analysis_gate = agent_module.provision_model_tier(
+            role="analysis", config=self.config
+        )
         self.rag_index = Path(rag_index or rag.DEFAULT_INDEX_PATH)
+        self.world_model = world_model
         self.last_context: Mapping[str, Any] | None = None
 
     def _hash_context(self, payload: Mapping[str, Any]) -> str:
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def _validate_tool_call(self, tool_name: str, arguments: Mapping[str, Any]) -> None:
-        agent_module.validate_tool_call(self.config, self.gate.model_alias, tool_name)
+    def _validate_tool_call(
+        self, gate: agent_module.AgentGate, tool_name: str, arguments: Mapping[str, Any]
+    ) -> None:
+        if not gate.allows(tool_name):
+            raise ValueError(
+                f"Tool '{tool_name}' is not permitted for {gate.model_alias} (role={gate.provider_model})"
+            )
         schema = tools_api.get_tool_schema(tool_name)
         if schema:
             parameters = schema.get("parameters", {})
@@ -83,14 +99,39 @@ class PlanningAgent:
                 )
         context_hash = self._hash_context(arguments)
         print(
-            f"[planner][tool-call] role={self.gate.model_alias} tool={tool_name} context_hash={context_hash}"
+            f"[planner][tool-call] role={gate.model_alias} tool={tool_name} context_hash={context_hash}"
         )
 
     def retrieve_rag(self, query: str, *, k: int = 3) -> list[dict[str, str]]:
         payload: dict[str, Any] = {"query": query}
         payload["k"] = k
-        self._validate_tool_call("retrieve_rag", payload)
+        # RAG is allowed for multiple roles; we check planning gate by default here
+        # but in a real loop the agent driver would pick the gate.
+        self._validate_tool_call(self.planning_gate, "retrieve_rag", payload)
         return tools.retrieve_rag(query, k=k, index_path=self.rag_index)
+
+    def write_note(
+        self,
+        content: str,
+        experiment_id: int,
+        cycle: int,
+        filename: str | None = None,
+    ) -> str:
+        payload = {
+            "content": content,
+            "filename": filename,
+            "experiment_id": experiment_id,
+            "cycle": cycle,
+        }
+        self._validate_tool_call(self.literature_gate, "write_note", payload)
+        return tools.write_note(
+            content,
+            filename=filename,
+            world_model=self.world_model,
+            experiment_id=experiment_id,
+            cycle=cycle,
+            memory_db=self.world_model.db_path if self.world_model else None,
+        )
 
     def evaluate_p3(
         self,
@@ -104,7 +145,7 @@ class PlanningAgent:
         }
         if stage is not None:
             args["stage"] = stage
-        self._validate_tool_call("evaluate_p3", args)
+        self._validate_tool_call(self.planning_gate, "evaluate_p3", args)
         try:
             return tools.evaluate_p3(params, stage=stage or "p3")
         except Exception as exc:  # pragma: no cover - smoke-run safety
@@ -122,7 +163,7 @@ class PlanningAgent:
         self, params: Mapping[str, Any]
     ) -> tools.surface_rz_fourier.SurfaceRZFourier:
         args = {"params": params}
-        self._validate_tool_call("make_boundary", args)
+        self._validate_tool_call(self.planning_gate, "make_boundary", args)
         return tools.make_boundary_from_params(params)
 
     def _build_template_params(
@@ -168,17 +209,19 @@ class PlanningAgent:
         evaluation_summary: Mapping[str, Any],
         boundary_summary: Mapping[str, Any],
         rag_snippets: Sequence[Mapping[str, str]],
+        graph_summary: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         context = {
             "cycle_index": cycle_index + 1,
-            "planner_role": self.gate.model_alias,
+            "planner_role": self.planning_gate.model_alias,
             "budgets": asdict(budgets),
             "stage_history": list(stage_history),
             "previous_p3_summary": _serialize_summary(last_summary),
             "latest_evaluation": evaluation_summary,
             "current_boundary": boundary_summary,
             "rag_snippets": list(rag_snippets),
-            "toolset": list(self.gate.allowed_tools),
+            "graph_summary": graph_summary,
+            "toolset": list(self.planning_gate.allowed_tools),
         }
         self.last_context = context
         return context
@@ -190,23 +233,30 @@ class PlanningAgent:
         cycle_index: int,
         stage_history: Sequence[Mapping[str, Any]],
         last_summary: tools.P3Summary | None,
+        experiment_id: int | None = None,
     ) -> PlanningOutcome:
+        cycle_number = cycle_index + 1
+        
+        # Literature Retrieval (planning role)
         rag_snippets = self.retrieve_rag(
-            f"Planning guidance for {cfg.problem.upper()} cycle {cycle_index + 1}",
+            f"Planning guidance for {cfg.problem.upper()} cycle {cycle_number}",
             k=3,
         )
+        
+        # Planning Role Actions
         params = self._build_template_params(cfg.boundary_template)
         evaluation = self.evaluate_p3(
             params,
             stage=cfg.fidelity_ladder.screen,
         )
         boundary = self.make_boundary(params)
+        
         evaluation_summary = {
             "objective": evaluation.get("objective"),
             "feasibility": evaluation.get("feasibility"),
             "hv": evaluation.get("hv"),
             "stage": evaluation.get("stage"),
-            "agent_stage_label": f"agent-cycle-{cycle_index + 1}",
+            "agent_stage_label": f"agent-cycle-{cycle_number}",
         }
         boundary_summary = {
             "n_poloidal_modes": boundary.n_poloidal_modes,
@@ -214,6 +264,31 @@ class PlanningAgent:
             "n_field_periods": boundary.n_field_periods,
             "stellarator_symmetric": boundary.is_stellarator_symmetric,
         }
+        
+        # Property Graph Snapshot (if world_model connected)
+        graph_summary: Mapping[str, Any] | None = None
+        if self.world_model and experiment_id is not None:
+            pg = self.world_model.to_networkx(experiment_id)
+            graph_dir = Path(cfg.reporting_dir) / "graphs"
+            graph_dir.mkdir(parents=True, exist_ok=True)
+            graph_file = graph_dir / f"cycle_{cycle_number}.json"
+            
+            snapshot_data = {
+                "nodes": pg.nodes,
+                "edges": [
+                    {"src": src, "dst": dst, "attrs": attrs} 
+                    for src, dst, attrs in pg.edges
+                ]
+            }
+            graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
+            
+            graph_summary = {
+                "node_count": len(pg.nodes),
+                "edge_count": len(pg.edges),
+                "note_count": sum(1 for n in pg.nodes.values() if n.get("type") == "note"),
+                "snapshot_path": str(graph_file)
+            }
+
         context = self._build_context(
             cycle_index=cycle_index,
             budgets=cfg.budgets,
@@ -222,10 +297,13 @@ class PlanningAgent:
             evaluation_summary=evaluation_summary,
             boundary_summary=boundary_summary,
             rag_snippets=rag_snippets,
+            graph_summary=graph_summary,
         )
+        
         return PlanningOutcome(
             context=context,
             evaluation_summary=evaluation_summary,
             boundary_summary=boundary_summary,
             rag_snippets=rag_snippets,
+            graph_summary=graph_summary,
         )

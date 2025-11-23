@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -156,7 +156,7 @@ class BoundaryWorldModel:
         created_at: str | None = None,
     ) -> str:
         design_hash = hash_boundary(r_cos, z_sin, schema_version, rounding)
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
             INSERT OR IGNORE INTO boundaries
@@ -191,7 +191,7 @@ class BoundaryWorldModel:
         schema_version: str,
         created_at: str | None = None,
     ) -> int:
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
         l2_margin = _l2_margin(margins)
         cursor = self._conn.execute(
             """
@@ -230,7 +230,7 @@ class BoundaryWorldModel:
         notes: str | None = None,
         created_at: str | None = None,
     ) -> None:
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
             INSERT OR REPLACE INTO cycles
