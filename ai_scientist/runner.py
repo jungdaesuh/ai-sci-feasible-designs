@@ -36,6 +36,7 @@ FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
 P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
 _BOUNDARY_SEED_CACHE: dict[Path, dict[str, Any]] = {}
 _SURROGATE_BUNDLE = SurrogateBundle()
+_LAST_SURROGATE_FIT_SEC = 0.0
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -678,17 +679,21 @@ def _surrogate_rank_screen_candidates(
     history = world_model.surrogate_training_data(
         target=target_column, problem=cfg.problem
     )
+    global _LAST_SURROGATE_FIT_SEC
+    _LAST_SURROGATE_FIT_SEC = 0.0
     metrics_list: tuple[Mapping[str, Any], ...]
     target_values: tuple[float, ...]
     if history:
         metrics_list, target_values = zip(*history)
         if _SURROGATE_BUNDLE.should_retrain(len(history), cycle=cycle):
+            start = time.perf_counter()
             _SURROGATE_BUNDLE.fit(
                 metrics_list,
                 target_values,
                 minimize_objective=minimize_objective,
                 cycle=cycle,
             )
+            _LAST_SURROGATE_FIT_SEC = time.perf_counter() - start
     else:
         metrics_list = tuple()
         target_values = tuple()
@@ -1233,6 +1238,10 @@ def _cache_stats_log_path(report_dir: Path | str) -> Path:
     return Path(report_dir) / "cache_stats.jsonl"
 
 
+def _observability_log_path(report_dir: Path | str) -> Path:
+    return Path(report_dir) / "observability.jsonl"
+
+
 def _maybe_log_cache_stats(
     runtime: RunnerCLIConfig | None,
     cfg: ai_config.ExperimentConfig,
@@ -1255,6 +1264,49 @@ def _maybe_log_cache_stats(
         handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
+def _vmec_failure_rate(results: Sequence[Mapping[str, Any]]) -> float:
+    if not results:
+        return 0.0
+    total = len(results)
+    failures = 0
+    for entry in results:
+        status = str(entry.get("evaluation", {}).get("vmec_status", "success")).lower()
+        if status and status not in {"ok", "success"}:
+            failures += 1
+    return float(failures) / float(total)
+
+
+def _log_observability_metrics(
+    cfg: ai_config.ExperimentConfig,
+    cycle_index: int,
+    *,
+    hv: float | None,
+    feasible_count: int,
+    vmec_failure_rate: float,
+    retrain_time: float,
+    cache_hit_rate: float,
+    budget_snapshot: BudgetSnapshot,
+) -> None:
+    entry = {
+        "cycle": cycle_index + 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "hv": hv,
+        "feasible_count": feasible_count,
+        "vmec_failure_rate": vmec_failure_rate,
+        "surrogate_retrain_seconds": retrain_time,
+        "cache_hit_rate": cache_hit_rate,
+        "budget_overrides": {
+            "screen_evals_per_cycle": budget_snapshot.screen_evals_per_cycle,
+            "promote_top_k": budget_snapshot.promote_top_k,
+            "max_high_fidelity": budget_snapshot.max_high_fidelity_evals_per_cycle,
+        },
+    }
+    path = _observability_log_path(cfg.reporting_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
 def _run_cycle(
     cfg: ai_config.ExperimentConfig,
     cycle_index: int,
@@ -1272,6 +1324,8 @@ def _run_cycle(
     evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
     cycle_start = time.perf_counter()
     cycle_number = cycle_index + 1
+    global _LAST_SURROGATE_FIT_SEC
+    _LAST_SURROGATE_FIT_SEC = 0.0
     sleep_per_eval = 0.05 if runtime and runtime.slow else 0.0
     screen_only = bool(runtime and runtime.screen_only)
     budget_snapshot = budget_controller.snapshot()
@@ -1410,11 +1464,22 @@ def _run_cycle(
     )
     total_designs = len(latest_by_design)
     feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))
+    vmec_failure_rate = _vmec_failure_rate(aggregated)
     hv_display = (
         f"{p3_summary.hv_score:.6f}" if p3_summary.feasible_count > 0 else "n/a"
     )
     print(
         f"[runner][cycle={cycle_number}] feasible={p3_summary.feasible_count}/{total_designs} hv={hv_display}"
+    )
+    _log_observability_metrics(
+        cfg,
+        cycle_index,
+        hv=p3_summary.hv_score,
+        feasible_count=p3_summary.feasible_count,
+        vmec_failure_rate=vmec_failure_rate,
+        retrain_time=_LAST_SURROGATE_FIT_SEC,
+        cache_hit_rate=cache_hit_rate,
+        budget_snapshot=budget_snapshot,
     )
     p3_summary_path = adaptation_helpers.write_p3_summary(
         base_dir=cfg.reporting_dir,
@@ -1448,6 +1513,10 @@ def _run_cycle(
         _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha)
     )
     config_snapshot["cycle_seed"] = best_seed
+    adapter_version = adapter.current_adapter_version(
+        tool_name, cfg.fidelity_ladder.promote
+    ) or adapter.current_adapter_version(tool_name, cfg.fidelity_ladder.screen)
+    config_snapshot["adapter_version"] = adapter_version
     cycle_json = {
         "experiment_id": experiment_id,
         "git_sha": git_sha,
@@ -1456,11 +1525,14 @@ def _run_cycle(
         "stage": governance_stage,
         "feasible_count": p3_summary.feasible_count,
         "hv": p3_summary.hv_score,
+        "vmec_failure_rate": vmec_failure_rate,
+        "surrogate_retrain_seconds": _LAST_SURROGATE_FIT_SEC,
         "reference_point": p3_summary.reference_point,
         "archive_size": p3_summary.archive_size,
         "screened": len(screen_results),
         "promoted": len(promote_results),
         "feasibility_rate": feasibility_rate,
+        "adapter_version": adapter_version,
         "last_feedback": {
             "hv_delta": hv_delta,
             "feasibility_rate": feasibility_rate,
@@ -1729,6 +1801,10 @@ def _run_cycle(
         stage=governance_stage,
     )
     stage_history_entries = world_model.stage_history(experiment_id)
+    property_graph_summary = world_model.property_graph_summary(experiment_id)
+    rag_citations = (
+        property_graph_summary.get("citations") if property_graph_summary else None
+    )
     adaptation_figures = reporting.collect_adaptation_figures(cfg.reporting_dir)
     anchor_candidates = (
         ("preference_pairs", preference_pairs_anchor),
@@ -1778,6 +1854,8 @@ def _run_cycle(
         stage_history=stage_history_entries,
         artifact_entries=artifact_entries,
         adaptation_figures=adaptation_figures,
+        property_graph_summary=property_graph_summary,
+        rag_citations=rag_citations,
         figure_paths=figure_paths,
         out_dir=cfg.reporting_dir,
     )

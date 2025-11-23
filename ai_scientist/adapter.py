@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping, Protocol
 _LOGGER = logging.getLogger(__name__)
 _ENV_VAR = "AI_SCIENTIST_PEFT"
 _ADAPTERS_ROOT = Path("reports") / "adapters"
+_ADAPTER_ROOT_ENV = "AI_SCIENTIST_ADAPTER_ROOT"
 _QUEUE_PATH = _ADAPTERS_ROOT / "queue.jsonl"
 _PERSIST_DIR_ENV = "AI_SCIENTIST_ADAPTER_PERSIST_DIR"
 
@@ -41,7 +42,8 @@ def register_adapter_persist_handler(name: str, handler: AdapterPersistHandler) 
 
 def _adapter_bundle_path(tool_name: str, stage: str) -> Path:
     normalized_stage = stage.lower().strip()
-    return _ADAPTERS_ROOT / tool_name / normalized_stage / "adapter.safetensors"
+    root = Path(os.getenv(_ADAPTER_ROOT_ENV, _ADAPTERS_ROOT))
+    return root / tool_name / normalized_stage / "adapter.safetensors"
 
 
 def _ensure_adapter_directory(path: Path) -> None:
@@ -49,7 +51,12 @@ def _ensure_adapter_directory(path: Path) -> None:
 
 
 def _queue_entry(
-    tool_name: str, stage: str, adapter_path: Path, backend: str | None, status: str
+    tool_name: str,
+    stage: str,
+    adapter_path: Path,
+    backend: str | None,
+    status: str,
+    version: str | None = None,
 ) -> dict[str, Any]:
     return {
         "tool": tool_name,
@@ -58,12 +65,14 @@ def _queue_entry(
         "backend": backend,
         "status": status,
         "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "version": version,
     }
 
 
 def _append_to_queue(entry: Mapping[str, Any]) -> None:
-    _ensure_adapter_directory(_QUEUE_PATH)
-    with _QUEUE_PATH.open("a", encoding="utf-8") as handle:
+    queue_path = Path(os.getenv(_ADAPTER_ROOT_ENV, _ADAPTERS_ROOT)) / "queue.jsonl"
+    _ensure_adapter_directory(queue_path)
+    with queue_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry))
         handle.write("\n")
 
@@ -75,11 +84,12 @@ def record_adapter_refresh(
     backend: str | None = None,
     status: str = "refreshed",
     adapter_path: Path | None = None,
+    version: str | None = None,
 ) -> None:
     """Expose queue logging so offline adapters can annotate backend refreshes."""
 
     bundle_path = adapter_path or _adapter_bundle_path(tool_name, stage)
-    entry = _queue_entry(tool_name, stage, bundle_path, backend, status)
+    entry = _queue_entry(tool_name, stage, bundle_path, backend, status, version)
     _append_to_queue(entry)
 
 
@@ -95,6 +105,43 @@ def _try_persist_adapter(adapter_path: Path, tool_name: str, stage: str) -> str 
         if handler(adapter_path, tool_name, stage):
             return backend_name
     return None
+
+
+def _metadata_path(root: Path, version: str | None = None) -> Path:
+    if version:
+        return root / f"metadata_{version}.json"
+    return root / "metadata.json"
+
+
+def _load_metadata(root: Path, version: str | None = None) -> dict[str, Any]:
+    for candidate in (_metadata_path(root, version), _metadata_path(root, None)):
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                _LOGGER.warning("Failed to parse adapter metadata at %s", candidate)
+    return {}
+
+
+def _extract_version(adapter_path: Path) -> str:
+    stem = adapter_path.stem
+    if stem.startswith("adapter_"):
+        return stem.replace("adapter_", "", 1)
+    return "current"
+
+
+def _latest_adapter_bundle(
+    tool_name: str, stage: str
+) -> tuple[Path | None, str | None, dict[str, Any]]:
+    bundle_root = _adapter_bundle_path(tool_name, stage).parent
+    candidates = [bundle_root / "adapter.safetensors", *sorted(bundle_root.glob("adapter_*.safetensors"))]
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        return None, None, {}
+    newest = max(existing, key=lambda path: path.stat().st_mtime)
+    version = _extract_version(newest)
+    metadata = _load_metadata(bundle_root, version)
+    return newest, version, metadata
 
 
 def _json_metadata_loader(adapter_path: Path, tool_name: str, stage: str) -> bool:
@@ -180,17 +227,20 @@ class AdapterState:
 
     loaded: dict[str, str] = field(default_factory=dict)
     updates: list[str] = field(default_factory=list)
+    versions: dict[str, str] = field(default_factory=dict)
 
     def load_lora_weights(self, label: str, stage: str) -> None:
         """Record when a LoRA bundle is staged for the current tool/stage."""
-        bundle_path = _adapter_bundle_path(label, stage)
-        if not bundle_path.exists():
-            self.loaded[f"{label}:{stage}"] = "missing"
+        bundle_path, version, metadata = _latest_adapter_bundle(label, stage)
+        key = f"{label}:{stage}"
+        if bundle_path is None:
+            self.loaded[key] = "missing"
+            self.versions[key] = "missing"
             _LOGGER.debug(
                 "Adapter bundle not found for %s:%s at %s",
                 label,
                 stage,
-                bundle_path,
+                _adapter_bundle_path(label, stage),
             )
             return
 
@@ -200,12 +250,15 @@ class AdapterState:
             if backend_name
             else f"ready:{bundle_path.as_posix()}"
         )
-        self.loaded[f"{label}:{stage}"] = status
+        version_label = metadata.get("version") or version or "unknown"
+        self.loaded[key] = status
+        self.versions[key] = version_label
         _LOGGER.debug(
-            "AdapterState.load_lora_weights label=%s stage=%s status=%s",
+            "AdapterState.load_lora_weights label=%s stage=%s status=%s version=%s",
             label,
             stage,
             status,
+            version_label,
         )
 
     def push_updates(self, label: str, stage: str) -> None:
@@ -215,7 +268,14 @@ class AdapterState:
         status = f"persisted:{persisted_backend}" if persisted_backend else "queued"
 
         if not persisted_backend:
-            entry = _queue_entry(label, stage, bundle_path, None, status)
+            entry = _queue_entry(
+                label,
+                stage,
+                bundle_path,
+                None,
+                status,
+                version=self.versions.get(f"{label}:{stage}"),
+            )
             _append_to_queue(entry)
 
         self.updates.append(f"{label}:{stage}:{status}")
@@ -235,6 +295,12 @@ def is_peft_enabled() -> bool:
     """Return True when the Wave 7 PEFT toggle is set in the environment."""
 
     return os.getenv(_ENV_VAR, "0").lower() in {"1", "true", "yes"}
+
+
+def current_adapter_version(tool_name: str, stage: str) -> str | None:
+    """Return the last loaded adapter version for the given tool/stage, if any."""
+
+    return adapter_state.versions.get(f"{tool_name}:{stage}")
 
 
 def prepare_peft_hook(tool_name: str, stage: str) -> None:

@@ -1058,6 +1058,26 @@ class WorldModel:
             graph.add_edge(exp_node, note_node, relation="literature_note")
         return graph
 
+    def property_graph_summary(self, experiment_id: int) -> Mapping[str, Any]:
+        """Return node/edge counts and citation anchors for reporting."""
+
+        graph = self.to_networkx(experiment_id)
+        citations = [
+            {
+                "source_path": attrs.get("source_path"),
+                "anchor": attrs.get("anchor"),
+                "quote": attrs.get("quote"),
+            }
+            for attrs in graph.nodes.values()
+            if isinstance(attrs, Mapping) and attrs.get("type") == "citation"
+        ]
+        return {
+            "node_count": len(graph.nodes),
+            "edge_count": len(graph.edges),
+            "citation_count": len(citations),
+            "citations": citations,
+        }
+
     def surrogate_training_data(
         self,
         *,

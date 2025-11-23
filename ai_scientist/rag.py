@@ -13,8 +13,13 @@ from typing import Iterable, List, Sequence
 
 DEFAULT_INDEX_PATH = Path("ai_scientist/rag_index.db")
 DEFAULT_INDEX_SOURCES = (
-    "2511.02824v2.md",
+    "docs/papers/2506.19583v1.md",
+    "docs/papers/2511.02824v2.md",
     "ConStellaration Fusion Challenge_ Benchmarks and Solution Strategies.md",
+    "docs/MASTER_PLAN_AI_SCIENTIST.md",
+    "docs/AI_SCIENTIST_PRODUCTION_PLAN.md",
+    "docs/AI_SCIENTIST_UPDATED_PLAN.md",
+    "docs/AI_SCIENTIST_UNIFIED_ROADMAP.md",
 )
 INDEX_TABLE_NAME = "rag_references"
 META_TABLE_NAME = "rag_index_meta"

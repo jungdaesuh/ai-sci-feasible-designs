@@ -57,19 +57,19 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Daemon (`scripts/daemon.py`): checkpoint per cycle, wall-clock guard, resume flag, `OMP_NUM_THREADS=1` in workers.
 
 ### 7) RAG Rebuild (RPF)
-- [ ] Convert PDFs with `markitdown 2506.19583v1.pdf -o docs/papers/2506.19583v1.md` and similarly for 2511.02824v2.
-- [ ] Build unified index over papers + MASTER plan + Production + Updated/Unified plans at `ai_scientist/rag_index.db`.
-- [ ] Tests: `tests/test_rag_indexing.py` asserts top-k hits from both papers.
+- [x] Convert PDFs with `markitdown 2506.19583v1.pdf -o docs/papers/2506.19583v1.md` and similarly for 2511.02824v2.
+- [x] Build unified index over papers + MASTER plan + Production + Updated/Unified plans at `ai_scientist/rag_index.db`.
+- [x] Tests: `tests/test_rag_indexing.py` asserts top-k hits from both papers.
 
 ### 8) Adapter Loop (Autonomy + RPF)
-- [ ] `scripts/train_adapters.py`: read preferences DB, build SFT/DPO dataset, train PEFT adapter, save to `reports/adapters/<tool>/<stage>/adapter.safetensors` + metadata.
-- [ ] Loader in `adapter.py`: load newest adapter when `AI_SCIENTIST_PEFT=1`; log adapter version in run metadata.
-- [ ] Cadence: nightly/manual; keep last N adapters, track in `reports/adapters/queue.jsonl`.
+- [x] `scripts/train_adapters.py`: read preferences DB, build SFT/DPO dataset, train PEFT adapter, save to `reports/adapters/<tool>/<stage>/adapter.safetensors` + metadata.
+- [x] Loader in `adapter.py`: load newest adapter when `AI_SCIENTIST_PEFT=1`; log adapter version in run metadata.
+- [x] Cadence: nightly/manual; keep last N adapters, track in `reports/adapters/queue.jsonl`.
 
 ### 9) Observability, Safety, CI
-- [ ] Metrics/logs: per-cycle HV, feasible count, VMEC failure rate, retrain time, cache hit rate, budget overrides, cache stats JSONL.
-- [ ] Reporting: include PropertyGraph summary and RAG citations with source spans.
-- [ ] CI: add sklearn install step; run surrogate/eval/unit tests and RAG test; optional perf check for RF timing.
+- [x] Metrics/logs: per-cycle HV, feasible count, VMEC failure rate, retrain time, cache hit rate, budget overrides, cache stats JSONL.
+- [x] Reporting: include PropertyGraph summary and RAG citations with source spans.
+- [x] CI: add sklearn install step; run surrogate/eval/unit tests and RAG test; optional perf check for RF timing.
 
 ## Presets and Commands
 - P3 production (deterministic): `python -m ai_scientist.runner --config configs/experiment.p3.prod.yaml --problem p3 --cycles 10`

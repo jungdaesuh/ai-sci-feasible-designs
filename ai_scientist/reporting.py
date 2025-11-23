@@ -181,6 +181,29 @@ def _collect_positioning_quotes(
     return quotes
 
 
+def _format_property_graph_section(
+    summary: Mapping[str, Any] | None,
+    rag_citations: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str]:
+    if summary is None:
+        return ["- PropertyGraph summary unavailable (no experiment context)."]
+    lines = [
+        f"- Nodes: {summary.get('node_count', 0)}",
+        f"- Edges: {summary.get('edge_count', 0)}",
+        f"- Citations tracked: {summary.get('citation_count', 0)}",
+    ]
+    citations = rag_citations or summary.get("citations") or []
+    if citations:
+        lines.append("- RAG citations:")
+        for citation in citations:
+            source = citation.get("source_path") or "unknown"
+            anchor = citation.get("anchor") or ""
+            quote = citation.get("quote") or ""
+            anchor_display = f"{source}:{anchor}" if anchor else source
+            lines.append(f"  - {anchor_display} — {quote}")
+    return lines
+
+
 def _build_positioning_section(
     p3_summary: Mapping[str, Any],
     *,
@@ -287,6 +310,8 @@ def build_cycle_report(
     stage_history: Sequence[StageHistoryEntry],
     artifact_entries: Sequence[tuple[str, Path]],
     adaptation_figures: Sequence[Path],
+    property_graph_summary: Mapping[str, Any] | None = None,
+    rag_citations: Sequence[Mapping[str, Any]] | None = None,
     out_dir: str | Path = "reports",
 ) -> str:
     validate_references(references)
@@ -336,6 +361,9 @@ def build_cycle_report(
         },
         positioning_artifacts=positioning_artifacts,
     )
+    graph_lines = _format_property_graph_section(
+        property_graph_summary, rag_citations=rag_citations
+    )
     document = [
         f"## Cycle {cycle_index + 1}",
         f"- Problem: {problem}",
@@ -352,6 +380,8 @@ def build_cycle_report(
         environment_block,
         "### Stage history",
         stage_table,
+        "### PropertyGraph",
+        *graph_lines,
         "### Phase 6 / P3 summary",
         *hv_lines,
         *positioning_section,
