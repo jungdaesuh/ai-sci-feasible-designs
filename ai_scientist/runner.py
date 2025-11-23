@@ -1144,6 +1144,7 @@ def _evaluate_stage(
             design_id = candidate.get("design_hash") or tools.design_hash(params)
             try:
                 evaluation = evaluate_fn(params, stage=stage)
+                evaluation.setdefault("vmec_status", "ok")
             except Exception as exc:  # noqa: BLE001
                 print(
                     f"[runner][stage-eval] Failed evaluation for design {design_id} "
@@ -1155,6 +1156,7 @@ def _evaluate_stage(
                     "max_violation": float("inf"),
                     "objective": float("inf"),
                     "is_feasible": False,
+                    "vmec_status": "exception",
                     "metrics": {
                         "minimum_normalized_magnetic_gradient_scale_length": 0.0,
                         "aspect_ratio": float("inf"),
@@ -1205,6 +1207,7 @@ def _evaluate_stage(
                     "max_violation": float("inf"),
                     "objective": float("inf"),
                     "is_feasible": False,
+                    "vmec_status": "exception",
                     "metrics": {
                         "minimum_normalized_magnetic_gradient_scale_length": 0.0,
                         "aspect_ratio": float("inf"),
@@ -1226,7 +1229,10 @@ def _evaluate_stage(
             results.append(
                 {
                     "params": candidate["params"],
-                    "evaluation": future.result(),
+                    "evaluation": {
+                        **future.result(),
+                        "vmec_status": future.result().get("vmec_status", "ok"),
+                    },
                     "seed": int(candidate["seed"]),
                     "design_hash": design_id or tools.design_hash(candidate["params"]),
                 }
