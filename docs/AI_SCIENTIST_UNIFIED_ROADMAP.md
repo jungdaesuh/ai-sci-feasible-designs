@@ -55,6 +55,7 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Roles: planning (retrieve_rag, make_boundary, evaluate_p3), literature (retrieve_rag, write_note), analysis (evaluate_p3, make_boundary); gate tools via AgentGate and log role/tool/context_hash.
 - [x] PropertyGraph per cycle from world-model + literature notes; snapshot to `reports/graphs/`; feed to planner prompt.
 - [x] Daemon (`scripts/daemon.py`): checkpoint per cycle, wall-clock guard, resume flag, `OMP_NUM_THREADS=1` in workers.
+- Canonical implementation: `ai_scientist/memory.py` (structured world model with PropertyGraph, statements, citations, candidates, cycles). Legacy `world_model.py` (boundaries/evals only) has been removed.
 
 ### 7) RAG Rebuild (RPF)
 - [x] Convert PDFs with `markitdown 2506.19583v1.pdf -o docs/papers/2506.19583v1.md` and similarly for 2511.02824v2.

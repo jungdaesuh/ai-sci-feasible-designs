@@ -1,4 +1,11 @@
-"""SQLite-backed world model for AI Scientist budgeting + logging."""
+"""SQLite-backed world model for AI Scientist budgeting + logging.
+
+This is the authoritative world model implementation for the AI Scientist.
+It fulfills the Unified Roadmap Workstream 6 / Autonomy Plan requirement
+for a per-cycle PropertyGraph and the Kosmos-style structured world model
+(statements, citations, candidates, cycles → graph snapshot). The legacy
+boundary-only world_model.py has been removed.
+"""
 
 from __future__ import annotations
 

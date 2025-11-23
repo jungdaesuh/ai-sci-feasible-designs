@@ -93,3 +93,4 @@ Dependencies / Constraints
 --------------------------
 - No dynamic imports or `any` casts; keep changes inside `ai_scientist/` + new scripts/docs.
 - Preserve legacy behavior behind flags; default configs stay conservative.
+- World model source of truth is `ai_scientist/memory.py` (PropertyGraph + statements/citations/candidates/cycles). The older boundary-only `world_model.py` is removed.
