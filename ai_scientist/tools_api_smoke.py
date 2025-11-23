@@ -47,6 +47,12 @@ def _build_sample_payload(tool_name: str) -> Mapping[str, Any]:
         }
     if tool_name == "retrieve_rag":
         return {"query": "Phase 3 planning guidance", "k": 2}
+    if tool_name == "write_note":
+        return {
+            "content": "Smoke note content for tool schema validation.",
+            "experiment_id": 0,
+            "cycle": 0,
+        }
     raise ValueError(f"No smoke sample defined for tool '{tool_name}'")
 
 

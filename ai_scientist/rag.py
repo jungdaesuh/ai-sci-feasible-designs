@@ -66,7 +66,8 @@ def _write_metadata(
 ) -> None:
     conn.execute(f"DELETE FROM {META_TABLE_NAME}")
     report_lines = []
-    for source in sources:
+    unique_sources = dict.fromkeys(sources)
+    for source in unique_sources:
         mtime = _file_mtime(Path(source)) or 0.0
         conn.execute(
             f"INSERT INTO {META_TABLE_NAME} (source, mtime, chunk_count) VALUES (?, ?, ?)",

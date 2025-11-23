@@ -314,17 +314,23 @@ class SurrogateBundle:
         exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
 
         if not self._trained:
-            logging.info("[surrogate] cold start ranking; preserving input order")
-            return [
-                SurrogatePrediction(
-                    expected_value=0.0,
-                    prob_feasible=0.0,
-                    predicted_objective=0.0,
-                    minimize_objective=minimize_objective,
-                    metadata=candidate,
+            logging.info("[surrogate] cold start ranking; using heuristic features")
+            cold_ranks: list[SurrogatePrediction] = []
+            for candidate in candidates:
+                params = candidate.get("candidate_params") or candidate.get("params", {})
+                features = _params_feature_vector(params)
+                base_score = float(features[0]) if features.size else 0.0
+                score = -base_score if minimize_objective else base_score
+                cold_ranks.append(
+                    SurrogatePrediction(
+                        expected_value=score,
+                        prob_feasible=0.0,
+                        predicted_objective=base_score,
+                        minimize_objective=minimize_objective,
+                        metadata=candidate,
+                    )
                 )
-                for candidate in candidates
-            ]
+            return sorted(cold_ranks, key=lambda item: item.expected_value, reverse=True)
 
         metrics_list: list[Mapping[str, Any]] = []
         for candidate in candidates:

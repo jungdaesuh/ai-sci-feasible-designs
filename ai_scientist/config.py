@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any, Mapping, Tuple
@@ -53,7 +53,7 @@ class ModelConfig:
     default_provider: str
     providers: Tuple["ProviderConfig", ...]
     agent_gates: Tuple[AgentGateConfig, ...]
-    role_map: Mapping[str, str]
+    role_map: Mapping[str, str] = field(default_factory=dict)
 
     def get_provider(self, name: str | None = None) -> "ProviderConfig":
         alias = (name or self.default_provider).lower()

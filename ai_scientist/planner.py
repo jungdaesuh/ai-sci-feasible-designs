@@ -273,19 +273,18 @@ class PlanningAgent:
             graph_dir.mkdir(parents=True, exist_ok=True)
             graph_file = graph_dir / f"cycle_{cycle_number}.json"
             
-            snapshot_data = {
-                "nodes": pg.nodes,
-                "edges": [
-                    {"src": src, "dst": dst, "attrs": attrs} 
-                    for src, dst, attrs in pg.edges
-                ]
-            }
+            nodes = [{"id": node, **attrs} for node, attrs in pg.nodes(data=True)]
+            edges = [
+                {"src": src, "dst": dst, "attrs": attrs}
+                for src, dst, attrs in pg.edges(data=True)
+            ]
+            snapshot_data = {"nodes": nodes, "edges": edges}
             graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
             
             graph_summary = {
-                "node_count": len(pg.nodes),
-                "edge_count": len(pg.edges),
-                "note_count": sum(1 for n in pg.nodes.values() if n.get("type") == "note"),
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "note_count": sum(1 for n in nodes if n.get("type") == "note"),
                 "snapshot_path": str(graph_file)
             }
 

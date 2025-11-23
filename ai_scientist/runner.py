@@ -338,7 +338,7 @@ class RunnerCLIConfig:
     log_cache_stats: bool
     run_preset: str | None
     planner: str
-    resume_from: Path | None
+    resume_from: Path | None = None
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -664,7 +664,7 @@ def _surrogate_rank_screen_candidates(
     candidates: list[Mapping[str, Any]],
     world_model: memory.WorldModel,
     *,
-    cycle: int,
+    cycle: int = 0,
     verbose: bool = False,
 ) -> list[Mapping[str, Any]]:
     """Train SurrogateBundle on cached history and trim the pool."""
