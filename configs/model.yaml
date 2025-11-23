@@ -49,3 +49,19 @@ model:
         - retrieve_rag
         - write_report
       system_prompt: "Synthesize cycle-level summaries, reference docs/TASKS_CODEX_MINI.md:157-190, and plan the next wave."
+    "literature_agent":
+      provider_model: "kwaipilot/kat-coder-pro:free"
+      allowed_tools:
+        - retrieve_rag
+        - write_note
+      system_prompt: "You are a literature researcher. Retrieve papers, synthesize insights, and write notes to the world model."
+    "analysis_agent":
+      provider_model: "kwaipilot/kat-coder-pro:free"
+      allowed_tools:
+        - evaluate_p3
+        - make_boundary
+        - write_note
+      system_prompt: "You are a physics analyst. Evaluate designs and document findings."
+  role_map:
+    literature: "literature_agent"
+    analysis: "analysis_agent"
