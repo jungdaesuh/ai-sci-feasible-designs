@@ -174,6 +174,7 @@ class ProposalMixConfig:
     exploration_ratio: float
     jitter_scale: float
     surrogate_pool_multiplier: float = 2.0
+    sampler_type: str = "standard"
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,7 @@ class ExperimentConfig:
     reporting_dir: Path
     memory_db: Path
     source_config: Path
+    reporting: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _boundary_template_from_dict(
@@ -295,6 +297,7 @@ def _proposal_mix_from_dict(
         exploration_ratio=exploration_ratio,
         jitter_scale=float(config.get("jitter_scale", 0.01)),
         surrogate_pool_multiplier=float(config.get("surrogate_pool_multiplier", 2.0)),
+        sampler_type=str(config.get("sampler_type", "standard")),
     )
 
 
@@ -388,4 +391,5 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         reporting_dir=Path(payload.get("reporting_dir", "reports")),
         memory_db=Path(payload.get("memory_db", DEFAULT_MEMORY_DB_PATH)),
         source_config=config_path,
+        reporting=payload.get("reporting", {}),
     )

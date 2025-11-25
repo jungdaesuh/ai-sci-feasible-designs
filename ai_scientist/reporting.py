@@ -413,3 +413,20 @@ def collect_adaptation_figures(out_dir: str | Path = "reports") -> list[Path]:
     for pattern in ("*.png", "*.svg", "*.jpg", "*.jpeg"):
         collected.extend(sorted(figure_dir.glob(pattern)))
     return sorted(collected)
+
+
+def export_metrics_to_prometheus_textfile(metrics: Mapping[str, Any], file_path: Path) -> None:
+    try:
+        from prometheus_client import CollectorRegistry, Gauge, write_to_textfile
+    except ImportError:
+        _LOGGER.warning("prometheus_client not installed, skipping metrics export")
+        return
+
+    registry = CollectorRegistry()
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            safe_key = key.replace(" ", "_").replace("-", "_").lower()
+            g = Gauge(f"ai_scientist_{safe_key}", f"Metric: {key}", registry=registry)
+            g.set(value)
+    
+    write_to_textfile(str(file_path), registry)

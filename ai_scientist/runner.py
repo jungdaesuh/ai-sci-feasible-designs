@@ -27,6 +27,7 @@ from ai_scientist import planner as ai_planner
 from ai_scientist import rag
 from ai_scientist import reporting
 from ai_scientist import tools
+from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import SurrogateBundle
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_rotating_ellipse
@@ -638,9 +639,27 @@ def _propose_p3_candidates_for_cycle(
         )
 
     remaining = total_candidates - len(sampler_results)
-    random_results: list[Mapping[str, Any]] = []
+    remaining_seeds = []
     for _ in range(remaining):
-        seed = next(seed_iter)
+        try:
+            remaining_seeds.append(next(seed_iter))
+        except StopIteration:
+            break
+
+    random_results: list[Mapping[str, Any]] = []
+    
+    if cfg.proposal_mix.sampler_type == "near_axis":
+        try:
+            sampler = NearAxisSampler(cfg.boundary_template)
+            random_results = sampler.generate(remaining_seeds)
+        except Exception as exc:
+            print(f"[runner] NearAxisSampler failed: {exc}; falling back to standard random")
+            random_results = []
+
+    used_seeds = {c["seed"] for c in random_results}
+    fallback_seeds = [s for s in remaining_seeds if s not in used_seeds]
+
+    for seed in fallback_seeds:
         random_results.append(
             {
                 **_generate_candidate_params(cfg.boundary_template, seed),
@@ -1495,6 +1514,21 @@ def _run_cycle(
         cache_hit_rate=cache_hit_rate,
         budget_snapshot=budget_snapshot,
     )
+    
+    if cfg.reporting.get("prometheus_export_enabled", False):
+        prom_path = Path(cfg.reporting_dir) / "metrics.prom"
+        reporting.export_metrics_to_prometheus_textfile(
+            {
+                "cycle_hv": p3_summary.hv_score or 0.0,
+                "feasible_count": p3_summary.feasible_count,
+                "vmec_failure_rate": vmec_failure_rate,
+                "surrogate_retrain_seconds": _LAST_SURROGATE_FIT_SEC,
+                "cache_hit_rate": cache_hit_rate,
+                "cycle": cycle_number,
+            },
+            prom_path,
+        )
+
     p3_summary_path = adaptation_helpers.write_p3_summary(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,

@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "[ci] upgrading pip and installing dependencies"
 python -m pip install --upgrade pip
-python -m pip install scikit-learn
+python -m pip install "scikit-learn>=1.3.0,<1.5" prometheus_client
 
 echo "[ci] running surrogate and evaluation smoke tests"
 pytest -q tests/test_surrogate_bundle.py tests/test_tools_reliability.py

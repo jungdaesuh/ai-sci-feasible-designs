@@ -48,3 +48,5 @@ boundary_template:
   perturbation_scale: 0.03
 reporting_dir: reports
 memory_db: reports/ai_scientist.sqlite
+reporting:
+  prometheus_export_enabled: false

@@ -1,0 +1,29 @@
+# configs/experiment.p3.agent.yaml
+# Agent-driven preset for P3 problem, based on the production preset with agent planner enabled.
+# Based on docs/AI_SCIENTIST_UNIFIED_ROADMAP.md and docs/AI_SCIENTIST_AUTONOMY_PLAN.md.
+
+problem: p3
+
+boundary_template:
+  n_field_periods: 3
+  seed_path: configs/seeds/rotating_ellipse_p3.json
+  perturbation_scale: 0.01
+
+proposal_mix:
+  constraint_ratio: 0.7
+  exploration_ratio: 0.3
+  jitter_scale: 0.01
+  surrogate_pool_multiplier: 3.0
+
+budgets:
+  screen_evals_per_cycle: 24
+  promote_top_k: 6
+  max_high_fidelity_evals_per_cycle: 4
+
+adaptive_budgets:
+  enabled: true
+
+planner: agent # Enable agent planner
+
+reporting:
+  prometheus_export_enabled: false

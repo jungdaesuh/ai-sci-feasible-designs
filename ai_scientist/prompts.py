@@ -211,6 +211,12 @@ REPRO_PROMPT = (
     "seed, fidelity, settings dump, and a rerun command for an archived design."
 )
 
+# New constant for physics heuristics
+PHYSICS_HEURISTICS_GUIDANCE = (
+    "PHYSICS HEURISTICS: Reduce high (m>2, n>2) modes for feasibility; "
+    "increase m=1 to boost gradient (warn it raises aspect ratio); "
+    "never change n_field_periods."
+)
 
 def get_problem_spec(problem: str) -> ProblemSpec:
     key = problem.lower()
@@ -228,6 +234,7 @@ def build_problem_prompt(problem: str, stage: str) -> str:
         f"{BUDGET_REMINDER}\n"
         f"{TOOL_REMINDER}\n"
         f"{REPRO_PROMPT}\n"
+        f"{PHYSICS_HEURISTICS_GUIDANCE}\n"
     )
 
 

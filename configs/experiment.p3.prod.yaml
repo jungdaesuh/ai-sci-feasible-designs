@@ -1,0 +1,27 @@
+# configs/experiment.p3.prod.yaml
+# Production-grade preset for P3 problem, emphasizing stability and physics-aligned exploration.
+# Based on docs/AI_SCIENTIST_RESEARCH_PRODUCTION_FIX.md and docs/AI_SCIENTIST_UNIFIED_ROADMAP.md.
+
+problem: p3 # Explicitly define the problem key as per typical config usage.
+
+boundary_template:
+  n_field_periods: 3
+  seed_path: configs/seeds/rotating_ellipse_p3.json
+  perturbation_scale: 0.01
+
+proposal_mix:
+  constraint_ratio: 0.7
+  exploration_ratio: 0.3
+  jitter_scale: 0.01
+  surrogate_pool_multiplier: 3.0
+
+budgets:
+  screen_evals_per_cycle: 24
+  promote_top_k: 6
+  max_high_fidelity_evals_per_cycle: 4
+
+adaptive_budgets:
+  enabled: true # From section 4 of RPF, 'adaptive_budgets.enabled' by default in prod preset
+
+reporting:
+  prometheus_export_enabled: false
