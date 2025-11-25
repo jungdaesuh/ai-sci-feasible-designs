@@ -1,0 +1,57 @@
+problem: p3
+cycles: 10
+random_seed: 12345
+budgets:
+  screen_evals_per_cycle: 16
+  promote_top_k: 4
+  max_high_fidelity_evals_per_cycle: 4
+  wall_clock_minutes: 10
+  n_workers: 1
+  pool_type: process
+adaptive_budgets:
+  enabled: true
+  hv_slope_reference: 0.05
+  feasibility_target: 0.5
+  cache_hit_target: 0.3
+  screen_evals_per_cycle:
+    min: 8
+    max: 32
+  promote_top_k:
+    min: 2
+    max: 8
+  max_high_fidelity_evals_per_cycle:
+    min: 2
+    max: 8
+stage_gates:
+  s1_to_s2_feasibility_margin: 0.01
+  s1_to_s2_objective_improvement: 0.02
+  s1_to_s2_lookback_cycles: 3
+  s2_to_s3_hv_delta: 0.01
+  s2_to_s3_lookback_cycles: 3
+governance:
+  min_feasible_for_promotion: 1
+  hv_lookback: 3
+proposal_mix:
+  constraint_ratio: 0.5
+  exploration_ratio: 0.5
+  jitter_scale: 0.05
+  surrogate_pool_multiplier: 4.0
+fidelity_ladder:
+  screen: screen
+  promote: promote
+boundary_template:
+  n_poloidal_modes: 3
+  n_toroidal_modes: 3
+  n_field_periods: 3
+  base_major_radius: 1.0
+  base_minor_radius: 0.5
+  perturbation_scale: 0.05
+  seed_path: configs/seeds/infeasible_torus.json
+reporting_dir: reports/benchmark_cold_start
+memory_db: reports/benchmark_cold_start/world_model.sqlite
+reporting:
+  prometheus_export_enabled: false
+constraint_weights:
+  mhd: 10.0
+  qi: 1.0
+  elongation: 1.0

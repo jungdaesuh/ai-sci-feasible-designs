@@ -407,8 +407,8 @@ def _p3_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
 
 
 def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
-    gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
-    aspect = float(metrics["aspect_ratio"])
+    gradient = float(metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0))
+    aspect = float(metrics.get("aspect_ratio", 1e9)) # Large value if aspect ratio is missing
     return -gradient, aspect
 
 
@@ -828,6 +828,141 @@ def normalized_constraint_distance_sampler(
             proposals.append(perturbed)
 
     return proposals
+
+
+def recombine_designs(
+    parent_a: Mapping[str, Any] | BoundaryParams,
+    parent_b: Mapping[str, Any] | BoundaryParams,
+    *,
+    alpha: float | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Perform geometric crossover between two parent designs via coefficient interpolation.
+    
+    Args:
+        parent_a: First parent boundary parameters.
+        parent_b: Second parent boundary parameters.
+        alpha: Interpolation weight (0.0 = parent_b, 1.0 = parent_a). 
+               If None, a random value in [0, 1] is chosen.
+        seed: Random seed for alpha generation if alpha is None.
+    
+    Returns:
+        A new parameter dictionary representing the interpolated boundary.
+    """
+    params_a = _ensure_mapping(parent_a)
+    params_b = _ensure_mapping(parent_b)
+    
+    rng = np.random.default_rng(seed)
+    mix_alpha = alpha if alpha is not None else rng.random()
+    
+    # Ensure we mix in Fourier space
+    # We need to align shapes. Assuming similar templates for now.
+    # TODO: Handle mismatching shapes by zero-padding?
+    # For now, assume they are compatible or truncation happens naturally.
+    
+    new_params: dict[str, Any] = {}
+    
+    # Keys to interpolate
+    keys = ["r_cos", "z_sin", "r_sin", "z_cos"]
+    
+    for key in keys:
+        val_a = np.asarray(params_a.get(key, []), dtype=float)
+        val_b = np.asarray(params_b.get(key, []), dtype=float)
+        
+        if val_a.size == 0 and val_b.size == 0:
+            continue
+        
+        # Handle potentially different shapes (padding)
+        shape_a = val_a.shape
+        shape_b = val_b.shape
+        
+        if shape_a != shape_b:
+            # Determine max shape
+            max_rows = max(shape_a[0] if len(shape_a) > 0 else 0, shape_b[0] if len(shape_b) > 0 else 0)
+            max_cols = max(shape_a[1] if len(shape_a) > 1 else 0, shape_b[1] if len(shape_b) > 1 else 0)
+            
+            target_shape = (max_rows, max_cols)
+            
+            # Pad A
+            pad_a = np.zeros(target_shape, dtype=float)
+            if val_a.size > 0:
+                pad_a[:shape_a[0], :shape_a[1]] = val_a
+            val_a = pad_a
+            
+            # Pad B
+            pad_b = np.zeros(target_shape, dtype=float)
+            if val_b.size > 0:
+                pad_b[:shape_b[0], :shape_b[1]] = val_b
+            val_b = pad_b
+            
+        # Interpolate
+        new_val = mix_alpha * val_a + (1.0 - mix_alpha) * val_b
+        new_params[key] = new_val.tolist()
+        
+    # Copy metadata from parent A (or B)
+    new_params["n_field_periods"] = params_a.get("n_field_periods", params_b.get("n_field_periods", 1))
+    new_params["is_stellarator_symmetric"] = params_a.get("is_stellarator_symmetric", True)
+    
+    return new_params
+
+
+def structured_unflatten(
+    flattened_vector: np.ndarray,
+    schema: FlattenSchema,
+) -> Mapping[str, Any]:
+    """Convert a flattened array of Fourier coefficients back to a dictionary of parameters.
+
+    Args:
+        flattened_vector: A 1D numpy array of Fourier coefficients.
+        schema: The FlattenSchema used to flatten the original parameters.
+
+    Returns:
+        A dictionary of parameters with 'r_cos', 'z_sin', etc.
+    """
+    params: dict[str, Any] = {}
+    
+    # Initialize matrices with zeros based on schema
+    r_cos_matrix = np.zeros((schema.mpol + 1, 2 * schema.ntor + 1), dtype=float)
+    z_sin_matrix = np.zeros((schema.mpol + 1, 2 * schema.ntor + 1), dtype=float)
+    
+    offset = 0
+    
+    # Fill r_cos
+    for m in range(schema.mpol + 1):
+        for n_idx in range(2 * schema.ntor + 1): # Corresponds to n from -ntor to +ntor
+            if offset < len(flattened_vector):
+                r_cos_matrix[m, n_idx] = flattened_vector[offset]
+                offset += 1
+            else:
+                break
+        if offset >= len(flattened_vector):
+            break
+            
+    # Fill z_sin
+    for m in range(schema.mpol + 1):
+        for n_idx in range(2 * schema.ntor + 1): # Corresponds to n from -ntor to +ntor
+            if offset < len(flattened_vector):
+                z_sin_matrix[m, n_idx] = flattened_vector[offset]
+                offset += 1
+            else:
+                break
+        if offset >= len(flattened_vector):
+            break
+
+    # Convert n_idx back to n value for mapping to original structure.
+    # The current structured_flatten maps (m,n) coefficients for n from -ntor to ntor.
+    # The matrix representation uses index 0 to 2*ntor for n from -ntor to ntor.
+    # So n_idx maps directly.
+    
+    params["r_cos"] = r_cos_matrix.tolist()
+    params["z_sin"] = z_sin_matrix.tolist()
+    
+    # Assuming n_field_periods and is_stellarator_symmetric are carried over from original.
+    # We will need to ensure these are set correctly when reconstructing.
+    # For now, this function only reconstructs the Fourier coefficients.
+    # Metadata like n_field_periods should be handled by the caller or passed through.
+
+    return params
 
 
 def get_cache_stats(stage: str) -> Mapping[str, int]:

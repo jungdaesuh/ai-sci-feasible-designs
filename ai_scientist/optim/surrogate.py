@@ -130,6 +130,9 @@ class SurrogatePrediction:
     predicted_objective: float
     minimize_objective: bool
     metadata: Mapping[str, Any]
+    predicted_mhd: float | None = None
+    predicted_qi: float | None = None
+    predicted_elongation: float | None = None
 
 
 class SurrogateBundle:
@@ -172,7 +175,7 @@ class SurrogateBundle:
 
         self._scaler: StandardScaler | None = None
         self._classifier: RandomForestClassifier | None = None
-        self._regressor: RandomForestRegressor | None = None
+        self._regressors: dict[str, RandomForestRegressor] = {}
         self._schema: tools.FlattenSchema | None = None
         self._trained = False
         self._last_fit_count = 0
@@ -235,15 +238,35 @@ class SurrogateBundle:
             return
 
         feasibility_labels = self._label_feasibility(metrics_list)
-        regression_targets = np.asarray(target_values, dtype=float)
+        
+        # Prepare targets for regression
+        primary_targets = np.asarray(target_values, dtype=float)
+        
+        # Auxiliary targets
+        aux_targets: dict[str, list[float]] = {
+            "mhd": [],
+            "qi": [],
+            "elongation": []
+        }
+        
+        for metrics in metrics_list:
+            # Handle nested metrics structure if present, or direct keys
+            m_payload = metrics.get("metrics", metrics)
+            
+            # MHD: vacuum_well (>=0 is good). We often want to predict violation or raw value.
+            # Let's predict the raw value.
+            aux_targets["mhd"].append(float(m_payload.get("vacuum_well", -1.0)))
+            
+            # QI: qi (lower is better)
+            aux_targets["qi"].append(float(m_payload.get("qi", 1.0)))
+            
+            # Elongation: max_elongation (lower is better)
+            aux_targets["elongation"].append(float(m_payload.get("max_elongation", 10.0)))
+
+        aux_target_arrays = {k: np.asarray(v, dtype=float) for k, v in aux_targets.items()}
 
         feasible_mask = feasibility_labels == 1
-        if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
-            features_reg = features[feasible_mask]
-            regression_targets = regression_targets[feasible_mask]
-        else:
-            features_reg = features
-
+        
         # Align classifier features to all rows; regressor uses features_reg.
         def _train_bundle() -> None:
             scaler = StandardScaler()
@@ -255,19 +278,42 @@ class SurrogateBundle:
                 n_jobs=1,
             )
             clf.fit(scaled_class, feasibility_labels)
-
-            scaled_reg = scaler.transform(features_reg)
-            reg = RandomForestRegressor(
-                n_estimators=12,
-                max_depth=6,
-                random_state=0,
-                n_jobs=1,
+            
+            regressors = {}
+            
+            # Train primary objective regressor (on feasible data only if enough samples)
+            primary_reg = RandomForestRegressor(
+                n_estimators=12, max_depth=6, random_state=0, n_jobs=1
             )
-            reg.fit(scaled_reg, regression_targets)
+            if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
+                primary_reg.fit(scaler.transform(features[feasible_mask]), primary_targets[feasible_mask])
+            else:
+                primary_reg.fit(scaled_class, primary_targets)
+            regressors["objective"] = primary_reg
+            
+            # Train auxiliary regressors (using all data or feasible? Physics metrics usually valid even if not fully feasible?)
+            # The prompt implies we want to predict violation "Instead of Infeasible (0.0), tell it MHD Violation = 0.5".
+            # VMEC usually returns metrics even if it's not a "good" stellarator, unless it crashed.
+            # If it crashed, we might have default bad values.
+            # Let's train on all data for aux metrics to learn from failures too, if data exists.
+            # But wait, if VMEC crashed, metrics are mostly junk.
+            # However, `runner.py` fills defaults on exception.
+            # Let's stick to the same logic: if we have enough feasible, use them. 
+            # BUT for "restoration", we need to guide FROM infeasible TO feasible. 
+            # So we MUST train on infeasible data if it has valid metrics.
+            # Assuming `metrics_list` contains valid VMEC outputs.
+            
+            for name, targets in aux_target_arrays.items():
+                reg = RandomForestRegressor(
+                    n_estimators=12, max_depth=6, random_state=0, n_jobs=1
+                )
+                # Train on all data to capture the landscape including bad regions
+                reg.fit(scaled_class, targets)
+                regressors[name] = reg
 
             self._scaler = scaler
             self._classifier = clf
-            self._regressor = reg
+            self._regressors = regressors
             self._trained = True
 
         self._with_timeout(_train_bundle)
@@ -282,15 +328,17 @@ class SurrogateBundle:
             return False
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
-    def _predict_batch(self, feature_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _predict_batch(self, feature_matrix: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         assert self._classifier is not None
-        assert self._regressor is not None
+        assert self._regressors
         assert self._scaler is not None
 
-        def _predict() -> tuple[np.ndarray, np.ndarray]:
+        def _predict() -> tuple[np.ndarray, dict[str, np.ndarray]]:
             scaled = self._scaler.transform(feature_matrix)
             prob = self._classifier.predict_proba(scaled)[:, 1]
-            preds = self._regressor.predict(scaled)
+            preds = {}
+            for name, reg in self._regressors.items():
+                preds[name] = reg.predict(scaled)
             return prob, preds
 
         return self._with_timeout(_predict)
@@ -339,10 +387,19 @@ class SurrogateBundle:
                 params = candidate.get("params", {})
             metrics_list.append({"candidate_params": params})
         feature_matrix = self._feature_matrix(metrics_list)
-        prob, preds = self._predict_batch(feature_matrix)
+        prob, preds_dict = self._predict_batch(feature_matrix)
+        
+        # Default to objective predictions
+        objs = preds_dict.get("objective", np.zeros(len(candidates)))
+        mhds = preds_dict.get("mhd", np.zeros(len(candidates)))
+        qis = preds_dict.get("qi", np.zeros(len(candidates)))
+        elongations = preds_dict.get("elongation", np.zeros(len(candidates)))
 
         ranked: list[SurrogatePrediction] = []
-        for candidate, pf, obj in zip(candidates, prob, preds):
+        for i, candidate in enumerate(candidates):
+            pf = prob[i]
+            obj = objs[i]
+            
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
             uncertainty = float(pf * (1.0 - pf))
@@ -357,6 +414,9 @@ class SurrogateBundle:
                     predicted_objective=float(obj),
                     minimize_objective=minimize_objective,
                     metadata=candidate,
+                    predicted_mhd=float(mhds[i]),
+                    predicted_qi=float(qis[i]),
+                    predicted_elongation=float(elongations[i]),
                 )
             )
 

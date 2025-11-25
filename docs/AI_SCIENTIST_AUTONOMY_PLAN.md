@@ -87,10 +87,19 @@ Operational Playbook (post-merge)
 ---------------------------------
 - Nightly: run `scripts/update_adapters.py --db reports/ai_scientist.sqlite --out reports/adapters` after long jobs.
 - Long run: `python -m ai_scientist.runner --config configs/experiment.autonomy.yaml --planner agent --resume-from reports/run_state.json` (daemon can wrap).
-- Monitoring: tail `reports/cache_stats.jsonl` and `reports/budget_overrides.jsonl`; check p3_summary hypervolume trend.
+### 8. Phase 2: Active Solver Upgrade (Week 5+)
+**Goal:** Transform the AI Scientist from a passive filter into an active solver capable of recovering from infeasible starts.
 
-Dependencies / Constraints
---------------------------
-- No dynamic imports or `any` casts; keep changes inside `ai_scientist/` + new scripts/docs.
-- Preserve legacy behavior behind flags; default configs stay conservative.
-- World model source of truth is `ai_scientist/memory.py` (PropertyGraph + statements/citations/candidates/cycles). The older boundary-only `world_model.py` is removed.
+- **Features:**
+    - **Feasibility Restoration Mode:** `runner.py` now detects low feasibility rates (<5% in recent history) and switches ranking strategy to minimize predicted violations (MHD, QI, Elongation) rather than maximizing the objective.
+    - **Adaptive Promotion:** If screening yields insufficient feasible candidates, the runner promotes the "least violated" candidates instead of skipping promotion, ensuring the high-fidelity stage (and the agent) sees data to learn from.
+    - **Soft ALM (Agent-Driven):** The Planning Agent can now tune `constraint_weights` (MHD, QI, Elongation) via `config_overrides` to dynamically tighten or loosen constraints based on failure analysis.
+    - **Granular Surrogate:** `SurrogateBundle` now regresses `mhd`, `qi`, and `elongation` independently, enabling precise violation estimation for restoration ranking.
+    - **Advanced Exploration:** Added `recombine_designs` tool for geometric crossover of parent designs, allowing the agent to merge traits from multiple candidates.
+
+- **Configuration:**
+    - New `constraint_weights` section in `ExperimentConfig` (default 1.0 for all).
+    - `recombine_designs` added to agent toolset.
+
+- **Validation:**
+    - `configs/benchmark_cold_start.yaml` seeds the run with an infeasible torus to test recovery capabilities.

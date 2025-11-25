@@ -18,7 +18,11 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple
 import random
 
 import numpy as np
+import jax.numpy as jnp
 import yaml
+import nevergrad
+import tempfile
+from concurrent import futures
 
 from ai_scientist import adapter
 from ai_scientist import config as ai_config
@@ -28,9 +32,18 @@ from ai_scientist import rag
 from ai_scientist import reporting
 from ai_scientist import tools
 from ai_scientist.optim.samplers import NearAxisSampler
-from ai_scientist.optim.surrogate import SurrogateBundle
+from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_rotating_ellipse
+from constellaration.optimization.augmented_lagrangian import (
+    AugmentedLagrangianState,
+    AugmentedLagrangianSettings,
+    augmented_lagrangian_function,
+    update_augmented_lagrangian_state,
+)
+from constellaration.utils import pytree
+from constellaration import problems
+from constellaration import forward_model
 from orchestration import adaptation as adaptation_helpers
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -38,6 +51,7 @@ P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
 _BOUNDARY_SEED_CACHE: dict[Path, dict[str, Any]] = {}
 _SURROGATE_BUNDLE = SurrogateBundle()
 _LAST_SURROGATE_FIT_SEC = 0.0
+NAN_TO_HIGH_VALUE = 10.0
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -67,6 +81,76 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
         key: (np.array(value, copy=True) if isinstance(value, np.ndarray) else value)
         for key, value in cached.items()
     }
+
+
+def _build_template_params_for_alm(
+    template: ai_config.BoundaryTemplateConfig
+) -> Mapping[str, Any]:
+    n_poloidal = template.n_poloidal_modes
+    n_toroidal = template.n_toroidal_modes
+    center_idx = n_toroidal // 2
+    r_cos = []
+    z_sin = []
+    for pol in range(n_poloidal):
+        r_row = []
+        z_row = []
+        for tor in range(n_toroidal):
+            r_val = (
+                template.base_major_radius
+                if pol == 0 and tor == center_idx
+                else 0.0
+            )
+            z_val = (
+                template.base_minor_radius
+                if pol == 1 and tor == center_idx and n_poloidal > 1
+                else 0.0
+            )
+            r_row.append(r_val)
+            z_row.append(z_val)
+        r_cos.append(r_row)
+        z_sin.append(z_row)
+    return {
+        "r_cos": r_cos,
+        "z_sin": z_sin,
+        "n_field_periods": template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+
+
+# ALM Helpers adapted from constellaration.optimization.augmented_lagrangian_runner
+
+def _objective_constraints(
+    x: jnp.ndarray,
+    scale: jnp.ndarray,
+    unravel_and_unmask_fn: Any,
+    settings: forward_model.ConstellarationSettings,
+    problem_type: str,
+) -> tuple[
+    tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
+]:
+    with tempfile.TemporaryDirectory() as _:
+        # Reconstruct boundary from optimized parameters x
+        boundary = unravel_and_unmask_fn(jnp.asarray(x * scale))
+
+        metrics = None
+        try:
+            metrics, _ = forward_model.forward_model(
+                boundary=boundary,
+                settings=settings,
+            )
+        except Exception as _:
+            pass
+        
+        if metrics is None:
+            objective = jnp.array(NAN_TO_HIGH_VALUE)
+            constraints = jnp.ones(6) * NAN_TO_HIGH_VALUE
+        else:
+            objective = jnp.array(metrics.aspect_ratio)
+            margins = tools.compute_constraint_margins(metrics, "p3")
+            constraints = jnp.array(list(margins.values()))
+
+        return ((objective, constraints), metrics)
+    
 
 
 @dataclass(frozen=True)
@@ -725,6 +809,26 @@ def _surrogate_rank_screen_candidates(
     )
     global _LAST_SURROGATE_FIT_SEC
     _LAST_SURROGATE_FIT_SEC = 0.0
+    
+    # Check feasibility rate in recent history to trigger Restoration Mode
+    # TODO: make window configurable? using last 100 or all history
+    recent_feasibility = 0.0
+    if history:
+        # Look at last 50 entries
+        recent_window = history[-50:]
+        valid = 0
+        for m, _ in recent_window:
+            # Check "is_feasible" or "feasibility" metric
+            # world_model returns raw metrics in m["metrics"] usually?
+            # verify world_model.surrogate_training_data structure.
+            # In memory.py it returns (metrics_json, target_val).
+            # metrics_json is the dict stored in 'evaluation'.
+            # We need to check 'feasibility' (float) <= tolerance.
+            f_val = float(m.get("feasibility", float("inf")))
+            if f_val <= FEASIBILITY_CUTOFF:
+                valid += 1
+        recent_feasibility = valid / len(recent_window)
+
     metrics_list: tuple[Mapping[str, Any], ...]
     target_values: tuple[float, ...]
     if history:
@@ -758,7 +862,41 @@ def _surrogate_rank_screen_candidates(
         minimize_objective=minimize_objective,
         exploration_ratio=cfg.proposal_mix.exploration_ratio,
     )
-    if cfg.problem.lower() == "p2":
+
+    # Restoration Mode Logic
+    # If we have history but feasibility is very low, we override the ranking.
+    # Threshold: e.g. < 5% feasible in recent window.
+    restoration_active = (len(history) > 10 and recent_feasibility < 0.05)
+    
+    if restoration_active:
+        if verbose:
+            print(f"[runner][restoration] Feasibility rate {recent_feasibility:.1%}; switching to restoration ranking.")
+        
+        weights = cfg.constraint_weights
+        
+        def _predicted_violation(pred: SurrogatePrediction) -> float:
+            # Estimate violations based on predictions
+            # MHD: needs to be >= 0. Violation is max(0, -pred_mhd) * weight
+            mhd_val = pred.predicted_mhd if pred.predicted_mhd is not None else 0.0
+            mhd_viol = max(0.0, -mhd_val) * weights.mhd
+            
+            # QI: lower is better. How to define violation?
+            # Maybe just weighted value if we want to drive it down?
+            # Or relative to a threshold? Let's just drive it down.
+            qi_val = pred.predicted_qi if pred.predicted_qi is not None else 1.0
+            qi_viol = max(0.0, qi_val) * weights.qi # Assume QI always > 0
+            
+            # Elongation: lower is better.
+            elo_val = pred.predicted_elongation if pred.predicted_elongation is not None else 1.0
+            elo_viol = max(0.0, elo_val) * weights.elongation
+            
+            # Composite violation (lower is better)
+            return mhd_viol + qi_viol + elo_viol
+
+        # Re-sort by predicted violation
+        ranked_predictions.sort(key=_predicted_violation)
+    
+    elif cfg.problem.lower() == "p2":
         # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
         # gate P2 promotions on feasibility probability before objective.
         prob_threshold = max(
@@ -1357,6 +1495,40 @@ def _log_observability_metrics(
         handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
+def _build_template_params_for_alm(
+    template: ai_config.BoundaryTemplateConfig
+) -> Mapping[str, Any]:
+    n_poloidal = template.n_poloidal_modes
+    n_toroidal = template.n_toroidal_modes
+    center_idx = n_toroidal // 2
+    r_cos = []
+    z_sin = []
+    for pol in range(n_poloidal):
+        r_row = []
+        z_row = []
+        for tor in range(n_toroidal):
+            r_val = (
+                template.base_major_radius
+                if pol == 0 and tor == center_idx
+                else 0.0
+            )
+            z_val = (
+                template.base_minor_radius
+                if pol == 1 and tor == center_idx and n_poloidal > 1
+                else 0.0
+            )
+            r_row.append(r_val)
+            z_row.append(z_val)
+        r_cos.append(r_row)
+        z_sin.append(z_row)
+    return {
+        "r_cos": r_cos,
+        "z_sin": z_sin,
+        "n_field_periods": template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+
+
 def _run_cycle(
     cfg: ai_config.ExperimentConfig,
     cycle_index: int,
@@ -1384,6 +1556,9 @@ def _run_cycle(
 
     # Apply agent-driven config overrides
     active_cfg = cfg
+    optimizer_mode = "default"  # Default optimizer mode
+    alm_settings_overrides: Mapping[str, Any] = {}
+
     if config_overrides:
         try:
             overrides_log = []
@@ -1395,7 +1570,19 @@ def _run_cycle(
                 new_budgets = replace(active_cfg.budgets, **config_overrides["budgets"])
                 active_cfg = replace(active_cfg, budgets=new_budgets)
                 overrides_log.append(f"budgets={config_overrides['budgets']}")
+            if "constraint_weights" in config_overrides:
+                new_weights = replace(active_cfg.constraint_weights, **config_overrides["constraint_weights"])
+                active_cfg = replace(active_cfg, constraint_weights=new_weights)
+                overrides_log.append(f"constraint_weights={config_overrides['constraint_weights']}")
             
+            # New: Handle optimizer mode and ALM settings
+            if "optimizer" in config_overrides:
+                optimizer_mode = str(config_overrides["optimizer"]).lower()
+                overrides_log.append(f"optimizer={optimizer_mode}")
+            if "alm_settings" in config_overrides:
+                alm_settings_overrides = config_overrides["alm_settings"]
+                overrides_log.append(f"alm_settings={alm_settings_overrides}")
+
             if overrides_log:
                 print(f"[runner][cycle={cycle_number}] Applying agent config overrides: {', '.join(overrides_log)}")
         except Exception as exc:
@@ -1429,12 +1616,181 @@ def _run_cycle(
     )
     sampler_count = 0
     random_count = 0
-    if pool_size <= 0:
+    
+    candidate_pool: list[Mapping[str, Any]] = []
+    
+    if optimizer_mode == "alm":
+        # ALM Execution Branch
+        if runtime and runtime.verbose:
+            print(f"[runner][cycle={cycle_number}] ALM optimizer mode active.")
+        
+        initial_params_map: Mapping[str, Any]
+        if suggested_params and suggested_params[0]:
+            initial_params_map = suggested_params[0]
+        else:
+            # Retrieve the best candidate from history if available
+            # Since we don't have a direct method, we query candidates sorted by hv
+            # This is a workaround; in production we should add `best_candidate` retrieval to world_model
+            
+            # Fallback to template
+            initial_params_map = _build_template_params_for_alm(active_cfg.boundary_template)
+            # Attempt to find a better start if history exists
+            try:
+                best_hv = world_model.previous_best_hv(experiment_id, cycle_number)
+                if best_hv is not None:
+                    # We would need a query to get the params associated with this HV
+                    # For now, stick to template or agent suggestion to avoid complex SQL here
+                    pass
+            except Exception:
+                pass
+        
+        # Prepare boundary for optimization using constellaration utils
+        boundary_obj = tools.make_boundary_from_params(initial_params_map)
+        
+        # Use constellaration's masking logic
+        # We need to define max modes based on boundary_template or inferred from params
+        # Assuming boundary_template is authoritative for optimization resolution
+        max_poloidal = active_cfg.boundary_template.n_poloidal_modes - 1
+        max_toroidal = (active_cfg.boundary_template.n_toroidal_modes - 1) // 2
+        
+        boundary_obj = surface_module.set_max_mode_numbers(
+            surface=boundary_obj,
+            max_poloidal_mode=max_poloidal,
+            max_toroidal_mode=max_toroidal,
+        )
+
+        mask = surface_module.build_mask(
+            boundary_obj,
+            max_poloidal_mode=max_poloidal,
+            max_toroidal_mode=max_toroidal,
+        )
+
+        initial_guess, unravel_and_unmask_fn = pytree.mask_and_ravel(
+            pytree=boundary_obj,
+            mask=mask,
+        )
+        
+        # Compute scaling
+        scale = surface_module.compute_infinity_norm_spectrum_scaling_fun(
+            poloidal_modes=boundary_obj.poloidal_modes.flatten(),
+            toroidal_modes=boundary_obj.toroidal_modes.flatten(),
+            alpha=0.5, # Default alpha
+        ).reshape(boundary_obj.poloidal_modes.shape)
+        scale = jnp.array(np.concatenate([scale[mask.r_cos], scale[mask.z_sin]]))
+        
+        x0 = jnp.array(initial_guess) / scale
+
+        # Initial evaluation
+        fm_settings = tools._settings_for_stage(active_cfg.fidelity_ladder.promote)
+        
+        (initial_objective, initial_constraints), _ = _objective_constraints(
+            x0, scale, unravel_and_unmask_fn, fm_settings, cfg.problem
+        )
+
+        # ALM settings
+        alm_settings = AugmentedLagrangianSettings(**alm_settings_overrides)
+        
+        state = AugmentedLagrangianState(
+            x=jnp.copy(x0),
+            multipliers=jnp.zeros_like(initial_constraints),
+            penalty_parameters=jnp.ones_like(initial_constraints) * 1.0,
+            objective=initial_objective,
+            constraints=initial_constraints,
+            bounds=jnp.ones_like(x0) * 0.1, # Initial bounds
+        )
+        
+        alm_candidates: list[Mapping[str, Any]] = []
+        budget_per_step = 8 # Inner evaluations per ALM step
+        num_alm_steps = max(1, budget_snapshot.screen_evals_per_cycle // budget_per_step)
+        
+        mp_context = multiprocessing.get_context("spawn") # Safer default for JAX/CUDA
+        
+        for k in range(num_alm_steps):
+            parametrization = nevergrad.p.Array(
+                init=np.array(state.x),
+                lower=np.array(state.x - state.bounds),
+                upper=np.array(state.x + state.bounds),
+            )
+            
+            # Inner Optimizer (NGOpt)
+            oracle = nevergrad.optimizers.NGOpt(
+                parametrization=parametrization,
+                budget=budget_per_step,
+                num_workers=1, # Keep it simple for now, avoid nested multiprocessing issues
+            )
+            oracle.suggest(np.array(state.x))
+            
+            # Inner loop execution
+            # Since we set num_workers=1 and simple loop, we can iterate directly
+            for _ in range(budget_per_step):
+                candidate = oracle.ask()
+                # Eval
+                (obj, constr), metrics = _objective_constraints(
+                    jnp.array(candidate.value),
+                    scale,
+                    unravel_and_unmask_fn,
+                    fm_settings,
+                    cfg.problem
+                )
+                
+                # Capture candidate
+                if metrics:
+                    # Reconstruct params map for candidate
+                    # This is a bit redundant as _objective_constraints does unravel, but we need it for logging
+                    cand_boundary = unravel_and_unmask_fn(jnp.asarray(candidate.value * scale))
+                    # Convert SurfaceRZFourier back to dict params
+                    # Use tools.structured_flatten logic reversely or just extract
+                    cand_params = {
+                        "r_cos": np.array(cand_boundary.r_cos).tolist(),
+                        "z_sin": np.array(cand_boundary.z_sin).tolist(),
+                        "n_field_periods": cand_boundary.n_field_periods,
+                        "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
+                    }
+                    
+                    # P3 feasibility
+                    p3_margins = tools.compute_constraint_margins(metrics, "p3")
+                    max_viol = tools._max_violation(p3_margins)
+                    
+                    alm_candidates.append({
+                        "seed": cfg.random_seed + cycle_index * 10000 + len(alm_candidates),
+                        "params": cand_params,
+                        "design_hash": tools.design_hash(cand_params),
+                        "constraint_distance": max_viol,
+                        "source": "alm_inner",
+                        "evaluation": { # Fake evaluation dict to reuse existing tools
+                            "metrics": metrics.model_dump(),
+                            "feasibility": max_viol,
+                            "stage": active_cfg.fidelity_ladder.promote
+                        } 
+                    })
+
+                # Tell optimizer
+                loss = augmented_lagrangian_function(obj, constr, state).item()
+                oracle.tell(candidate, loss)
+            
+            # Update ALM state
+            recommendation = oracle.provide_recommendation()
+            x_new = jnp.array(recommendation.value)
+            
+            (obj_new, constr_new), _ = _objective_constraints(
+                x_new, scale, unravel_and_unmask_fn, fm_settings, cfg.problem
+            )
+            
+            state = update_augmented_lagrangian_state(
+                x=x_new,
+                objective=obj_new,
+                constraints=constr_new,
+                state=state,
+                settings=alm_settings, # We need to map dict to object if needed or pass valid struct
+            )
+
+        candidate_pool = alm_candidates
+    
+    elif pool_size <= 0:
         if runtime and runtime.verbose:
             print(
                 f"[runner][cycle={cycle_number}] screen budget zero; skipping candidate generation"
             )
-        candidate_pool: list[Mapping[str, Any]] = []
         candidates: list[Mapping[str, Any]] = []
     else:
         candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
@@ -1482,26 +1838,43 @@ def _run_cycle(
     screen_summary = tools.summarize_p3_candidates(
         list(screen_design_map.values()), reference_point=P3_REFERENCE_POINT
     )
-    allow_promote = (
+    
+    # Adaptive Promotion Logic (Phase 1.2)
+    sufficient_feasible = (
         screen_summary.feasible_count >= cfg.governance.min_feasible_for_promotion
     )
+    
     promote_limit = 0
     to_promote: list[Mapping[str, Any]] = []
-    if allow_promote and screen_design_map:
-        prioritized_screen = _rank_candidates_for_promotion(
-            screen_design_map, active_budgets.promote_top_k, P3_REFERENCE_POINT
-        )
+    
+    if screen_design_map:
         promote_limit = min(
             active_budgets.promote_top_k,
             active_budgets.max_high_fidelity_evals_per_cycle,
             len(screen_design_map),
         )
-        to_promote = prioritized_screen[:promote_limit]
-    elif not allow_promote and screen_design_map and runtime and runtime.verbose:
-        print(
-            "[runner][stage-gate] insufficient feasible screen results "
-            f"({screen_summary.feasible_count} < {cfg.governance.min_feasible_for_promotion}); skipping promotions"
-        )
+        
+        if sufficient_feasible:
+            # Standard Pareto/Feasibility ranking
+            prioritized_screen = _rank_candidates_for_promotion(
+                screen_design_map, active_budgets.promote_top_k, P3_REFERENCE_POINT
+            )
+            to_promote = prioritized_screen[:promote_limit]
+        else:
+            # Feasibility Restoration ranking (lowest violation)
+            print(
+                f"[runner][promotion] Insufficient feasible ({screen_summary.feasible_count} < {cfg.governance.min_feasible_for_promotion}); promoting by lowest max_violation."
+            )
+            # Sort by max_violation (ascending)
+            sorted_by_violation = sorted(
+                screen_design_map.values(),
+                key=lambda entry: float(entry["evaluation"].get("max_violation", float("inf")))
+            )
+            to_promote = sorted_by_violation[:promote_limit]
+            
+            # Tag them for analysis
+            for candidate in to_promote:
+                candidate["promotion_reason"] = "restoration"
 
     promote_stage = cfg.fidelity_ladder.promote
     promote_results: list[dict[str, Any]] = []

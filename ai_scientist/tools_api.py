@@ -54,6 +54,36 @@ _TOOL_DEFINITIONS: Sequence[ToolSchema] = (
         },
     },
     {
+        "name": "recombine_designs",
+        "description": (
+            "Perform geometric crossover between two parent designs via coefficient interpolation. "
+            "Useful for combining traits from two promising candidates."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "parent_a": {
+                    "type": "object",
+                    "description": "First parent boundary parameters.",
+                },
+                "parent_b": {
+                    "type": "object",
+                    "description": "Second parent boundary parameters.",
+                },
+                "alpha": {
+                    "type": "number",
+                    "description": "Interpolation weight (0.0 = parent_b, 1.0 = parent_a). Optional.",
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Optional random seed.",
+                },
+            },
+            "required": ["parent_a", "parent_b"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "evaluate_p1",
         "description": (
             "Evaluate the low-fidelity P1 problem (minimize max elongation). "

@@ -178,6 +178,13 @@ class ProposalMixConfig:
 
 
 @dataclass(frozen=True)
+class ConstraintWeightsConfig:
+    mhd: float
+    qi: float
+    elongation: float
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     problem: str
     cycles: int
@@ -189,6 +196,7 @@ class ExperimentConfig:
     stage_gates: StageGateConfig
     governance: GovernanceConfig
     proposal_mix: ProposalMixConfig
+    constraint_weights: ConstraintWeightsConfig
     reporting_dir: Path
     memory_db: Path
     source_config: Path
@@ -349,6 +357,17 @@ def _adaptive_budget_config_from_dict(
     )
 
 
+def _constraint_weights_from_dict(
+    data: Mapping[str, Any] | None,
+) -> ConstraintWeightsConfig:
+    config = data or {}
+    return ConstraintWeightsConfig(
+        mhd=float(config.get("mhd", 1.0)),
+        qi=float(config.get("qi", 1.0)),
+        elongation=float(config.get("elongation", 1.0)),
+    )
+
+
 def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
     config_path = Path(path) if path is not None else DEFAULT_EXPERIMENT_CONFIG_PATH
     payload = load(config_path)
@@ -388,6 +407,9 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         stage_gates=stage_gates,
         governance=governance,
         proposal_mix=_proposal_mix_from_dict(payload.get("proposal_mix")),
+        constraint_weights=_constraint_weights_from_dict(
+            payload.get("constraint_weights")
+        ),
         reporting_dir=Path(payload.get("reporting_dir", "reports")),
         memory_db=Path(payload.get("memory_db", DEFAULT_MEMORY_DB_PATH)),
         source_config=config_path,

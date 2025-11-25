@@ -184,6 +184,19 @@ class PlanningAgent:
             params, perturbation_scale=perturbation_scale, seed=seed
         )
 
+    def recombine_designs(
+        self,
+        parent_a: Mapping[str, Any],
+        parent_b: Mapping[str, Any],
+        alpha: float | None = None,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        args = {"parent_a": parent_a, "parent_b": parent_b, "alpha": alpha, "seed": seed}
+        # Clean args (remove None)
+        args = {k: v for k, v in args.items() if v is not None}
+        self._validate_tool_call(self.planning_gate, "recombine_designs", args)
+        return tools.recombine_designs(**args)
+
     def _build_template_params(
         self, template: ai_config.BoundaryTemplateConfig
     ) -> Mapping[str, Any]:
@@ -222,6 +235,7 @@ class PlanningAgent:
         *,
         cycle_index: int,
         budgets: ai_config.BudgetConfig,
+        constraint_weights: ai_config.ConstraintWeightsConfig,
         stage_history: Sequence[Mapping[str, Any]],
         last_summary: tools.P3Summary | None,
         evaluation_summary: Mapping[str, Any],
@@ -234,6 +248,7 @@ class PlanningAgent:
             "cycle_index": cycle_index + 1,
             "planner_role": self.planning_gate.model_alias,
             "budgets": asdict(budgets),
+            "constraint_weights": asdict(constraint_weights),
             "stage_history": list(stage_history),
             "previous_p3_summary": _serialize_summary(last_summary),
             "latest_evaluation": evaluation_summary,
@@ -295,10 +310,10 @@ class PlanningAgent:
             graph_dir.mkdir(parents=True, exist_ok=True)
             graph_file = graph_dir / f"cycle_{cycle_number}.json"
             
-            nodes = [{"id": node, **attrs} for node, attrs in pg.nodes(data=True)]
+            nodes = [{"id": node_id, **attrs} for node_id, attrs in pg.nodes.items()]
             edges = [
                 {"src": src, "dst": dst, "attrs": attrs}
-                for src, dst, attrs in pg.edges(data=True)
+                for src, dst, attrs in pg.edges
             ]
             snapshot_data = {"nodes": nodes, "edges": edges}
             graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
@@ -320,6 +335,7 @@ class PlanningAgent:
         context = self._build_context(
             cycle_index=cycle_index,
             budgets=cfg.budgets,
+            constraint_weights=cfg.constraint_weights,
             stage_history=stage_history,
             last_summary=last_summary,
             evaluation_summary=evaluation_summary,
@@ -354,7 +370,9 @@ class PlanningAgent:
                  "3. To call a tool, output a JSON object with {\"tool\": \"<name>\", \"arguments\": {<args>}}.\n"
                  "4. To finish and commit to a plan, output a JSON object with {\"suggested_params\": {...}, \"config_overrides\": {...}}.\n"
                  "   - 'suggested_params' (optional): A dictionary matching the structure of 'current_boundary' for the next candidate seed.\n"
-                 "   - 'config_overrides' (optional): A dictionary to adjust experiment settings (e.g., {'proposal_mix': {'exploration_ratio': 0.8}}).\n\n"
+                 "   - 'config_overrides' (optional): A dictionary to adjust experiment settings.\n"
+                 "       - Example: {'proposal_mix': {'exploration_ratio': 0.8}}\n"
+                 "       - Example: {'constraint_weights': {'mhd': 50.0}} (Soft ALM: Increase weight if MHD is failing)\n\n"
                  "Think step-by-step. You have a maximum of 5 turns."
              )
              
@@ -424,6 +442,8 @@ class PlanningAgent:
                                  tool_result = self.evaluate_p3(**tool_args)
                              elif tool_name == "propose_boundary":
                                  tool_result = self.propose_boundary(**tool_args)
+                             elif tool_name == "recombine_designs":
+                                 tool_result = self.recombine_designs(**tool_args)
                              elif tool_name == "make_boundary":
                                   # Helper: just return the object representation for the agent to see structure
                                   # We can't pass the actual object back to LLM easily, so serialize parameters
