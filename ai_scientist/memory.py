@@ -806,6 +806,46 @@ class WorldModel:
             records.append((params, float(feasibility)))
         return records
 
+    def recent_failures(
+        self,
+        experiment_id: int,
+        problem: str,
+        *,
+        limit: int = 5,
+    ) -> list[Mapping[str, Any]]:
+        """Return detailed info on recent failed candidates to help the agent learn."""
+        
+        rows = self._conn.execute(
+            """
+            SELECT c.params_json, m.raw_json, m.feasibility
+            FROM metrics m
+            JOIN candidates c ON m.candidate_id = c.id
+            WHERE c.experiment_id = ? AND c.problem = ? AND m.is_feasible = 0
+            ORDER BY m.id DESC
+            LIMIT ?
+            """,
+            (experiment_id, problem, limit),
+        ).fetchall()
+        
+        failures: list[Mapping[str, Any]] = []
+        for row in rows:
+            try:
+                params = json.loads(row["params_json"])
+                metrics_raw = json.loads(row["raw_json"])
+                constraint_margins = metrics_raw.get("constraint_margins", {})
+                # Only include significant violations to keep context clean
+                violations = {k: v for k, v in constraint_margins.items() if v > 0}
+                
+                failures.append({
+                    "params": params,
+                    "feasibility": float(row["feasibility"]),
+                    "violations": violations
+                })
+            except (json.JSONDecodeError, ValueError):
+                continue
+                
+        return failures
+
     def previous_best_hv(self, experiment_id: int, cycle_number: int) -> float | None:
         row = self._conn.execute(
             """

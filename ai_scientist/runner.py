@@ -556,6 +556,7 @@ def _propose_p3_candidates_for_cycle(
     screen_budget: int,
     total_candidates: int | None = None,
     prev_feasibility_rate: float | None = None,
+    suggested_params: list[Mapping[str, Any]] | None = None,
 ) -> tuple[list[Mapping[str, Any]], int, int]:
     """Blend constraint-aware sampling and random noise per roadmap Phase 1 guidance.
 
@@ -568,6 +569,24 @@ def _propose_p3_candidates_for_cycle(
     if total_candidates <= 0:
         return [], 0, 0
 
+    agent_results: list[Mapping[str, Any]] = []
+    if suggested_params:
+        for idx, params in enumerate(suggested_params):
+            agent_results.append(
+                {
+                    "seed": cfg.random_seed + cycle_index * 1000 + idx,  # distinct seed space
+                    "params": params,
+                    "design_hash": tools.design_hash(params),
+                    "constraint_distance": 0.0,  # Assume agent suggestions are good
+                    "source": "agent_suggestion",
+                }
+            )
+    
+    # Adjust remaining quota
+    remaining_candidates = max(0, total_candidates - len(agent_results))
+    if remaining_candidates == 0:
+         return agent_results, 0, 0
+
     mix = cfg.proposal_mix
     exploration_weight = mix.exploration_ratio
     if prev_feasibility_rate is not None:
@@ -579,11 +598,11 @@ def _propose_p3_candidates_for_cycle(
         sampler_target = 0
     else:
         sampler_target = int(
-            round(total_candidates * (mix.constraint_ratio / ratio_sum))
+            round(remaining_candidates * (mix.constraint_ratio / ratio_sum))
         )
-    sampler_target = min(sampler_target, total_candidates)
+    sampler_target = min(sampler_target, remaining_candidates)
 
-    stage_limit = max(total_candidates * 4, 16)
+    stage_limit = max(remaining_candidates * 4, 16)
     stage_records = world_model.recent_stage_candidates(
         experiment_id=experiment_id,
         problem=cfg.problem,
@@ -613,7 +632,7 @@ def _propose_p3_candidates_for_cycle(
 
     candidate_seeds = [
         cfg.random_seed + cycle_index * total_candidates + i
-        for i in range(total_candidates)
+        for i in range(remaining_candidates)
     ]
     seed_iter = iter(candidate_seeds)
     sampler_results: list[Mapping[str, Any]] = []
@@ -638,7 +657,7 @@ def _propose_p3_candidates_for_cycle(
             }
         )
 
-    remaining = total_candidates - len(sampler_results)
+    remaining = remaining_candidates - len(sampler_results)
     remaining_seeds = []
     for _ in range(remaining):
         try:
@@ -668,7 +687,7 @@ def _propose_p3_candidates_for_cycle(
             }
         )
 
-    candidates = sampler_results + random_results
+    candidates = agent_results + sampler_results + random_results
     return candidates, len(sampler_results), len(random_results)
 
 
@@ -1350,6 +1369,8 @@ def _run_cycle(
     runtime: RunnerCLIConfig | None = None,
     budget_controller: BudgetController,
     prev_feasibility_rate: float | None = None,
+    suggested_params: list[Mapping[str, Any]] | None = None,
+    config_overrides: Mapping[str, Any] | None = None,
 ) -> tuple[Path | None, dict[str, Any] | None, tools.P3Summary | None]:
     tool_name = _problem_tool_name(cfg.problem)
     base_evaluate = _problem_evaluator(cfg.problem)
@@ -1360,14 +1381,34 @@ def _run_cycle(
     _LAST_SURROGATE_FIT_SEC = 0.0
     sleep_per_eval = 0.05 if runtime and runtime.slow else 0.0
     screen_only = bool(runtime and runtime.screen_only)
+
+    # Apply agent-driven config overrides
+    active_cfg = cfg
+    if config_overrides:
+        try:
+            overrides_log = []
+            if "proposal_mix" in config_overrides:
+                new_mix = replace(active_cfg.proposal_mix, **config_overrides["proposal_mix"])
+                active_cfg = replace(active_cfg, proposal_mix=new_mix)
+                overrides_log.append(f"proposal_mix={config_overrides['proposal_mix']}")
+            if "budgets" in config_overrides:
+                new_budgets = replace(active_cfg.budgets, **config_overrides["budgets"])
+                active_cfg = replace(active_cfg, budgets=new_budgets)
+                overrides_log.append(f"budgets={config_overrides['budgets']}")
+            
+            if overrides_log:
+                print(f"[runner][cycle={cycle_number}] Applying agent config overrides: {', '.join(overrides_log)}")
+        except Exception as exc:
+            print(f"[runner][cycle={cycle_number}] Failed to apply config overrides: {exc}")
+
     budget_snapshot = budget_controller.snapshot()
     active_budgets = replace(
-        cfg.budgets,
+        active_cfg.budgets,
         screen_evals_per_cycle=budget_snapshot.screen_evals_per_cycle,
         promote_top_k=budget_snapshot.promote_top_k,
         max_high_fidelity_evals_per_cycle=budget_snapshot.max_high_fidelity_evals_per_cycle,
     )
-    if cfg.adaptive_budgets.enabled and runtime and runtime.verbose:
+    if active_cfg.adaptive_budgets.enabled and runtime and runtime.verbose:
         print(
             f"[runner][budget] cycle={cycle_number} override "
             f"screen={budget_snapshot.screen_evals_per_cycle} "
@@ -1377,7 +1418,7 @@ def _run_cycle(
     cache_hit_rate = 0.0
     pool_size = _surrogate_candidate_pool_size(
         budget_snapshot.screen_evals_per_cycle,
-        cfg.proposal_mix.surrogate_pool_multiplier,
+        active_cfg.proposal_mix.surrogate_pool_multiplier,
     )
     sampler_count = 0
     random_count = 0
@@ -1390,20 +1431,21 @@ def _run_cycle(
         candidates: list[Mapping[str, Any]] = []
     else:
         candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
-            cfg,
+            active_cfg,
             cycle_index,
             world_model,
             experiment_id,
             screen_budget=budget_snapshot.screen_evals_per_cycle,
             total_candidates=pool_size,
             prev_feasibility_rate=prev_feasibility_rate,
+            suggested_params=suggested_params,
         )
         if runtime and runtime.verbose:
             print(
-                f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count}"
+                f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count} agent={len(suggested_params or [])}"
             )
         candidates = _surrogate_rank_screen_candidates(
-            cfg,
+            active_cfg,
             budget_snapshot.screen_evals_per_cycle,
             candidate_pool,
             world_model,
@@ -1411,7 +1453,7 @@ def _run_cycle(
             verbose=bool(runtime and runtime.verbose),
         )
 
-    screen_stage = cfg.fidelity_ladder.screen
+    screen_stage = active_cfg.fidelity_ladder.screen
     if candidates:
         screen_results = _evaluate_stage(
             candidates,
@@ -2029,6 +2071,8 @@ def run(
                 f"[runner] starting cycle {cycle_number} stage={governance_stage.upper()} "
                 f"screen_budget={cfg.budgets.screen_evals_per_cycle}"
             )
+            suggested_params: list[Mapping[str, Any]] | None = None
+            config_overrides: Mapping[str, Any] | None = None
             if planning_agent:
                 # We pass the *reconstructed* stage_history
                 stage_payload = [
@@ -2051,6 +2095,12 @@ def run(
                 )
                 context_snapshot = json.dumps(plan_outcome.context, indent=2)
                 print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
+                
+                if plan_outcome.suggested_params:
+                    suggested_params = [plan_outcome.suggested_params]
+                if plan_outcome.config_overrides:
+                    config_overrides = plan_outcome.config_overrides
+
             report_path, best_eval, p3_summary = _run_cycle(
                 cfg,
                 idx,
@@ -2062,6 +2112,8 @@ def run(
                 runtime=runtime,
                 budget_controller=budget_controller,
                 prev_feasibility_rate=last_feasibility_rate,
+                suggested_params=suggested_params,
+                config_overrides=config_overrides,
             )
             last_p3_summary = p3_summary
             if p3_summary:
