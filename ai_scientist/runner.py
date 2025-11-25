@@ -1408,6 +1408,13 @@ def _run_cycle(
         promote_top_k=budget_snapshot.promote_top_k,
         max_high_fidelity_evals_per_cycle=budget_snapshot.max_high_fidelity_evals_per_cycle,
     )
+    
+    # [Fix P1] Re-apply agent overrides if they exist, as snapshot() clobbered them.
+    if config_overrides and "budgets" in config_overrides:
+        active_budgets = replace(active_budgets, **config_overrides["budgets"])
+        if runtime and runtime.verbose:
+            print(f"[runner] Agent forced budget overrides: {config_overrides['budgets']}")
+
     if active_cfg.adaptive_budgets.enabled and runtime and runtime.verbose:
         print(
             f"[runner][budget] cycle={cycle_number} override "

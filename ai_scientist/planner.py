@@ -344,7 +344,7 @@ class PlanningAgent:
              
              system_prompt = (
                  f"You are the Planning Agent for the AI Scientist (cycle {cycle_number}).\n"
-                 "Your goal is to optimize a stellarator design (problem: {cfg.problem}) by analyzing the "
+                 f"Your goal is to optimize a stellarator design (problem: {cfg.problem}) by analyzing the "
                  "experiment context and literature.\n\n"
                  "You have access to the following tools:\n"
                  f"{json.dumps(available_tools, indent=2)}\n\n"
