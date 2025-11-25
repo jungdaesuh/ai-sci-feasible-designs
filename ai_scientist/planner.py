@@ -166,6 +166,20 @@ class PlanningAgent:
         self._validate_tool_call(self.planning_gate, "make_boundary", args)
         return tools.make_boundary_from_params(params)
 
+    def propose_boundary(
+        self,
+        params: Mapping[str, Any],
+        perturbation_scale: float = 0.05,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        args = {"params": params, "perturbation_scale": perturbation_scale}
+        if seed is not None:
+            args["seed"] = seed
+        self._validate_tool_call(self.planning_gate, "propose_boundary", args)
+        return tools.propose_boundary(
+            params, perturbation_scale=perturbation_scale, seed=seed
+        )
+
     def _build_template_params(
         self, template: ai_config.BoundaryTemplateConfig
     ) -> Mapping[str, Any]:

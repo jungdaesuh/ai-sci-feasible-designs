@@ -39,6 +39,25 @@ This snippet assumes you are working inside `/Users/suhjungdae/code/software/pro
    ```
 3. Use `AI_SCIENTIST_ENDPOINT_URL=<custom URL>` if you need to explicitly override the base URL (e.g., a relay or proxy). Otherwise the script falls back to the local stub endpoint described in Phase 1.
 
+## Supervisor / Daemon Usage
+For long-running, unattended jobs (Phase 4), use `scripts/daemon.py`. This wrapper ensures the runner respects wall-clock limits, restarts automatically after crashes, and resumes from the latest checkpoint.
+
+```bash
+# Run for 50 cycles with a 12-hour wall-clock limit, auto-resuming if interrupted
+python scripts/daemon.py \
+  --config configs/experiment.p3.prod.yaml \
+  --problem p3 \
+  --cycles 50 \
+  --wall-clock-minutes 720 \
+  --planner agent
+```
+
+The daemon will:
+- Check `reports/` for the latest `cycle_*.json` checkpoint.
+- Restart the runner process if it crashes (non-zero exit code).
+- Force `OMP_NUM_THREADS=1` to prevent thread contention in workers.
+- Terminate gracefully if the wall-clock limit is exceeded.
+
 ## Planner vs deterministic runner (Phase 3 reference)
 - **Deterministic runner:** Hard-coded loops generate candidates, evaluate them, and promote stages based on fixed logic. This pathway is great for reproducing legacy comparison baselines (Exercises in Phases 1 and 5).
 - **Agent planner:** Reads `world_model` summaries, Pareto snapshots, and RAG-context chunks, then calls gated tools through `ai_scientist/tools_api` (including `make_boundary`, `evaluate_p3`, and `retrieve_rag`). It is driven by the `--planner agent` flag and reflects the multi-agent architecture described in Section 3 of `ai_scientist/roadmap.md`.

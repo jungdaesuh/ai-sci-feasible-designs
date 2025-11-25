@@ -28,6 +28,32 @@ _TOOL_DEFINITIONS: Sequence[ToolSchema] = (
         },
     },
     {
+        "name": "propose_boundary",
+        "description": (
+            "Perturb an existing boundary parameter set to generate a new candidate near the original. "
+            "Useful for refining a promising seed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "type": "object",
+                    "description": "Base boundary parameters to perturb.",
+                },
+                "perturbation_scale": {
+                    "type": "number",
+                    "description": "Standard deviation of the Gaussian noise (default 0.05).",
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Optional random seed for reproducibility.",
+                },
+            },
+            "required": ["params"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "evaluate_p1",
         "description": (
             "Evaluate the low-fidelity P1 problem (minimize max elongation). "

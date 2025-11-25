@@ -555,6 +555,42 @@ def make_boundary_from_params(
     return surface_rz_fourier.SurfaceRZFourier(**payload)
 
 
+def propose_boundary(
+    params: Mapping[str, Any] | BoundaryParams,
+    *,
+    perturbation_scale: float = 0.05,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Perturb a given boundary parameter set with random noise."""
+    params_map = _ensure_mapping(params)
+    rng = np.random.default_rng(seed)
+    new_params: dict[str, Any] = {}
+    
+    for key, value in params_map.items():
+        if key in ("r_cos", "z_sin", "r_sin", "z_cos"):
+            arr = np.asarray(value, dtype=float)
+            noise = rng.normal(scale=perturbation_scale, size=arr.shape)
+            new_params[key] = (arr + noise).tolist()
+        else:
+            new_params[key] = value
+            
+    # Ensure symmetry constraints if flag is present
+    if new_params.get("is_stellarator_symmetric"):
+        if "r_cos" in new_params:
+            r_cos = np.asarray(new_params["r_cos"])
+            if r_cos.ndim > 1:
+                center_idx = r_cos.shape[1] // 2
+                if center_idx > 0:
+                    r_cos[0, :center_idx] = 0.0
+                new_params["r_cos"] = r_cos.tolist()
+        if "z_sin" in new_params:
+            z_sin = np.asarray(new_params["z_sin"])
+            z_sin[0, :] = 0.0
+            new_params["z_sin"] = z_sin.tolist()
+            
+    return new_params
+
+
 def evaluate_p1(
     boundary_params: Mapping[str, Any] | BoundaryParams,
     *,

@@ -554,6 +554,7 @@ def _propose_p3_candidates_for_cycle(
     *,
     screen_budget: int,
     total_candidates: int | None = None,
+    prev_feasibility_rate: float | None = None,
 ) -> tuple[list[Mapping[str, Any]], int, int]:
     """Blend constraint-aware sampling and random noise per roadmap Phase 1 guidance.
 
@@ -567,7 +568,12 @@ def _propose_p3_candidates_for_cycle(
         return [], 0, 0
 
     mix = cfg.proposal_mix
-    ratio_sum = mix.constraint_ratio + mix.exploration_ratio
+    exploration_weight = mix.exploration_ratio
+    if prev_feasibility_rate is not None:
+        # Decay exploration as feasibility improves (Workstream 1)
+        exploration_weight *= 1.0 - min(1.0, max(0.0, prev_feasibility_rate))
+
+    ratio_sum = mix.constraint_ratio + exploration_weight
     if ratio_sum <= 0.0:
         sampler_target = 0
     else:
@@ -1324,6 +1330,7 @@ def _run_cycle(
     *,
     runtime: RunnerCLIConfig | None = None,
     budget_controller: BudgetController,
+    prev_feasibility_rate: float | None = None,
 ) -> tuple[Path | None, dict[str, Any] | None, tools.P3Summary | None]:
     tool_name = _problem_tool_name(cfg.problem)
     base_evaluate = _problem_evaluator(cfg.problem)
@@ -1370,6 +1377,7 @@ def _run_cycle(
             experiment_id,
             screen_budget=budget_snapshot.screen_evals_per_cycle,
             total_candidates=pool_size,
+            prev_feasibility_rate=prev_feasibility_rate,
         )
         if runtime and runtime.verbose:
             print(
@@ -1976,6 +1984,8 @@ def run(
                 None,
             )
         
+        last_feasibility_rate: float | None = None
+
         for idx in range(cfg.cycles):
             cycle_number = idx + 1
             if idx < start_cycle_index:
@@ -2017,8 +2027,37 @@ def run(
                 constellaration_sha,
                 runtime=runtime,
                 budget_controller=budget_controller,
+                prev_feasibility_rate=last_feasibility_rate,
             )
             last_p3_summary = p3_summary
+            if p3_summary:
+                total = max(1, p3_summary.feasible_count + (p3_summary.archive_size or 0)) # approximate total if not tracked directly
+                # Actually p3_summary doesn't store total candidates, but _run_cycle logs feasibility_rate to JSON.
+                # We can infer it from the feasible_count if we knew the total. 
+                # Wait, _run_cycle calculated feasibility_rate internally but didn't return it explicitly except in JSON.
+                # But we can re-calculate if we assume pool size ~ budget. 
+                # Better: _run_cycle *returns* p3_summary, but feasibility_rate was local. 
+                # Let's check _run_cycle output. It returns (Path, dict, P3Summary).
+                # The P3Summary has feasible_count. 
+                # We can track feasibility rate if we modify _run_cycle to return it or just assume 0.5 for now? 
+                # No, better to capture it. 
+                # However, modifying return signature again is annoying.
+                # Let's assume feasibility_rate ~ p3_summary.feasible_count / (screened + promoted) roughly?
+                # Actually, best_eval has "feasibility_rate" in the JSON payload logic but not in the returned dict structure clearly.
+                # Let's look at how `last_feedback` was constructed in _run_cycle: 
+                # `feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))`
+                # `total_designs` came from `len(latest_by_design)`.
+                # We can approximately reconstruct it or just let the decay be 0 for the first pass if not critical.
+                # BUT, I can calculate it here if I assume total_designs is roughly comparable to what p3_summary holds.
+                # `p3_summary` holds `pareto_entries` (tuple). 
+                # The simplest way is to trust that if feasible_count > 0, rate > 0.
+                # Let's check `p3_summary` fields.
+                pass
+            
+            # To properly implement decay, I need the rate. 
+            # I will check budget_controller._last_feedback since it WAS recorded in _run_cycle.
+            if budget_controller._last_feedback and budget_controller._last_feedback.feasibility_rate is not None:
+                last_feasibility_rate = budget_controller._last_feedback.feasibility_rate
             if report_path:
                 print(f"[runner] cycle {idx + 1} report saved to {report_path}")
             else:
