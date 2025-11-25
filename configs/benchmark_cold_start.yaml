@@ -55,3 +55,10 @@ constraint_weights:
   mhd: 10.0
   qi: 1.0
   elongation: 1.0
+run_overrides:
+  optimizer: sa-alm
+  initialization_strategy: nae
+  alm_settings:
+    penalty_parameters_increase_factor: 2.0
+    bounds_reduction_factor: 0.9
+    constraint_violation_tolerance_reduction_factor: 0.5

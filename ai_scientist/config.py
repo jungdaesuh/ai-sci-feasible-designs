@@ -172,6 +172,7 @@ class GovernanceConfig:
 class ProposalMixConfig:
     constraint_ratio: float
     exploration_ratio: float
+    exploitation_ratio: float = 0.0 # Added exploitation_ratio
     jitter_scale: float
     surrogate_pool_multiplier: float = 2.0
     sampler_type: str = "standard"
@@ -197,10 +198,12 @@ class ExperimentConfig:
     governance: GovernanceConfig
     proposal_mix: ProposalMixConfig
     constraint_weights: ConstraintWeightsConfig
+    initialization_strategy: str
     reporting_dir: Path
     memory_db: Path
     source_config: Path
     reporting: Mapping[str, Any] = field(default_factory=dict)
+    run_overrides: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _boundary_template_from_dict(
@@ -300,9 +303,11 @@ def _proposal_mix_from_dict(
     config = data or {}
     constraint_ratio = float(config.get("constraint_ratio", 0.7))
     exploration_ratio = float(config.get("exploration_ratio", 0.3))
+    exploitation_ratio = float(config.get("exploitation_ratio", 0.0))
     return ProposalMixConfig(
         constraint_ratio=constraint_ratio,
         exploration_ratio=exploration_ratio,
+        exploitation_ratio=exploitation_ratio,
         jitter_scale=float(config.get("jitter_scale", 0.01)),
         surrogate_pool_multiplier=float(config.get("surrogate_pool_multiplier", 2.0)),
         sampler_type=str(config.get("sampler_type", "standard")),
@@ -410,6 +415,8 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         constraint_weights=_constraint_weights_from_dict(
             payload.get("constraint_weights")
         ),
+        initialization_strategy=str(payload.get("initialization_strategy", "template")),
+        run_overrides=payload.get("run_overrides", {}),
         reporting_dir=Path(payload.get("reporting_dir", "reports")),
         memory_db=Path(payload.get("memory_db", DEFAULT_MEMORY_DB_PATH)),
         source_config=config_path,

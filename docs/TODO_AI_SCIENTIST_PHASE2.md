@@ -83,3 +83,24 @@ The current system has a robust infrastructure (World Model, RAG, Tool Definitio
 - [x] **4.2 Update Docs**
     - [x] Update `docs/AI_SCIENTIST_AUTONOMY_PLAN.md` to reflect the move from "Filter" to "Solver" (Native ALM).
     - [x] Document the "Feasibility Restoration" logic and the Agent's "Meta-Optimizer" role.
+
+---
+
+## Phase 5: Advanced Solver Refinements (Hybrid & Initialization)
+
+**Objective:** Enhance the ALM solver with Surrogate Acceleration and Physics-Informed Initialization.
+
+- [x] **5.1 Hybrid Surrogate-Assisted ALM (SA-ALM)**
+    - [x] **Concept:** Accelerate the inner loop of ALM by using the `SurrogateBundle` (trained in Phase 2) to predict objectives and constraints, rather than calling the expensive VMEC++ forward model every step.
+    - [x] **Implementation:**
+        - [x] Modify `_objective_constraints` in `runner.py` to accept a `predictor` callable.
+        - [x] In `_run_cycle`, if `optimizer_mode == "sa-alm"`, pass a predictor wrapping `_SURROGATE_BUNDLE.rank_candidates` (or direct regression predict) to the inner loop.
+        - [x] Periodically verify the surrogate's "best" result with a real VMEC call to update the trust region/surrogate data.
+
+- [x] **5.2 Advanced Physics Initialization (NAE)**
+    - [x] **Concept:** Use Near-Axis Expansion (NAE) to generate high-quality initial guesses that are closer to QI, rather than random perturbations.
+    - [x] **Implementation:**
+        - [x] Import `generate_nae` from `constellaration.initial_guess`.
+        - [x] Create a new initialization helper `_generate_nae_candidate_params` in `runner.py`.
+        - [x] Update `_build_template_params_for_alm` (or creating a new builder) to use `generate_nae` when `boundary_template.seed_path` is missing or when requested by the agent.
+        - [x] Expose an `initialization_strategy` config option ("template", "nae", "random") that the Agent can tune.

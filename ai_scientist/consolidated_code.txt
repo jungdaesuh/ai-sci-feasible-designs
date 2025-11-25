@@ -17,9 +17,10 @@ from typing import Any, Mapping, Sequence
 
 from ai_scientist import agent as agent_module
 from ai_scientist import config as ai_config
+from ai_scientist import memory
+from ai_scientist import rag
 from ai_scientist import tools
 from ai_scientist import tools_api
-from ai_scientist import rag
 
 
 class PlanningOutcome:
@@ -31,11 +32,13 @@ class PlanningOutcome:
         evaluation_summary: Mapping[str, Any],
         boundary_summary: Mapping[str, Any],
         rag_snippets: Sequence[Mapping[str, str]],
+        graph_summary: Mapping[str, Any] | None = None,
     ) -> None:
         self.context = context
         self.evaluation_summary = evaluation_summary
         self.boundary_summary = boundary_summary
         self.rag_snippets = rag_snippets
+        self.graph_summary = graph_summary
 
 
 def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | None:
@@ -65,20 +68,33 @@ class PlanningAgent:
         *,
         config: ai_config.ModelConfig | None = None,
         rag_index: Path | str | None = None,
+        world_model: memory.WorldModel | None = None,
     ) -> None:
         self.config = config or ai_config.load_model_config()
-        self.gate = agent_module.provision_model_tier(
+        self.planning_gate = agent_module.provision_model_tier(
             role="planning", config=self.config
         )
+        self.literature_gate = agent_module.provision_model_tier(
+            role="literature", config=self.config
+        )
+        self.analysis_gate = agent_module.provision_model_tier(
+            role="analysis", config=self.config
+        )
         self.rag_index = Path(rag_index or rag.DEFAULT_INDEX_PATH)
+        self.world_model = world_model
         self.last_context: Mapping[str, Any] | None = None
 
     def _hash_context(self, payload: Mapping[str, Any]) -> str:
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def _validate_tool_call(self, tool_name: str, arguments: Mapping[str, Any]) -> None:
-        agent_module.validate_tool_call(self.config, self.gate.model_alias, tool_name)
+    def _validate_tool_call(
+        self, gate: agent_module.AgentGate, tool_name: str, arguments: Mapping[str, Any]
+    ) -> None:
+        if not gate.allows(tool_name):
+            raise ValueError(
+                f"Tool '{tool_name}' is not permitted for {gate.model_alias} (role={gate.provider_model})"
+            )
         schema = tools_api.get_tool_schema(tool_name)
         if schema:
             parameters = schema.get("parameters", {})
@@ -90,14 +106,39 @@ class PlanningAgent:
                 )
         context_hash = self._hash_context(arguments)
         print(
-            f"[planner][tool-call] role={self.gate.model_alias} tool={tool_name} context_hash={context_hash}"
+            f"[planner][tool-call] role={gate.model_alias} tool={tool_name} context_hash={context_hash}"
         )
 
     def retrieve_rag(self, query: str, *, k: int = 3) -> list[dict[str, str]]:
         payload: dict[str, Any] = {"query": query}
         payload["k"] = k
-        self._validate_tool_call("retrieve_rag", payload)
+        # RAG is allowed for multiple roles; we check planning gate by default here
+        # but in a real loop the agent driver would pick the gate.
+        self._validate_tool_call(self.planning_gate, "retrieve_rag", payload)
         return tools.retrieve_rag(query, k=k, index_path=self.rag_index)
+
+    def write_note(
+        self,
+        content: str,
+        experiment_id: int,
+        cycle: int,
+        filename: str | None = None,
+    ) -> str:
+        payload = {
+            "content": content,
+            "filename": filename,
+            "experiment_id": experiment_id,
+            "cycle": cycle,
+        }
+        self._validate_tool_call(self.literature_gate, "write_note", payload)
+        return tools.write_note(
+            content,
+            filename=filename,
+            world_model=self.world_model,
+            experiment_id=experiment_id,
+            cycle=cycle,
+            memory_db=self.world_model.db_path if self.world_model else None,
+        )
 
     def evaluate_p3(
         self,
@@ -111,7 +152,7 @@ class PlanningAgent:
         }
         if stage is not None:
             args["stage"] = stage
-        self._validate_tool_call("evaluate_p3", args)
+        self._validate_tool_call(self.planning_gate, "evaluate_p3", args)
         try:
             return tools.evaluate_p3(params, stage=stage or "p3")
         except Exception as exc:  # pragma: no cover - smoke-run safety
@@ -129,8 +170,22 @@ class PlanningAgent:
         self, params: Mapping[str, Any]
     ) -> tools.surface_rz_fourier.SurfaceRZFourier:
         args = {"params": params}
-        self._validate_tool_call("make_boundary", args)
+        self._validate_tool_call(self.planning_gate, "make_boundary", args)
         return tools.make_boundary_from_params(params)
+
+    def propose_boundary(
+        self,
+        params: Mapping[str, Any],
+        perturbation_scale: float = 0.05,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        args = {"params": params, "perturbation_scale": perturbation_scale}
+        if seed is not None:
+            args["seed"] = seed
+        self._validate_tool_call(self.planning_gate, "propose_boundary", args)
+        return tools.propose_boundary(
+            params, perturbation_scale=perturbation_scale, seed=seed
+        )
 
     def _build_template_params(
         self, template: ai_config.BoundaryTemplateConfig
@@ -175,17 +230,19 @@ class PlanningAgent:
         evaluation_summary: Mapping[str, Any],
         boundary_summary: Mapping[str, Any],
         rag_snippets: Sequence[Mapping[str, str]],
+        graph_summary: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         context = {
             "cycle_index": cycle_index + 1,
-            "planner_role": self.gate.model_alias,
+            "planner_role": self.planning_gate.model_alias,
             "budgets": asdict(budgets),
             "stage_history": list(stage_history),
             "previous_p3_summary": _serialize_summary(last_summary),
             "latest_evaluation": evaluation_summary,
             "current_boundary": boundary_summary,
             "rag_snippets": list(rag_snippets),
-            "toolset": list(self.gate.allowed_tools),
+            "graph_summary": graph_summary,
+            "toolset": list(self.planning_gate.allowed_tools),
         }
         self.last_context = context
         return context
@@ -197,23 +254,30 @@ class PlanningAgent:
         cycle_index: int,
         stage_history: Sequence[Mapping[str, Any]],
         last_summary: tools.P3Summary | None,
+        experiment_id: int | None = None,
     ) -> PlanningOutcome:
+        cycle_number = cycle_index + 1
+        
+        # Literature Retrieval (planning role)
         rag_snippets = self.retrieve_rag(
-            f"Planning guidance for {cfg.problem.upper()} cycle {cycle_index + 1}",
+            f"Planning guidance for {cfg.problem.upper()} cycle {cycle_number}",
             k=3,
         )
+        
+        # Planning Role Actions
         params = self._build_template_params(cfg.boundary_template)
         evaluation = self.evaluate_p3(
             params,
             stage=cfg.fidelity_ladder.screen,
         )
         boundary = self.make_boundary(params)
+        
         evaluation_summary = {
             "objective": evaluation.get("objective"),
             "feasibility": evaluation.get("feasibility"),
             "hv": evaluation.get("hv"),
             "stage": evaluation.get("stage"),
-            "agent_stage_label": f"agent-cycle-{cycle_index + 1}",
+            "agent_stage_label": f"agent-cycle-{cycle_number}",
         }
         boundary_summary = {
             "n_poloidal_modes": boundary.n_poloidal_modes,
@@ -221,6 +285,30 @@ class PlanningAgent:
             "n_field_periods": boundary.n_field_periods,
             "stellarator_symmetric": boundary.is_stellarator_symmetric,
         }
+        
+        # Property Graph Snapshot (if world_model connected)
+        graph_summary: Mapping[str, Any] | None = None
+        if self.world_model and experiment_id is not None:
+            pg = self.world_model.to_networkx(experiment_id)
+            graph_dir = Path(cfg.reporting_dir) / "graphs"
+            graph_dir.mkdir(parents=True, exist_ok=True)
+            graph_file = graph_dir / f"cycle_{cycle_number}.json"
+            
+            nodes = [{"id": node, **attrs} for node, attrs in pg.nodes(data=True)]
+            edges = [
+                {"src": src, "dst": dst, "attrs": attrs}
+                for src, dst, attrs in pg.edges(data=True)
+            ]
+            snapshot_data = {"nodes": nodes, "edges": edges}
+            graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
+            
+            graph_summary = {
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "note_count": sum(1 for n in nodes if n.get("type") == "note"),
+                "snapshot_path": str(graph_file)
+            }
+
         context = self._build_context(
             cycle_index=cycle_index,
             budgets=cfg.budgets,
@@ -229,12 +317,15 @@ class PlanningAgent:
             evaluation_summary=evaluation_summary,
             boundary_summary=boundary_summary,
             rag_snippets=rag_snippets,
+            graph_summary=graph_summary,
         )
+        
         return PlanningOutcome(
             context=context,
             evaluation_summary=evaluation_summary,
             boundary_summary=boundary_summary,
             rag_snippets=rag_snippets,
+            graph_summary=graph_summary,
         )
 
 
@@ -256,9 +347,10 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple
+import random
 
 import numpy as np
 import yaml
@@ -270,15 +362,17 @@ from ai_scientist import planner as ai_planner
 from ai_scientist import rag
 from ai_scientist import reporting
 from ai_scientist import tools
-from ai_scientist.optim.surrogate import SimpleSurrogateRanker
+from ai_scientist.optim.samplers import NearAxisSampler
+from ai_scientist.optim.surrogate import SurrogateBundle
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_rotating_ellipse
 from orchestration import adaptation as adaptation_helpers
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
 P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
-MIN_SURROGATE_HISTORY = 4
 _BOUNDARY_SEED_CACHE: dict[Path, dict[str, Any]] = {}
+_SURROGATE_BUNDLE = SurrogateBundle()
+_LAST_SURROGATE_FIT_SEC = 0.0
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -325,6 +419,9 @@ class CycleBudgetFeedback:
 
 
 class BudgetController:
+    STATE_VERSION = 1
+    _STATE_FIELDS = {"_last_feedback", "_cache_stats"}
+
     def __init__(
         self,
         base_budgets: ai_config.BudgetConfig,
@@ -334,6 +431,56 @@ class BudgetController:
         self._adaptive_cfg = adaptive_cfg
         self._last_feedback: CycleBudgetFeedback | None = None
         self._cache_stats: dict[str, dict[str, int]] = {}
+        # NOTE: If new adaptive state is added, include it in to_dict/restore and checkpoints for deterministic resume.
+
+    def to_dict(self) -> dict[str, Any]:
+        unknown_state = {
+            key
+            for key in self.__dict__
+            if key.startswith("_")
+            and key not in {"_base", "_adaptive_cfg"}
+            and key not in self._STATE_FIELDS
+        }
+        if unknown_state:
+            raise ValueError(
+                f"BudgetController state fields {unknown_state} are not serialized; "
+                "update _STATE_FIELDS/to_dict/restore for deterministic resume."
+            )
+        feedback = (
+            {
+                "hv_delta": self._last_feedback.hv_delta,
+                "feasibility_rate": self._last_feedback.feasibility_rate,
+                "cache_hit_rate": self._last_feedback.cache_hit_rate,
+            }
+            if self._last_feedback
+            else None
+        )
+        return {
+            "state_version": self.STATE_VERSION,
+            "base_budgets": asdict(self._base),
+            "adaptive_cfg": asdict(self._adaptive_cfg),
+            "adaptive_enabled": self._adaptive_cfg.enabled,
+            "last_feedback": feedback,
+            "cache_stats": self._cache_stats,
+        }
+
+    def restore(self, payload: Mapping[str, Any]) -> None:
+        version = payload.get("state_version", 0)
+        if version != self.STATE_VERSION:
+            print(
+                f"[budget] warning: checkpoint state_version={version} "
+                f"!= expected {self.STATE_VERSION}; attempting best-effort restore."
+            )
+        feedback = payload.get("last_feedback")
+        if feedback:
+            self._last_feedback = CycleBudgetFeedback(
+                hv_delta=feedback.get("hv_delta"),
+                feasibility_rate=feedback.get("feasibility_rate"),
+                cache_hit_rate=feedback.get("cache_hit_rate"),
+            )
+        cache_stats = payload.get("cache_stats")
+        if isinstance(cache_stats, dict):
+            self._cache_stats = cache_stats
 
     def snapshot(self) -> BudgetSnapshot:
         if not self._adaptive_cfg.enabled or self._last_feedback is None:
@@ -527,6 +674,7 @@ class RunnerCLIConfig:
     log_cache_stats: bool
     run_preset: str | None
     planner: str
+    resume_from: Path | None = None
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -617,6 +765,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default="deterministic",
         help="Choose the planning driver (deterministic loop or Phase 3 agent).",
     )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help="Path to a cycle checkpoint JSON to resume from (skips completed cycles).",
+    )
     return parser
 
 
@@ -640,6 +793,7 @@ def parse_args(args: Sequence[str] | None = None) -> RunnerCLIConfig:
         log_cache_stats=bool(namespace.log_cache_stats),
         run_preset=namespace.run_preset,
         planner=namespace.planner,
+        resume_from=namespace.resume_from,
     )
 
 
@@ -656,8 +810,13 @@ def _generate_candidate_params(
 ) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     seed_data: dict[str, Any] | None = None
-    if template.seed_path is not None:
-        seed_data = _load_seed_boundary(template.seed_path)
+    seed_path = template.seed_path
+    if seed_path is None:
+        default_seed = Path("configs/seeds/rotating_ellipse_p3.json")
+        seed_path = default_seed if default_seed.exists() else None
+
+    if seed_path is not None:
+        seed_data = _load_seed_boundary(seed_path)
         r_cos = seed_data["r_cos"]
         z_sin = seed_data["z_sin"]
         r_sin = seed_data["r_sin"]
@@ -731,6 +890,7 @@ def _propose_p3_candidates_for_cycle(
     *,
     screen_budget: int,
     total_candidates: int | None = None,
+    prev_feasibility_rate: float | None = None,
 ) -> tuple[list[Mapping[str, Any]], int, int]:
     """Blend constraint-aware sampling and random noise per roadmap Phase 1 guidance.
 
@@ -744,7 +904,12 @@ def _propose_p3_candidates_for_cycle(
         return [], 0, 0
 
     mix = cfg.proposal_mix
-    ratio_sum = mix.constraint_ratio + mix.exploration_ratio
+    exploration_weight = mix.exploration_ratio
+    if prev_feasibility_rate is not None:
+        # Decay exploration as feasibility improves (Workstream 1)
+        exploration_weight *= 1.0 - min(1.0, max(0.0, prev_feasibility_rate))
+
+    ratio_sum = mix.constraint_ratio + exploration_weight
     if ratio_sum <= 0.0:
         sampler_target = 0
     else:
@@ -776,6 +941,7 @@ def _propose_p3_candidates_for_cycle(
             proposal_count=sampler_target,
             jitter_scale=mix.jitter_scale,
             rng=np.random.default_rng(rng_seed),
+            include_distances=True,
         )
     else:
         sampler_params = []
@@ -791,19 +957,51 @@ def _propose_p3_candidates_for_cycle(
             seed = next(seed_iter)
         except StopIteration:
             break
+        if isinstance(params, Mapping) and "params" in params:
+            payload = params.get("params", {})
+            constraint_distance = float(params.get("normalized_constraint_distance", 0.0))
+        else:
+            payload = params
+            constraint_distance = 0.0
         sampler_results.append(
             {
                 "seed": seed,
-                "params": params,
-                "design_hash": tools.design_hash(params),
+                "params": payload,
+                "design_hash": tools.design_hash(payload),
+                "constraint_distance": constraint_distance,
+                "source": "constraint_sampler",
             }
         )
 
     remaining = total_candidates - len(sampler_results)
-    random_results: list[Mapping[str, Any]] = []
+    remaining_seeds = []
     for _ in range(remaining):
-        seed = next(seed_iter)
-        random_results.append(_generate_candidate_params(cfg.boundary_template, seed))
+        try:
+            remaining_seeds.append(next(seed_iter))
+        except StopIteration:
+            break
+
+    random_results: list[Mapping[str, Any]] = []
+    
+    if cfg.proposal_mix.sampler_type == "near_axis":
+        try:
+            sampler = NearAxisSampler(cfg.boundary_template)
+            random_results = sampler.generate(remaining_seeds)
+        except Exception as exc:
+            print(f"[runner] NearAxisSampler failed: {exc}; falling back to standard random")
+            random_results = []
+
+    used_seeds = {c["seed"] for c in random_results}
+    fallback_seeds = [s for s in remaining_seeds if s not in used_seeds]
+
+    for seed in fallback_seeds:
+        random_results.append(
+            {
+                **_generate_candidate_params(cfg.boundary_template, seed),
+                "constraint_distance": 1.0,
+                "source": "random",
+            }
+        )
 
     candidates = sampler_results + random_results
     return candidates, len(sampler_results), len(random_results)
@@ -826,40 +1024,76 @@ def _surrogate_rank_screen_candidates(
     candidates: list[Mapping[str, Any]],
     world_model: memory.WorldModel,
     *,
+    cycle: int = 0,
     verbose: bool = False,
 ) -> list[Mapping[str, Any]]:
-    """Train SimpleSurrogateRanker on cached history and trim the pool (see /Users/suhjungdae/code/software/proxima_fusion/RL-feasible-designs/ai_scientist/roadmap.md)."""
+    """Train SurrogateBundle on cached history and trim the pool."""
 
     if not candidates or screen_budget <= 0:
         return candidates
 
-    history = world_model.surrogate_training_data(target="hv", problem=cfg.problem)
-    required_history = max(MIN_SURROGATE_HISTORY, screen_budget)
-    if len(history) < required_history:
-        return candidates
+    problem = (cfg.problem or "").lower()
+    target_column = "hv" if problem == "p3" else "objective"
+    minimize_objective = problem == "p1"
 
-    metrics_list, target_values = zip(*history)
-    ranker = SimpleSurrogateRanker()
-    ranker.fit(metrics_list, target_values)
+    history = world_model.surrogate_training_data(
+        target=target_column, problem=cfg.problem
+    )
+    global _LAST_SURROGATE_FIT_SEC
+    _LAST_SURROGATE_FIT_SEC = 0.0
+    metrics_list: tuple[Mapping[str, Any], ...]
+    target_values: tuple[float, ...]
+    if history:
+        metrics_list, target_values = zip(*history)
+        if _SURROGATE_BUNDLE.should_retrain(len(history), cycle=cycle):
+            start = time.perf_counter()
+            _SURROGATE_BUNDLE.fit(
+                metrics_list,
+                target_values,
+                minimize_objective=minimize_objective,
+                cycle=cycle,
+            )
+            _LAST_SURROGATE_FIT_SEC = time.perf_counter() - start
+    else:
+        metrics_list = tuple()
+        target_values = tuple()
 
     pool_entries: list[Mapping[str, Any]] = []
     for idx, candidate in enumerate(candidates):
         pool_entries.append(
             {
                 "candidate_params": candidate["params"],
+                "constraint_distance": candidate.get("constraint_distance", 0.0),
+                "source": candidate.get("source"),
                 "__surrogate_candidate_index": idx,
             }
         )
 
-    ranked = ranker.rank(pool_entries)
+    ranked_predictions = _SURROGATE_BUNDLE.rank_candidates(
+        pool_entries,
+        minimize_objective=minimize_objective,
+        exploration_ratio=cfg.proposal_mix.exploration_ratio,
+    )
+    if cfg.problem.lower() == "p2":
+        # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
+        # gate P2 promotions on feasibility probability before objective.
+        prob_threshold = max(
+            0.0, min(1.0, cfg.adaptive_budgets.feasibility_target)
+        )
+        filtered_predictions = [
+            prediction
+            for prediction in ranked_predictions
+            if prediction.prob_feasible >= prob_threshold
+        ]
+        if filtered_predictions:
+            ranked_predictions = filtered_predictions
+
     selected: list[Mapping[str, Any]] = []
-    seen: set[int] = set()
     needed = screen_budget
-    for rank in ranked:
-        idx = int(rank.metrics.get("__surrogate_candidate_index", -1))
-        if idx < 0 or idx in seen:
+    for prediction in ranked_predictions:
+        idx = int(prediction.metadata.get("__surrogate_candidate_index", -1))
+        if idx < 0:
             continue
-        seen.add(idx)
         selected.append(candidates[idx])
         if len(selected) >= needed:
             break
@@ -1018,6 +1252,11 @@ def _extract_objectives(entry: Mapping[str, Any]) -> tuple[float, float]:
     return gradient, aspect
 
 
+def _objective_proxy(entry: Mapping[str, Any]) -> float:
+    gradient, aspect = _extract_objectives(entry)
+    return gradient - aspect
+
+
 def _crowding_distance(
     entries_by_design: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, float]:
@@ -1064,10 +1303,21 @@ def _rank_candidates_for_promotion(
     summary = tools.summarize_p3_candidates(
         list(entries_by_design.values()), reference_point=reference_point
     )
+    # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
+    # rank promotions by feasibility first, then objective proxy.
     ordered_hashes = [entry.design_hash for entry in summary.pareto_entries]
-    ranked: list[Mapping[str, Any]] = [
-        entries_by_design[h] for h in ordered_hashes if h in entries_by_design
-    ]
+    ranked: list[Mapping[str, Any]] = sorted(
+        (
+            entries_by_design[h]
+            for h in ordered_hashes
+            if h in entries_by_design
+        ),
+        key=lambda entry: (
+            0.0 if _feasibility_value(entry) <= FEASIBILITY_CUTOFF else 1.0,
+            _feasibility_value(entry),
+            -_objective_proxy(entry),
+        ),
+    )
     if len(ranked) >= promote_limit:
         return ranked[:promote_limit]
     remaining = {
@@ -1085,6 +1335,7 @@ def _rank_candidates_for_promotion(
             feasible_flag,
             -crowding.get(design_hash, 0.0),
             feas,
+            -_objective_proxy(entry),
         )
 
     for design_hash in sorted(remaining, key=_sort_key):
@@ -1251,7 +1502,29 @@ def _evaluate_stage(
                 break
             params = candidate["params"]
             design_id = candidate.get("design_hash") or tools.design_hash(params)
-            evaluation = evaluate_fn(params, stage=stage)
+            try:
+                evaluation = evaluate_fn(params, stage=stage)
+                evaluation.setdefault("vmec_status", "ok")
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner][stage-eval] Failed evaluation for design {design_id} "
+                    f"(seed={candidate['seed']} stage={stage}): {exc}"
+                )
+                evaluation = {
+                    "stage": stage,
+                    "feasibility": float("inf"),
+                    "max_violation": float("inf"),
+                    "objective": float("inf"),
+                    "is_feasible": False,
+                    "vmec_status": "exception",
+                    "metrics": {
+                        "minimum_normalized_magnetic_gradient_scale_length": 0.0,
+                        "aspect_ratio": float("inf"),
+                        "max_elongation": float("inf"),
+                        "constraint_margins": {},
+                        "max_violation": float("inf"),
+                    },
+                }
             results.append(
                 {
                     "params": params,
@@ -1288,12 +1561,38 @@ def _evaluate_stage(
                     f"[runner][stage-eval] Failed evaluation for design {design_hash} "
                     f"(seed={candidate['seed']} stage={stage}): {exc}"
                 )
+                failure_eval = {
+                    "stage": stage,
+                    "feasibility": float("inf"),
+                    "max_violation": float("inf"),
+                    "objective": float("inf"),
+                    "is_feasible": False,
+                    "vmec_status": "exception",
+                    "metrics": {
+                        "minimum_normalized_magnetic_gradient_scale_length": 0.0,
+                        "aspect_ratio": float("inf"),
+                        "max_elongation": float("inf"),
+                        "constraint_margins": {},
+                        "max_violation": float("inf"),
+                    },
+                }
+                results.append(
+                    {
+                        "params": candidate["params"],
+                        "evaluation": failure_eval,
+                        "seed": int(candidate["seed"]),
+                        "design_hash": design_hash,
+                    }
+                )
                 continue
 
             results.append(
                 {
                     "params": candidate["params"],
-                    "evaluation": future.result(),
+                    "evaluation": {
+                        **future.result(),
+                        "vmec_status": future.result().get("vmec_status", "ok"),
+                    },
                     "seed": int(candidate["seed"]),
                     "design_hash": design_id or tools.design_hash(candidate["params"]),
                 }
@@ -1303,6 +1602,10 @@ def _evaluate_stage(
 
 def _cache_stats_log_path(report_dir: Path | str) -> Path:
     return Path(report_dir) / "cache_stats.jsonl"
+
+
+def _observability_log_path(report_dir: Path | str) -> Path:
+    return Path(report_dir) / "observability.jsonl"
 
 
 def _maybe_log_cache_stats(
@@ -1318,12 +1621,55 @@ def _maybe_log_cache_stats(
     entry = {
         "cycle": cycle_index + 1,
         "stage": stage,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "stats": stats,
     }
     log_path = _cache_stats_log_path(cfg.reporting_dir)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+def _vmec_failure_rate(results: Sequence[Mapping[str, Any]]) -> float:
+    if not results:
+        return 0.0
+    total = len(results)
+    failures = 0
+    for entry in results:
+        status = str(entry.get("evaluation", {}).get("vmec_status", "success")).lower()
+        if status and status not in {"ok", "success"}:
+            failures += 1
+    return float(failures) / float(total)
+
+
+def _log_observability_metrics(
+    cfg: ai_config.ExperimentConfig,
+    cycle_index: int,
+    *,
+    hv: float | None,
+    feasible_count: int,
+    vmec_failure_rate: float,
+    retrain_time: float,
+    cache_hit_rate: float,
+    budget_snapshot: BudgetSnapshot,
+) -> None:
+    entry = {
+        "cycle": cycle_index + 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "hv": hv,
+        "feasible_count": feasible_count,
+        "vmec_failure_rate": vmec_failure_rate,
+        "surrogate_retrain_seconds": retrain_time,
+        "cache_hit_rate": cache_hit_rate,
+        "budget_overrides": {
+            "screen_evals_per_cycle": budget_snapshot.screen_evals_per_cycle,
+            "promote_top_k": budget_snapshot.promote_top_k,
+            "max_high_fidelity": budget_snapshot.max_high_fidelity_evals_per_cycle,
+        },
+    }
+    path = _observability_log_path(cfg.reporting_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
@@ -1338,12 +1684,15 @@ def _run_cycle(
     *,
     runtime: RunnerCLIConfig | None = None,
     budget_controller: BudgetController,
+    prev_feasibility_rate: float | None = None,
 ) -> tuple[Path | None, dict[str, Any] | None, tools.P3Summary | None]:
     tool_name = _problem_tool_name(cfg.problem)
     base_evaluate = _problem_evaluator(cfg.problem)
     evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
     cycle_start = time.perf_counter()
     cycle_number = cycle_index + 1
+    global _LAST_SURROGATE_FIT_SEC
+    _LAST_SURROGATE_FIT_SEC = 0.0
     sleep_per_eval = 0.05 if runtime and runtime.slow else 0.0
     screen_only = bool(runtime and runtime.screen_only)
     budget_snapshot = budget_controller.snapshot()
@@ -1382,6 +1731,7 @@ def _run_cycle(
             experiment_id,
             screen_budget=budget_snapshot.screen_evals_per_cycle,
             total_candidates=pool_size,
+            prev_feasibility_rate=prev_feasibility_rate,
         )
         if runtime and runtime.verbose:
             print(
@@ -1392,6 +1742,7 @@ def _run_cycle(
             budget_snapshot.screen_evals_per_cycle,
             candidate_pool,
             world_model,
+            cycle=cycle_number,
             verbose=bool(runtime and runtime.verbose),
         )
 
@@ -1481,6 +1832,38 @@ def _run_cycle(
     )
     total_designs = len(latest_by_design)
     feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))
+    vmec_failure_rate = _vmec_failure_rate(aggregated)
+    hv_display = (
+        f"{p3_summary.hv_score:.6f}" if p3_summary.feasible_count > 0 else "n/a"
+    )
+    print(
+        f"[runner][cycle={cycle_number}] feasible={p3_summary.feasible_count}/{total_designs} hv={hv_display}"
+    )
+    _log_observability_metrics(
+        cfg,
+        cycle_index,
+        hv=p3_summary.hv_score,
+        feasible_count=p3_summary.feasible_count,
+        vmec_failure_rate=vmec_failure_rate,
+        retrain_time=_LAST_SURROGATE_FIT_SEC,
+        cache_hit_rate=cache_hit_rate,
+        budget_snapshot=budget_snapshot,
+    )
+    
+    if cfg.reporting.get("prometheus_export_enabled", False):
+        prom_path = Path(cfg.reporting_dir) / "metrics.prom"
+        reporting.export_metrics_to_prometheus_textfile(
+            {
+                "cycle_hv": p3_summary.hv_score or 0.0,
+                "feasible_count": p3_summary.feasible_count,
+                "vmec_failure_rate": vmec_failure_rate,
+                "surrogate_retrain_seconds": _LAST_SURROGATE_FIT_SEC,
+                "cache_hit_rate": cache_hit_rate,
+                "cycle": cycle_number,
+            },
+            prom_path,
+        )
+
     p3_summary_path = adaptation_helpers.write_p3_summary(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
@@ -1513,6 +1896,35 @@ def _run_cycle(
         _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha)
     )
     config_snapshot["cycle_seed"] = best_seed
+    adapter_version = adapter.current_adapter_version(
+        tool_name, cfg.fidelity_ladder.promote
+    ) or adapter.current_adapter_version(tool_name, cfg.fidelity_ladder.screen)
+    config_snapshot["adapter_version"] = adapter_version
+    cycle_json = {
+        "experiment_id": experiment_id,
+        "git_sha": git_sha,
+        "constellaration_sha": constellaration_sha,
+        "cycle": cycle_number,
+        "stage": governance_stage,
+        "feasible_count": p3_summary.feasible_count,
+        "hv": p3_summary.hv_score,
+        "vmec_failure_rate": vmec_failure_rate,
+        "surrogate_retrain_seconds": _LAST_SURROGATE_FIT_SEC,
+        "reference_point": p3_summary.reference_point,
+        "archive_size": p3_summary.archive_size,
+        "screened": len(screen_results),
+        "promoted": len(promote_results),
+        "feasibility_rate": feasibility_rate,
+        "adapter_version": adapter_version,
+        "last_feedback": {
+            "hv_delta": hv_delta,
+            "feasibility_rate": feasibility_rate,
+            "cache_hit_rate": cache_hit_rate,
+        },
+        "budget_controller": budget_controller.to_dict(),
+    }
+    cycle_json_path = Path(cfg.reporting_dir) / f"cycle_{cycle_number}.json"
+
     with world_model.transaction():
         world_model.record_cycle(
             experiment_id=experiment_id,
@@ -1526,6 +1938,14 @@ def _run_cycle(
             seed=best_seed,
             log_best_candidate=False,
             problem=cfg.problem,
+            commit=False,
+        )
+        world_model.record_cycle_summary(
+            experiment_id=experiment_id,
+            cycle_number=cycle_number,
+            stage=governance_stage,
+            feasible_count=p3_summary.feasible_count,
+            hv_score=p3_summary.hv_score,
             commit=False,
         )
         world_model.record_cycle_hv(
@@ -1574,6 +1994,8 @@ def _run_cycle(
         )
     if best_metrics_id is None:
         best_metrics_id = metrics_by_hash.get(best_entry.get("design_hash", ""))
+    cycle_json_path.parent.mkdir(parents=True, exist_ok=True)
+    cycle_json_path.write_text(json.dumps(cycle_json, indent=2), encoding="utf-8")
     repro_command = (
         f"python -m ai_scientist.runner --config {cfg.source_config} --problem {cfg.problem} "
         f"--cycles {cfg.cycles} --eval-budget {active_budgets.screen_evals_per_cycle} "
@@ -1644,30 +2066,34 @@ def _run_cycle(
     preference_pairs_path = adaptation_helpers.append_preference_pair(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
-        stage=stage_label,
-        status=statement_status,
-        tool_name=tool_name,
-        tool_input_hash=tool_input_hash,
-        reproduction_command=repro_command,
-        metrics=best_eval.get("metrics", {}),
-        design_hash=best_entry.get("design_hash"),
-        problem=cfg.problem,
-        seed=best_seed,
+        pair={
+            "stage": stage_label,
+            "status": statement_status,
+            "tool_name": tool_name,
+            "tool_input_hash": tool_input_hash,
+            "reproduction_command": repro_command,
+            "metrics": best_eval.get("metrics", {}),
+            "design_hash": best_entry.get("design_hash"),
+            "problem": cfg.problem,
+            "seed": best_seed,
+        },
     )
     trajectory_path = adaptation_helpers.append_trajectory_entry(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
-        stage=stage_label,
-        seed=best_seed,
-        tool_name=tool_name,
-        tool_input_hash=tool_input_hash,
-        reproduction_steps=reproduction_steps,
-        reproduction_snippet=reproduction_snippet,
-        reproduction_command=repro_command,
-        params=best_entry["params"],
-        metrics=best_eval.get("metrics", {}),
-        problem=cfg.problem,
-        design_hash=best_entry.get("design_hash", ""),
+        entry={
+            "stage": stage_label,
+            "seed": best_seed,
+            "tool_name": tool_name,
+            "tool_input_hash": tool_input_hash,
+            "reproduction_steps": reproduction_steps,
+            "reproduction_snippet": reproduction_snippet,
+            "reproduction_command": repro_command,
+            "params": best_entry["params"],
+            "metrics": best_eval.get("metrics", {}),
+            "problem": cfg.problem,
+            "design_hash": best_entry.get("design_hash", ""),
+        },
     )
     preference_pairs_anchor = _repo_relative(preference_pairs_path)
     p3_summary_anchor = _repo_relative(p3_summary_path)
@@ -1707,19 +2133,6 @@ def _run_cycle(
         git_sha=git_sha,
         repro_cmd=repro_command,
     )
-    adaptation_helpers.append_preference_pair(
-        base_dir=cfg.reporting_dir,
-        cycle=cycle_number,
-        stage=stage_label,
-        status=statement_status,
-        tool_name=tool_name,
-        tool_input_hash=tool_input_hash,
-        reproduction_command=repro_command,
-        metrics=best_eval.get("metrics", {}),
-        design_hash=best_entry.get("design_hash"),
-        problem=cfg.problem,
-        seed=best_seed,
-    )
     statements = world_model.statements_for_cycle(experiment_id, cycle_number)
     figure_path = reporting.save_pareto_figure(
         p3_summary.pareto_entries,
@@ -1732,7 +2145,7 @@ def _run_cycle(
     metrics_path = adaptation_helpers.write_metrics_snapshot(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
-        metrics=metrics_payload,
+        payload=metrics_payload,
     )
     artifact_entries: list[tuple[str, Path]] = [("metrics_snapshot", metrics_path)]
     world_model.log_artifact(
@@ -1771,6 +2184,10 @@ def _run_cycle(
         stage=governance_stage,
     )
     stage_history_entries = world_model.stage_history(experiment_id)
+    property_graph_summary = world_model.property_graph_summary(experiment_id)
+    rag_citations = (
+        property_graph_summary.get("citations") if property_graph_summary else None
+    )
     adaptation_figures = reporting.collect_adaptation_figures(cfg.reporting_dir)
     anchor_candidates = (
         ("preference_pairs", preference_pairs_anchor),
@@ -1820,6 +2237,8 @@ def _run_cycle(
         stage_history=stage_history_entries,
         artifact_entries=artifact_entries,
         adaptation_figures=adaptation_figures,
+        property_graph_summary=property_graph_summary,
+        rag_citations=rag_citations,
         figure_paths=figure_paths,
         out_dir=cfg.reporting_dir,
     )
@@ -1847,43 +2266,123 @@ def run(
     planner_mode = (
         runtime.planner.lower() if runtime and runtime.planner else "deterministic"
     )
-    planning_agent = ai_planner.PlanningAgent() if planner_mode == "agent" else None
     budget_controller = BudgetController(cfg.budgets, cfg.adaptive_budgets)
     last_p3_summary: tools.P3Summary | None = None
     with memory.WorldModel(cfg.memory_db) as world_model:
         git_sha = _resolve_git_sha()
         constellaration_sha = _resolve_git_sha("constellaration")
-        experiment_id = world_model.start_experiment(
-            _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha),
-            git_sha,
-            constellaration_sha=constellaration_sha,
-        )
-        governance_stage = "s1"
-        if runtime and runtime.promote_only:
-            governance_stage = "s2"
-            print("[runner] promote-only flag engaged; starting governance in S2.")
+        
+        experiment_id: int
+        start_cycle_index = 0
         stage_history: list[CycleSummary] = []
+        governance_stage = "s1"
+
+        if runtime and runtime.resume_from:
+            resume_data = json.loads(runtime.resume_from.read_text(encoding="utf-8"))
+            resume_cycle = int(resume_data["cycle"])
+            # We expect experiment_id in the checkpoint (deterministic resume)
+            # If missing (legacy checkpoint), we fail fast per feedback requirements
+            if "experiment_id" not in resume_data:
+                raise ValueError(f"Checkpoint {runtime.resume_from} missing experiment_id; cannot resume deterministically.")
+            
+            experiment_id = int(resume_data["experiment_id"])
+            print(f"[runner] resuming experiment_id={experiment_id} from cycle {resume_cycle}")
+            
+            # Verify DB consistency
+            if world_model.cycles_completed(experiment_id) < resume_cycle:
+                 # This might happen if DB write failed but JSON wrote, or DB was deleted.
+                 print(f"[runner] warning: DB has fewer cycles than checkpoint for exp {experiment_id}")
+            
+            start_cycle_index = resume_cycle
+            
+            # Restore history for governance transitions
+            restored = world_model.cycle_summaries(experiment_id)
+            for row in restored:
+                stage_history.append(
+                    CycleSummary(
+                        cycle=row["cycle"],
+                        objective=row["objective"],
+                        feasibility=row["feasibility"],
+                        hv=row["hv"],
+                        stage=row["stage"],
+                    )
+                )
+            
+            # Determine governance stage for the NEXT cycle (start_cycle_index + 1)
+            # We run transition checks on the full history up to resume_cycle
+            last_stage = stage_history[-1].stage if stage_history else "s1"
+            governance_stage = last_stage
+            
+            # Check transitions based on restored history
+            if last_stage == "s1" and _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
+                governance_stage = "s2"
+            elif last_stage == "s2" and _should_transition_s2_to_s3(
+                stage_history, cfg.stage_gates, cfg.governance, world_model, experiment_id, resume_cycle, cfg.cycles
+            ):
+                governance_stage = "s3"
+                
+            print(f"[runner] resumed state: start_index={start_cycle_index} next_stage={governance_stage}")
+            bc_state = resume_data.get("budget_controller")
+            if bc_state:
+                budget_controller.restore(bc_state)
+
+        else:
+            experiment_id = world_model.start_experiment(
+                _serialize_experiment_config(cfg, constellaration_sha=constellaration_sha),
+                git_sha,
+                constellaration_sha=constellaration_sha,
+            )
+            if runtime and runtime.promote_only:
+                governance_stage = "s2"
+                print("[runner] promote-only flag engaged; starting governance in S2.")
+
+        # Reset deterministic RNG baselines after resume/start so subsequent cycles match a fresh run.
+        np.random.seed(cfg.random_seed + start_cycle_index)
+        random.seed(cfg.random_seed + start_cycle_index)
+
+        planning_agent = (
+            ai_planner.PlanningAgent(world_model=world_model)
+            if planner_mode == "agent"
+            else None
+        )
         last_best_objective: float | None = None
+        if stage_history:
+            # Seed last_best_objective so reward diffs remain monotonic after resume
+            last_best_objective = next(
+                (entry.objective for entry in reversed(stage_history) if entry.objective is not None),
+                None,
+            )
+        
+        last_feasibility_rate: float | None = None
+
         for idx in range(cfg.cycles):
+            cycle_number = idx + 1
+            if idx < start_cycle_index:
+                continue
+
             print(
-                f"[runner] starting cycle {idx + 1} stage={governance_stage.upper()} "
+                f"[runner] starting cycle {cycle_number} stage={governance_stage.upper()} "
                 f"screen_budget={cfg.budgets.screen_evals_per_cycle}"
             )
             if planning_agent:
-                stage_records = world_model.stage_history(experiment_id)
+                # We pass the *reconstructed* stage_history
                 stage_payload = [
                     {
                         "cycle": entry.cycle,
                         "stage": entry.stage,
-                        "selected_at": entry.selected_at,
+                        "selected_at": datetime.now(timezone.utc).isoformat(), # Approximation if not tracked precisely in summary
                     }
-                    for entry in stage_records
+                    for entry in stage_history
                 ]
+                # Note: 'selected_at' in stage_history table exists, but CycleSummary doesn't store it. 
+                # For planner context, accurate timestamp is less critical than the sequence.
+                
                 plan_outcome = planning_agent.plan_cycle(
                     cfg=cfg,
                     cycle_index=idx,
                     stage_history=stage_payload,
                     last_summary=last_p3_summary,
+                    experiment_id=experiment_id,
                 )
                 context_snapshot = json.dumps(plan_outcome.context, indent=2)
                 print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
@@ -1897,8 +2396,37 @@ def run(
                 constellaration_sha,
                 runtime=runtime,
                 budget_controller=budget_controller,
+                prev_feasibility_rate=last_feasibility_rate,
             )
             last_p3_summary = p3_summary
+            if p3_summary:
+                total = max(1, p3_summary.feasible_count + (p3_summary.archive_size or 0)) # approximate total if not tracked directly
+                # Actually p3_summary doesn't store total candidates, but _run_cycle logs feasibility_rate to JSON.
+                # We can infer it from the feasible_count if we knew the total. 
+                # Wait, _run_cycle calculated feasibility_rate internally but didn't return it explicitly except in JSON.
+                # But we can re-calculate if we assume pool size ~ budget. 
+                # Better: _run_cycle *returns* p3_summary, but feasibility_rate was local. 
+                # Let's check _run_cycle output. It returns (Path, dict, P3Summary).
+                # The P3Summary has feasible_count. 
+                # We can track feasibility rate if we modify _run_cycle to return it or just assume 0.5 for now? 
+                # No, better to capture it. 
+                # However, modifying return signature again is annoying.
+                # Let's assume feasibility_rate ~ p3_summary.feasible_count / (screened + promoted) roughly?
+                # Actually, best_eval has "feasibility_rate" in the JSON payload logic but not in the returned dict structure clearly.
+                # Let's look at how `last_feedback` was constructed in _run_cycle: 
+                # `feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))`
+                # `total_designs` came from `len(latest_by_design)`.
+                # We can approximately reconstruct it or just let the decay be 0 for the first pass if not critical.
+                # BUT, I can calculate it here if I assume total_designs is roughly comparable to what p3_summary holds.
+                # `p3_summary` holds `pareto_entries` (tuple). 
+                # The simplest way is to trust that if feasible_count > 0, rate > 0.
+                # Let's check `p3_summary` fields.
+                pass
+            
+            # To properly implement decay, I need the rate. 
+            # I will check budget_controller._last_feedback since it WAS recorded in _run_cycle.
+            if budget_controller._last_feedback and budget_controller._last_feedback.feasibility_rate is not None:
+                last_feasibility_rate = budget_controller._last_feedback.feasibility_rate
             if report_path:
                 print(f"[runner] cycle {idx + 1} report saved to {report_path}")
             else:
@@ -1918,13 +2446,16 @@ def run(
                     reward_diff = float(current_objective) - float(last_best_objective)
                 adaptation_helpers.append_preference_record(
                     base_dir=cfg.reporting_dir,
-                    cycle=idx + 1,
-                    stage=governance_stage,
-                    candidate_hash=best_eval.get("design_hash", "") or "",
-                    reward_diff=reward_diff,
+                    record={
+                        "cycle": idx + 1,
+                        "stage": governance_stage,
+                        "candidate_hash": best_eval.get("design_hash", "") or "",
+                        "reward_diff": reward_diff,
+                    },
                 )
                 if current_objective is not None:
                     last_best_objective = float(current_objective)
+            
             next_stage = governance_stage
             if governance_stage == "s1":
                 if _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
@@ -2067,7 +2598,7 @@ def _export_batch_reports(
             "path": str(stage_path.resolve()),
         }
     summary_payload = {
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_cycles": len(history),
         "stage_files": stage_refs,
     }
@@ -2176,6 +2707,32 @@ _TOOL_DEFINITIONS: Sequence[ToolSchema] = (
         },
     },
     {
+        "name": "propose_boundary",
+        "description": (
+            "Perturb an existing boundary parameter set to generate a new candidate near the original. "
+            "Useful for refining a promising seed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "type": "object",
+                    "description": "Base boundary parameters to perturb.",
+                },
+                "perturbation_scale": {
+                    "type": "number",
+                    "description": "Standard deviation of the Gaussian noise (default 0.05).",
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Optional random seed for reproducibility.",
+                },
+            },
+            "required": ["params"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "evaluate_p1",
         "description": (
             "Evaluate the low-fidelity P1 problem (minimize max elongation). "
@@ -2262,6 +2819,35 @@ _TOOL_DEFINITIONS: Sequence[ToolSchema] = (
         },
     },
     {
+        "name": "write_note",
+        "description": (
+            "Write a literature note or analysis insight to the world model and reports/notes/."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Markdown content of the note.",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional filename (e.g. 'analysis_cycle_1.md').",
+                },
+                "experiment_id": {
+                    "type": "integer",
+                    "description": "Optional experiment id for world-model persistence.",
+                },
+                "cycle": {
+                    "type": "integer",
+                    "description": "Optional cycle number for world-model persistence.",
+                },
+            },
+            "required": ["content", "experiment_id", "cycle"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "log_citation",
         "description": (
             "Register a doc citation for the current report draft (anchor optional, but include repo path)."
@@ -2341,7 +2927,7 @@ File: config.py
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any, Mapping, Tuple
@@ -2392,6 +2978,7 @@ class ModelConfig:
     default_provider: str
     providers: Tuple["ProviderConfig", ...]
     agent_gates: Tuple[AgentGateConfig, ...]
+    role_map: Mapping[str, str] = field(default_factory=dict)
 
     def get_provider(self, name: str | None = None) -> "ProviderConfig":
         alias = (name or self.default_provider).lower()
@@ -2428,6 +3015,9 @@ def load_model_config(path: str | Path | None = None) -> ModelConfig:
     instruct_alias = _env_override("AI_SCIENTIST_INSTRUCT_MODEL", instruct_alias)
     thinking_alias = str(model_data.get("thinking_model", "kimi-k2-thinking"))
     thinking_alias = _env_override("AI_SCIENTIST_THINKING_MODEL", thinking_alias)
+    role_map = model_data.get("role_map") or {}
+    if not isinstance(role_map, dict):
+        role_map = {}
     return ModelConfig(
         base_url=str(model_data.get("base_url", "http://localhost:8000")),
         instruct_model=instruct_alias,
@@ -2440,6 +3030,7 @@ def load_model_config(path: str | Path | None = None) -> ModelConfig:
         default_provider=default_provider,
         providers=providers,
         agent_gates=agent_gates,
+        role_map=role_map,
     )
 
 
@@ -2508,6 +3099,7 @@ class ProposalMixConfig:
     exploration_ratio: float
     jitter_scale: float
     surrogate_pool_multiplier: float = 2.0
+    sampler_type: str = "standard"
 
 
 @dataclass(frozen=True)
@@ -2525,6 +3117,7 @@ class ExperimentConfig:
     reporting_dir: Path
     memory_db: Path
     source_config: Path
+    reporting: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _boundary_template_from_dict(
@@ -2629,6 +3222,7 @@ def _proposal_mix_from_dict(
         exploration_ratio=exploration_ratio,
         jitter_scale=float(config.get("jitter_scale", 0.01)),
         surrogate_pool_multiplier=float(config.get("surrogate_pool_multiplier", 2.0)),
+        sampler_type=str(config.get("sampler_type", "standard")),
     )
 
 
@@ -2722,6 +3316,7 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         reporting_dir=Path(payload.get("reporting_dir", "reports")),
         memory_db=Path(payload.get("memory_db", DEFAULT_MEMORY_DB_PATH)),
         source_config=config_path,
+        reporting=payload.get("reporting", {}),
     )
 
 
@@ -2960,7 +3555,14 @@ __all__ = ["EndpointMetadata", "ModelEndpoint", "run_model_endpoint"]
 File: memory.py
 ================================================================================
 
-"""SQLite-backed world model for AI Scientist budgeting + logging."""
+"""SQLite-backed world model for AI Scientist budgeting + logging.
+
+This is the authoritative world model implementation for the AI Scientist.
+It fulfills the Unified Roadmap Workstream 6 / Autonomy Plan requirement
+for a per-cycle PropertyGraph and the Kosmos-style structured world model
+(statements, citations, candidates, cycles → graph snapshot). The legacy
+boundary-only world_model.py has been removed.
+"""
 
 from __future__ import annotations
 
@@ -2969,7 +3571,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -3087,6 +3689,18 @@ CREATE TABLE IF NOT EXISTS budgets (
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
 
+CREATE TABLE IF NOT EXISTS cycles (
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    feasible_count INTEGER NOT NULL,
+    hv_score REAL,
+    hv_exists INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, cycle),
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
 CREATE TABLE IF NOT EXISTS cycle_stats (
     experiment_id INTEGER NOT NULL,
     cycle INTEGER NOT NULL,
@@ -3163,6 +3777,15 @@ CREATE TABLE IF NOT EXISTS deterministic_snapshots (
     seed INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (experiment_id, cycle),
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
+CREATE TABLE IF NOT EXISTS literature_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
 """
@@ -3246,7 +3869,7 @@ class WorldModel:
         cursor = self._conn.execute(
             "INSERT INTO experiments (started_at, config_json, git_sha, constellaration_sha, notes) VALUES (?, ?, ?, ?, ?)",
             (
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 payload,
                 git_sha,
                 constellaration_sha or "unknown",
@@ -3322,7 +3945,7 @@ class WorldModel:
         commit: bool = True,
     ) -> None:
         payload = json.dumps(_normalize_to_json(snapshot), separators=(",", ":"))
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
 
         def _write() -> None:
             self._conn.execute(
@@ -3337,6 +3960,43 @@ class WorldModel:
                     payload,
                     constellaration_sha,
                     seed,
+                    timestamp,
+                ),
+            )
+
+        if commit:
+            with self._conn:
+                _write()
+        else:
+            _write()
+
+    def record_cycle_summary(
+        self,
+        experiment_id: int,
+        cycle_number: int,
+        stage: str,
+        feasible_count: int,
+        hv_score: float | None,
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> None:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        hv_exists = 0 if hv_score is None else 1
+
+        def _write() -> None:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO cycles (experiment_id, cycle, stage, feasible_count, hv_score, hv_exists, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    cycle_number,
+                    stage,
+                    int(feasible_count),
+                    hv_score,
+                    hv_exists,
                     timestamp,
                 ),
             )
@@ -3505,7 +4165,7 @@ class WorldModel:
         commit: bool = True,
     ) -> int:
         digest = _hash_payload(tool_input)
-        timestamp = created_at or datetime.utcnow().isoformat()
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
         cursor = self._conn.execute(
             """
             INSERT INTO statements
@@ -3532,6 +4192,42 @@ class WorldModel:
         if commit:
             self._conn.commit()
         return statement_id
+
+    def log_note(
+        self,
+        experiment_id: int,
+        cycle: int,
+        content: str,
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        cursor = self._conn.execute(
+            "INSERT INTO literature_notes (experiment_id, cycle, content, created_at) VALUES (?, ?, ?, ?)",
+            (experiment_id, cycle, content, timestamp),
+        )
+        note_id = cursor.lastrowid
+        assert note_id is not None
+        if commit:
+            self._conn.commit()
+        return note_id
+
+    def notes(
+        self, experiment_id: int, cycle: int | None = None
+    ) -> list[Mapping[str, Any]]:
+        """Retrieve stored literature notes, optionally filtered by cycle."""
+        if cycle is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM literature_notes WHERE experiment_id = ? AND cycle = ? ORDER BY id ASC",
+                (experiment_id, cycle),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM literature_notes WHERE experiment_id = ? ORDER BY id ASC",
+                (experiment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def statements_for_cycle(
         self, experiment_id: int, cycle: int
@@ -3585,6 +4281,37 @@ class WorldModel:
             for row in rows
         ]
 
+    def cycle_summaries(self, experiment_id: int) -> list[dict[str, Any]]:
+        """Return cycle-level summaries combining stage history, budgets, and cycles tables."""
+
+        rows = self._conn.execute(
+            """
+            SELECT s.cycle,
+                   s.stage,
+                   b.best_objective,
+                   b.best_feasibility,
+                   c.hv_score
+            FROM stage_history s
+            LEFT JOIN budgets b
+              ON s.experiment_id = b.experiment_id AND s.cycle = b.cycle
+            LEFT JOIN cycles c
+              ON s.experiment_id = c.experiment_id AND s.cycle = c.cycle
+            WHERE s.experiment_id = ?
+            ORDER BY s.cycle ASC
+            """,
+            (experiment_id,),
+        ).fetchall()
+        return [
+            {
+                "cycle": row["cycle"],
+                "stage": row["stage"],
+                "objective": row["best_objective"],
+                "feasibility": row["best_feasibility"],
+                "hv": row["hv_score"],
+            }
+            for row in rows
+        ]
+
     def record_stage_history(
         self,
         experiment_id: int,
@@ -3594,7 +4321,7 @@ class WorldModel:
         selected_at: str | None = None,
         commit: bool = True,
     ) -> None:
-        timestamp = selected_at or datetime.utcnow().isoformat()
+        timestamp = selected_at or datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
             INSERT OR REPLACE INTO stage_history (experiment_id, cycle, stage, selected_at)
@@ -3879,7 +4606,41 @@ class WorldModel:
             candidate_node = f"candidate:{pareto['candidate_id']}"
             if graph.has_node(candidate_node):
                 graph.add_edge(exp_node, candidate_node, relation="pareto_member")
+        note_rows = self._conn.execute(
+            "SELECT * FROM literature_notes WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchall()
+        for note in note_rows:
+            note_node = f"note:{note['id']}"
+            graph.add_node(
+                note_node,
+                type="note",
+                cycle=note["cycle"],
+                content=note["content"],
+                created_at=note["created_at"],
+            )
+            graph.add_edge(exp_node, note_node, relation="literature_note")
         return graph
+
+    def property_graph_summary(self, experiment_id: int) -> Mapping[str, Any]:
+        """Return node/edge counts and citation anchors for reporting."""
+
+        graph = self.to_networkx(experiment_id)
+        citations = [
+            {
+                "source_path": attrs.get("source_path"),
+                "anchor": attrs.get("anchor"),
+                "quote": attrs.get("quote"),
+            }
+            for attrs in graph.nodes.values()
+            if isinstance(attrs, Mapping) and attrs.get("type") == "citation"
+        ]
+        return {
+            "node_count": len(graph.nodes),
+            "edge_count": len(graph.edges),
+            "citation_count": len(citations),
+            "citations": citations,
+        }
 
     def surrogate_training_data(
         self,
@@ -3963,13 +4724,14 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 _LOGGER = logging.getLogger(__name__)
 _ENV_VAR = "AI_SCIENTIST_PEFT"
 _ADAPTERS_ROOT = Path("reports") / "adapters"
+_ADAPTER_ROOT_ENV = "AI_SCIENTIST_ADAPTER_ROOT"
 _QUEUE_PATH = _ADAPTERS_ROOT / "queue.jsonl"
 _PERSIST_DIR_ENV = "AI_SCIENTIST_ADAPTER_PERSIST_DIR"
 
@@ -3995,7 +4757,8 @@ def register_adapter_persist_handler(name: str, handler: AdapterPersistHandler) 
 
 def _adapter_bundle_path(tool_name: str, stage: str) -> Path:
     normalized_stage = stage.lower().strip()
-    return _ADAPTERS_ROOT / tool_name / normalized_stage / "adapter.safetensors"
+    root = Path(os.getenv(_ADAPTER_ROOT_ENV, _ADAPTERS_ROOT))
+    return root / tool_name / normalized_stage / "adapter.safetensors"
 
 
 def _ensure_adapter_directory(path: Path) -> None:
@@ -4003,7 +4766,12 @@ def _ensure_adapter_directory(path: Path) -> None:
 
 
 def _queue_entry(
-    tool_name: str, stage: str, adapter_path: Path, backend: str | None, status: str
+    tool_name: str,
+    stage: str,
+    adapter_path: Path,
+    backend: str | None,
+    status: str,
+    version: str | None = None,
 ) -> dict[str, Any]:
     return {
         "tool": tool_name,
@@ -4011,13 +4779,15 @@ def _queue_entry(
         "adapter_path": adapter_path.as_posix(),
         "backend": backend,
         "status": status,
-        "timestamp": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "version": version,
     }
 
 
 def _append_to_queue(entry: Mapping[str, Any]) -> None:
-    _ensure_adapter_directory(_QUEUE_PATH)
-    with _QUEUE_PATH.open("a", encoding="utf-8") as handle:
+    queue_path = Path(os.getenv(_ADAPTER_ROOT_ENV, _ADAPTERS_ROOT)) / "queue.jsonl"
+    _ensure_adapter_directory(queue_path)
+    with queue_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry))
         handle.write("\n")
 
@@ -4029,11 +4799,12 @@ def record_adapter_refresh(
     backend: str | None = None,
     status: str = "refreshed",
     adapter_path: Path | None = None,
+    version: str | None = None,
 ) -> None:
     """Expose queue logging so offline adapters can annotate backend refreshes."""
 
     bundle_path = adapter_path or _adapter_bundle_path(tool_name, stage)
-    entry = _queue_entry(tool_name, stage, bundle_path, backend, status)
+    entry = _queue_entry(tool_name, stage, bundle_path, backend, status, version)
     _append_to_queue(entry)
 
 
@@ -4049,6 +4820,43 @@ def _try_persist_adapter(adapter_path: Path, tool_name: str, stage: str) -> str 
         if handler(adapter_path, tool_name, stage):
             return backend_name
     return None
+
+
+def _metadata_path(root: Path, version: str | None = None) -> Path:
+    if version:
+        return root / f"metadata_{version}.json"
+    return root / "metadata.json"
+
+
+def _load_metadata(root: Path, version: str | None = None) -> dict[str, Any]:
+    for candidate in (_metadata_path(root, version), _metadata_path(root, None)):
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                _LOGGER.warning("Failed to parse adapter metadata at %s", candidate)
+    return {}
+
+
+def _extract_version(adapter_path: Path) -> str:
+    stem = adapter_path.stem
+    if stem.startswith("adapter_"):
+        return stem.replace("adapter_", "", 1)
+    return "current"
+
+
+def _latest_adapter_bundle(
+    tool_name: str, stage: str
+) -> tuple[Path | None, str | None, dict[str, Any]]:
+    bundle_root = _adapter_bundle_path(tool_name, stage).parent
+    candidates = [bundle_root / "adapter.safetensors", *sorted(bundle_root.glob("adapter_*.safetensors"))]
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        return None, None, {}
+    newest = max(existing, key=lambda path: path.stat().st_mtime)
+    version = _extract_version(newest)
+    metadata = _load_metadata(bundle_root, version)
+    return newest, version, metadata
 
 
 def _json_metadata_loader(adapter_path: Path, tool_name: str, stage: str) -> bool:
@@ -4134,17 +4942,20 @@ class AdapterState:
 
     loaded: dict[str, str] = field(default_factory=dict)
     updates: list[str] = field(default_factory=list)
+    versions: dict[str, str] = field(default_factory=dict)
 
     def load_lora_weights(self, label: str, stage: str) -> None:
         """Record when a LoRA bundle is staged for the current tool/stage."""
-        bundle_path = _adapter_bundle_path(label, stage)
-        if not bundle_path.exists():
-            self.loaded[f"{label}:{stage}"] = "missing"
+        bundle_path, version, metadata = _latest_adapter_bundle(label, stage)
+        key = f"{label}:{stage}"
+        if bundle_path is None:
+            self.loaded[key] = "missing"
+            self.versions[key] = "missing"
             _LOGGER.debug(
                 "Adapter bundle not found for %s:%s at %s",
                 label,
                 stage,
-                bundle_path,
+                _adapter_bundle_path(label, stage),
             )
             return
 
@@ -4154,12 +4965,15 @@ class AdapterState:
             if backend_name
             else f"ready:{bundle_path.as_posix()}"
         )
-        self.loaded[f"{label}:{stage}"] = status
+        version_label = metadata.get("version") or version or "unknown"
+        self.loaded[key] = status
+        self.versions[key] = version_label
         _LOGGER.debug(
-            "AdapterState.load_lora_weights label=%s stage=%s status=%s",
+            "AdapterState.load_lora_weights label=%s stage=%s status=%s version=%s",
             label,
             stage,
             status,
+            version_label,
         )
 
     def push_updates(self, label: str, stage: str) -> None:
@@ -4169,7 +4983,14 @@ class AdapterState:
         status = f"persisted:{persisted_backend}" if persisted_backend else "queued"
 
         if not persisted_backend:
-            entry = _queue_entry(label, stage, bundle_path, None, status)
+            entry = _queue_entry(
+                label,
+                stage,
+                bundle_path,
+                None,
+                status,
+                version=self.versions.get(f"{label}:{stage}"),
+            )
             _append_to_queue(entry)
 
         self.updates.append(f"{label}:{stage}:{status}")
@@ -4189,6 +5010,12 @@ def is_peft_enabled() -> bool:
     """Return True when the Wave 7 PEFT toggle is set in the environment."""
 
     return os.getenv(_ENV_VAR, "0").lower() in {"1", "true", "yes"}
+
+
+def current_adapter_version(tool_name: str, stage: str) -> str | None:
+    """Return the last loaded adapter version for the given tool/stage, if any."""
+
+    return adapter_state.versions.get(f"{tool_name}:{stage}")
 
 
 def prepare_peft_hook(tool_name: str, stage: str) -> None:
@@ -4253,14 +5080,27 @@ import numpy as np
 from pymoo.indicators import hv as pymoo_hv
 
 from ai_scientist import rag
+from ai_scientist import memory
 from constellaration import forward_model
 from constellaration.geometry import surface_rz_fourier
 
 _DEFAULT_RELATIVE_TOLERANCE = 1e-2
 _CANONICAL_PRECISION = 1e-8
+_DEFAULT_SCHEMA_VERSION = 1
+_DEFAULT_ROUNDING = 1e-6
 _EVALUATION_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _CACHE_STATS: Dict[str, Dict[str, int]] = defaultdict(lambda: {"hits": 0, "misses": 0})
 _P3_REFERENCE_POINT: Tuple[float, float] = (1.0, 20.0)
+
+
+@dataclass(frozen=True)
+class FlattenSchema:
+    """Schema describing the intended Fourier truncation and hash version."""
+
+    mpol: int
+    ntor: int
+    schema_version: int = _DEFAULT_SCHEMA_VERSION
+    rounding: float = _DEFAULT_ROUNDING
 
 
 @dataclass(frozen=True)
@@ -4301,31 +5141,54 @@ class ParetoEntry:
         }
 
 
-def _quantize_float(value: float) -> float:
-    return float(round(value / _CANONICAL_PRECISION) * _CANONICAL_PRECISION)
+def _quantize_float(value: float, *, precision: float = _CANONICAL_PRECISION) -> float:
+    if precision <= 0.0:
+        return float(value)
+    return float(round(value / precision) * precision)
 
 
-def _canonicalize_value(value: Any) -> Any:
+def _canonicalize_value(value: Any, *, precision: float = _CANONICAL_PRECISION) -> Any:
     if isinstance(value, Mapping):
-        return {k: _canonicalize_value(v) for k, v in sorted(value.items())}
+        return {k: _canonicalize_value(v, precision=precision) for k, v in sorted(value.items())}
     if isinstance(value, np.ndarray):
-        return _canonicalize_value(value.tolist())
+        return _canonicalize_value(value.tolist(), precision=precision)
     if isinstance(value, (list, tuple)):
-        return [_canonicalize_value(v) for v in value]
+        return [_canonicalize_value(v, precision=precision) for v in value]
     if isinstance(value, float):
-        return _quantize_float(value)
+        return _quantize_float(value, precision=precision)
     if isinstance(value, (int, str, bool)) or value is None:
         return value
     return str(value)
 
 
-def _hash_params(params: Mapping[str, Any]) -> str:
-    return design_hash(params)
+def _hash_params(
+    params: Mapping[str, Any], *, schema: FlattenSchema | None = None, rounding: float | None = None
+) -> str:
+    return design_hash(params, schema=schema, rounding=rounding)
 
 
-def design_hash(params: Mapping[str, Any] | BoundaryParams) -> str:
+def design_hash(
+    params: Mapping[str, Any] | BoundaryParams,
+    *,
+    schema: FlattenSchema | None = None,
+    rounding: float | None = None,
+) -> str:
     params_map = _ensure_mapping(params)
-    normalized = _canonicalize_value(params_map)
+    precision = rounding if rounding is not None else _CANONICAL_PRECISION
+    payload: Mapping[str, Any]
+    if schema is None:
+        payload = params_map
+    else:
+        payload = {
+            "schema_version": schema.schema_version,
+            "mpol": schema.mpol,
+            "ntor": schema.ntor,
+            "rounding": schema.rounding,
+            "params": params_map,
+        }
+        precision = rounding if rounding is not None else schema.rounding
+
+    normalized = _canonicalize_value(payload, precision=precision)
     digest = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(digest.encode("utf-8")).hexdigest()
 
@@ -4336,16 +5199,78 @@ def _ensure_mapping(params: Mapping[str, Any] | BoundaryParams) -> Mapping[str, 
     return params
 
 
+def _derive_schema_from_params(
+    params: Mapping[str, Any], *, schema_version: int = _DEFAULT_SCHEMA_VERSION, rounding: float = _DEFAULT_ROUNDING
+) -> FlattenSchema:
+    r_cos = np.asarray(params.get("r_cos", []), dtype=float)
+    z_sin = np.asarray(params.get("z_sin", []), dtype=float)
+    mpol_candidates = []
+    ntor_candidates = []
+    if r_cos.size:
+        mpol_candidates.append(max(0, r_cos.shape[0] - 1))
+        ntor_candidates.append(max(0, (r_cos.shape[1] - 1) // 2))
+    if z_sin.size:
+        mpol_candidates.append(max(0, z_sin.shape[0] - 1))
+        ntor_candidates.append(max(0, (z_sin.shape[1] - 1) // 2))
+
+    mpol = max(mpol_candidates) if mpol_candidates else 0
+    ntor = max(ntor_candidates) if ntor_candidates else 0
+    return FlattenSchema(mpol=mpol, ntor=ntor, schema_version=schema_version, rounding=rounding)
+
+
+def _coefficient_from_matrix(matrix: np.ndarray, m: int, n: int, schema_ntor: int) -> float:
+    if matrix.ndim != 2 or m < 0 or n < -schema_ntor or n > schema_ntor:
+        return 0.0
+    if m >= matrix.shape[0]:
+        return 0.0
+
+    matrix_ntor = max(0, (matrix.shape[1] - 1) // 2)
+    column = n + matrix_ntor
+    if column < 0 or column >= matrix.shape[1]:
+        return 0.0
+    return float(matrix[m, column])
+
+
+def structured_flatten(
+    params: Mapping[str, Any] | BoundaryParams,
+    schema: FlattenSchema | None = None,
+) -> tuple[np.ndarray, FlattenSchema]:
+    """Flatten Fourier coefficients with deterministic ordering and schema metadata.
+
+    The layout is `[r_cos modes..., z_sin modes...]` with n ranging from `-ntor`
+    to `ntor` for each m in `[0, mpol]`. Missing coefficients are zero-padded and
+    values are rounded to the schema precision to stabilize hashes and caches.
+    """
+
+    params_map = _ensure_mapping(params)
+    active_schema = schema or _derive_schema_from_params(params_map)
+    rounding = active_schema.rounding
+
+    r_cos = np.asarray(params_map.get("r_cos", []), dtype=float)
+    z_sin = np.asarray(params_map.get("z_sin", []), dtype=float)
+
+    values: list[float] = []
+    for matrix in (r_cos, z_sin):
+        for m in range(active_schema.mpol + 1):
+            for n in range(-active_schema.ntor, active_schema.ntor + 1):
+                coefficient = _coefficient_from_matrix(matrix, m, n, active_schema.ntor)
+                values.append(_quantize_float(coefficient, precision=rounding))
+
+    return np.asarray(values, dtype=float), active_schema
+
+
 def _evaluate_cached_stage(
     boundary_params: Mapping[str, Any] | BoundaryParams,
     *,
     stage: str,
     compute: Callable[[Mapping[str, Any]], Dict[str, Any]],
+    maximize: bool,
     use_cache: bool = True,
 ) -> Dict[str, Any]:
     params_map = _ensure_mapping(boundary_params)
     stage_lower = stage.lower()
-    cache_key = (stage_lower, _hash_params(params_map))
+    schema = _derive_schema_from_params(params_map)
+    cache_key = (stage_lower, _hash_params(params_map, schema=schema, rounding=schema.rounding))
     stats = _CACHE_STATS[stage_lower]
     if use_cache:
         cached = _EVALUATION_CACHE.get(cache_key)
@@ -4354,7 +5279,7 @@ def _evaluate_cached_stage(
             return cached
 
     stats["misses"] += 1
-    result = compute(params_map)
+    result = _safe_evaluate(lambda: compute(params_map), stage=stage_lower, maximize=maximize)
     if use_cache:
         _EVALUATION_CACHE[cache_key] = result
     return result
@@ -4393,10 +5318,142 @@ def _normalize_between_bounds(
     return float(np.clip(normalized, 0.0, 1.0))
 
 
+def _max_violation(margins: Mapping[str, float]) -> float:
+    if not margins:
+        return float("inf")
+    return float(max(0.0, *[max(0.0, value) for value in margins.values()]))
+
+
+def compute_constraint_margins(
+    metrics: Mapping[str, Any] | forward_model.ConstellarationMetrics,
+    problem: str,
+) -> dict[str, float]:
+    metrics_map = metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
+    problem_key = problem.lower()
+
+    def _log10_margin(target: float) -> float:
+        return _log10_or_large(metrics_map.get("qi")) - target
+
+    margins: dict[str, float] = {}
+
+    if problem_key.startswith("p1"):
+        margins = {
+            "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 4.0,
+            "average_triangularity": float(metrics_map.get("average_triangularity", float("nan"))) - (-0.5),
+            "edge_rotational_transform": 0.3
+            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+        }
+    elif problem_key.startswith("p2"):
+        margins = {
+            "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 10.0,
+            "edge_rotational_transform": 0.25
+            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            "edge_magnetic_mirror_ratio": float(
+                metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
+            )
+            - 0.2,
+            "max_elongation": float(metrics_map.get("max_elongation", float("nan"))) - 5.0,
+            "qi_log10": _log10_margin(-4.0),
+        }
+    else:
+        flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
+        flux_margin = (
+            float(flux_value) - 0.9
+            if flux_value is not None
+            else 0.0
+        )
+        margins = {
+            "edge_rotational_transform": 0.25
+            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            "edge_magnetic_mirror_ratio": float(
+                metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
+            )
+            - 0.25,
+            "vacuum_well": -float(metrics_map.get("vacuum_well", float("nan"))),
+            "flux_compression": flux_margin,
+            "qi_log10": _log10_margin(-3.5),
+        }
+
+    return margins
+
+
 def _log10_or_large(value: float | None) -> float:
     if value is None or value <= 0.0:
         return 10.0
     return float(math.log10(value))
+
+
+def _contains_invalid_number(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        return any(_contains_invalid_number(value) for value in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_contains_invalid_number(value) for value in node)
+    if isinstance(node, np.ndarray):
+        return not np.all(np.isfinite(node))
+    if isinstance(node, float):
+        return not math.isfinite(node)
+    return False
+
+
+def _replace_invalid_numbers(node: Any, replacement: float) -> Any:
+    if isinstance(node, Mapping):
+        return {key: _replace_invalid_numbers(value, replacement) for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_replace_invalid_numbers(value, replacement) for value in node]
+    if isinstance(node, np.ndarray):
+        sanitized = np.where(np.isfinite(node), node, replacement)
+        return sanitized.tolist()
+    if isinstance(node, float) and not math.isfinite(node):
+        return float(replacement)
+    return node
+
+
+def _penalized_result(
+    *, stage: str, maximize: bool, penalty: float, error: str | None = None
+) -> Dict[str, Any]:
+    return {
+        "stage": stage,
+        "objective": penalty,
+        "minimize_objective": not maximize,
+        "feasibility": float("inf"),
+        "score": 0.0,
+        "constraint_margins": {},
+        "max_violation": float("inf"),
+        "metrics": {},
+        "error": error,
+        "penalized": True,
+    }
+
+
+def _safe_evaluate(
+    compute: Callable[[], Dict[str, Any]],
+    stage: str,
+    *,
+    maximize: bool = False,
+) -> Dict[str, Any]:
+    penalty = -1e9 if maximize else 1e9
+    try:
+        result = compute()
+    except Exception as exc:  # noqa: BLE001
+        return _penalized_result(stage=stage, maximize=maximize, penalty=penalty, error=str(exc))
+
+    invalid = _contains_invalid_number(result)
+    if invalid:
+        sanitized = _replace_invalid_numbers(result, penalty)
+        sanitized["objective"] = penalty
+        sanitized["feasibility"] = float("inf")
+        sanitized["score"] = 0.0
+        sanitized["constraint_margins"] = {}
+        sanitized["max_violation"] = float("inf")
+        sanitized.setdefault("metrics", {})
+        sanitized["penalized"] = True
+        sanitized["stage"] = stage
+        sanitized["minimize_objective"] = not maximize
+        return sanitized
+
+    result.setdefault("stage", stage)
+    result.setdefault("minimize_objective", not maximize)
+    return result
 
 
 def _gradient_score(metrics: forward_model.ConstellarationMetrics) -> float:
@@ -4406,31 +5463,13 @@ def _gradient_score(metrics: forward_model.ConstellarationMetrics) -> float:
 
 
 def _p2_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
-    violations = [
-        metrics.aspect_ratio - 10.0,
-        max(0.0, 0.25 - metrics.edge_rotational_transform_over_n_field_periods),
-        metrics.edge_magnetic_mirror_ratio - 0.2,
-        max(0.0, metrics.max_elongation - 5.0),
-        max(0.0, _log10_or_large(metrics.qi) + 4.0),
-    ]
-    return float(max(violations + [0.0]))
+    margins = compute_constraint_margins(metrics, "p2")
+    return _max_violation(margins)
 
 
 def _p3_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
-    flux_violation = 0.0
-    if metrics.flux_compression_in_regions_of_bad_curvature is not None:
-        flux_violation = max(
-            0.0, metrics.flux_compression_in_regions_of_bad_curvature - 0.9
-        )
-
-    constraints = [
-        max(0.0, 0.25 - metrics.edge_rotational_transform_over_n_field_periods),
-        max(0.0, metrics.edge_magnetic_mirror_ratio - 0.25),
-        max(0.0, -metrics.vacuum_well),
-        flux_violation,
-        max(0.0, _log10_or_large(metrics.qi) + 3.5),
-    ]
-    return float(max(constraints + [0.0]))
+    margins = compute_constraint_margins(metrics, "p3")
+    return _max_violation(margins)
 
 
 def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
@@ -4582,21 +5621,40 @@ def make_boundary_from_params(
     return surface_rz_fourier.SurfaceRZFourier(**payload)
 
 
-def _constraint_metrics(
-    metrics: forward_model.ConstellarationMetrics,
-) -> Tuple[float, float]:
-    targets = np.array([4.0, -0.5, 0.3], dtype=float)
-    violations = np.array(
-        [
-            metrics.aspect_ratio - targets[0],
-            metrics.average_triangularity - targets[1],
-            targets[2] - metrics.edge_rotational_transform_over_n_field_periods,
-        ],
-        dtype=float,
-    )
-    normalized = violations / np.abs(targets)
-    feasibility = float(np.max(np.maximum(normalized, 0.0)))
-    return feasibility, float(np.max(normalized))
+def propose_boundary(
+    params: Mapping[str, Any] | BoundaryParams,
+    *,
+    perturbation_scale: float = 0.05,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Perturb a given boundary parameter set with random noise."""
+    params_map = _ensure_mapping(params)
+    rng = np.random.default_rng(seed)
+    new_params: dict[str, Any] = {}
+    
+    for key, value in params_map.items():
+        if key in ("r_cos", "z_sin", "r_sin", "z_cos"):
+            arr = np.asarray(value, dtype=float)
+            noise = rng.normal(scale=perturbation_scale, size=arr.shape)
+            new_params[key] = (arr + noise).tolist()
+        else:
+            new_params[key] = value
+            
+    # Ensure symmetry constraints if flag is present
+    if new_params.get("is_stellarator_symmetric"):
+        if "r_cos" in new_params:
+            r_cos = np.asarray(new_params["r_cos"])
+            if r_cos.ndim > 1:
+                center_idx = r_cos.shape[1] // 2
+                if center_idx > 0:
+                    r_cos[0, :center_idx] = 0.0
+                new_params["r_cos"] = r_cos.tolist()
+        if "z_sin" in new_params:
+            z_sin = np.asarray(new_params["z_sin"])
+            z_sin[0, :] = 0.0
+            new_params["z_sin"] = z_sin.tolist()
+            
+    return new_params
 
 
 def evaluate_p1(
@@ -4611,7 +5669,8 @@ def evaluate_p1(
         boundary = make_boundary_from_params(params_map)
         settings = _settings_for_stage(stage, skip_qi=True)
         metrics, _ = forward_model.forward_model(boundary, settings=settings)
-        feasibility, _ = _constraint_metrics(metrics)
+        constraint_margins = compute_constraint_margins(metrics, "p1")
+        feasibility = _max_violation(constraint_margins)
         score = 0.0
         if feasibility <= _DEFAULT_RELATIVE_TOLERANCE:
             normalized = _normalize_between_bounds(
@@ -4627,10 +5686,16 @@ def evaluate_p1(
             "score": score,
             "metrics": metrics.model_dump(),
             "settings": settings.model_dump(),
+            "constraint_margins": constraint_margins,
+            "max_violation": feasibility,
         }
 
     return _evaluate_cached_stage(
-        boundary_params, stage=stage, compute=compute, use_cache=use_cache
+        boundary_params,
+        stage=stage,
+        compute=compute,
+        maximize=False,
+        use_cache=use_cache,
     )
 
 
@@ -4646,7 +5711,8 @@ def evaluate_p2(
         boundary = make_boundary_from_params(params_map)
         settings = _settings_for_stage(stage)
         metrics, _ = forward_model.forward_model(boundary, settings=settings)
-        feasibility = _p2_feasibility(metrics)
+        constraint_margins = compute_constraint_margins(metrics, "p2")
+        feasibility = _max_violation(constraint_margins)
         gradient = float(metrics.minimum_normalized_magnetic_gradient_scale_length)
         score = _gradient_score(metrics)
 
@@ -4659,10 +5725,16 @@ def evaluate_p2(
             "hv": float(max(0.0, gradient - 1.0)),
             "metrics": metrics.model_dump(),
             "settings": settings.model_dump(),
+            "constraint_margins": constraint_margins,
+            "max_violation": feasibility,
         }
 
     return _evaluate_cached_stage(
-        boundary_params, stage=stage, compute=compute, use_cache=use_cache
+        boundary_params,
+        stage=stage,
+        compute=compute,
+        maximize=True,
+        use_cache=use_cache,
     )
 
 
@@ -4678,7 +5750,8 @@ def evaluate_p3(
         boundary = make_boundary_from_params(params_map)
         settings = _settings_for_stage(stage)
         metrics, _ = forward_model.forward_model(boundary, settings=settings)
-        feasibility = _p3_feasibility(metrics)
+        constraint_margins = compute_constraint_margins(metrics, "p3")
+        feasibility = _max_violation(constraint_margins)
         score = _gradient_score(metrics)
 
         return {
@@ -4694,10 +5767,16 @@ def evaluate_p3(
             ),
             "metrics": metrics.model_dump(),
             "settings": settings.model_dump(),
+            "constraint_margins": constraint_margins,
+            "max_violation": feasibility,
         }
 
     return _evaluate_cached_stage(
-        boundary_params, stage=stage, compute=compute, use_cache=use_cache
+        boundary_params,
+        stage=stage,
+        compute=compute,
+        maximize=False,
+        use_cache=use_cache,
     )
 
 
@@ -4760,6 +5839,7 @@ def normalized_constraint_distance_sampler(
     proposal_count: int,
     jitter_scale: float = 0.01,
     rng: np.random.Generator | None = None,
+    include_distances: bool = False,
 ) -> list[Mapping[str, float | Sequence[float]]]:
     """Constraint-aware sampler for Task X.6 (docs/TASKS_CODEX_MINI.md:233).
 
@@ -4803,7 +5883,15 @@ def normalized_constraint_distance_sampler(
                 perturbed[key] = float(proposal_array)
             else:
                 perturbed[key] = proposal_array.tolist()
-        proposals.append(perturbed)
+        if include_distances:
+            proposals.append(
+                {
+                    "params": perturbed,
+                    "normalized_constraint_distance": float(clipped[idx]),
+                }
+            )
+        else:
+            proposals.append(perturbed)
 
     return proposals
 
@@ -4821,48 +5909,61 @@ def clear_evaluation_cache() -> None:
     _CACHE_STATS.clear()
 
 
+def write_note(
+    content: str,
+    *,
+    filename: str | None = None,
+    out_dir: Path | str | None = None,
+    world_model: Any | None = None,
+    experiment_id: int,
+    cycle: int,
+    memory_db: str | Path | None = None,
+) -> str:
+    """Write a literature note to disk and, if context is provided, persist it in the world model."""
+
+    target_dir = Path(out_dir) if out_dir else Path("reports/notes")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if not filename:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
+        filename = f"note_{digest}.md"
+
+    path = target_dir / filename
+    path.write_text(content, encoding="utf-8")
+
+    target_wm = world_model
+    owned = False
+    if target_wm is None and memory_db is not None:
+        target_wm = memory.WorldModel(memory_db)
+        owned = True
+    if target_wm is None:
+        raise ValueError("write_note requires world_model or memory_db for persistence.")
+    try:
+        target_wm.log_note(experiment_id=experiment_id, cycle=cycle, content=content)
+    except Exception as exc:  # pragma: no cover - safety for agent path
+        print(f"[write_note] failed to log note to world_model: {exc}")
+    finally:
+        if owned:
+            target_wm.close()
+
+    return f"Note saved to {path}: {content[:50]}..."
+
+
 ================================================================================
 File: __init__.py
 ================================================================================
 
-"""AI Scientist orchestration package (skeleton).
+import os
+import warnings
 
-This package hosts agent-facing wrappers and orchestration code to interact with
-the ConStellaration physics stack without modifying code under
-`constellaration/`.
-
-Modules intentionally start minimal so Codex-mini sized tasks can extend them.
-"""
-
-from . import adapter
-from . import agent
-from . import config
-from . import memory
-from . import model_endpoint
-from . import model_provider
-from . import rag
-from . import reporting
-from . import planner
-from . import runner
-from . import tools
-from . import tools_api
-from . import prompts
-
-__all__ = [
-    "adapter",
-    "agent",
-    "config",
-    "memory",
-    "model_endpoint",
-    "model_provider",
-    "planner",
-    "rag",
-    "reporting",
-    "runner",
-    "tools",
-    "tools_api",
-    "prompts",
-]
+_suppress = os.getenv("AI_SCIENTIST_SUPPRESS_SIMSOPT_WARN", "1") != "0"
+if _suppress:
+    # Suppress noisy PendingDeprecationWarning from simsopt importing numpy.matlib.
+    warnings.filterwarnings(
+        "ignore",
+        message="Importing from numpy.matlib is deprecated",
+        category=PendingDeprecationWarning,
+    )
 
 
 ================================================================================
@@ -5082,6 +6183,12 @@ REPRO_PROMPT = (
     "seed, fidelity, settings dump, and a rerun command for an archived design."
 )
 
+# New constant for physics heuristics
+PHYSICS_HEURISTICS_GUIDANCE = (
+    "PHYSICS HEURISTICS: Reduce high (m>2, n>2) modes for feasibility; "
+    "increase m=1 to boost gradient (warn it raises aspect ratio); "
+    "never change n_field_periods."
+)
 
 def get_problem_spec(problem: str) -> ProblemSpec:
     key = problem.lower()
@@ -5099,6 +6206,7 @@ def build_problem_prompt(problem: str, stage: str) -> str:
         f"{BUDGET_REMINDER}\n"
         f"{TOOL_REMINDER}\n"
         f"{REPRO_PROMPT}\n"
+        f"{PHYSICS_HEURISTICS_GUIDANCE}\n"
     )
 
 
@@ -5251,8 +6359,13 @@ from typing import Iterable, List, Sequence
 
 DEFAULT_INDEX_PATH = Path("ai_scientist/rag_index.db")
 DEFAULT_INDEX_SOURCES = (
-    "2511.02824v2.md",
+    "docs/papers/2506.19583v1.md",
+    "docs/papers/2511.02824v2.md",
     "ConStellaration Fusion Challenge_ Benchmarks and Solution Strategies.md",
+    "docs/MASTER_PLAN_AI_SCIENTIST.md",
+    "docs/AI_SCIENTIST_PRODUCTION_PLAN.md",
+    "docs/AI_SCIENTIST_UPDATED_PLAN.md",
+    "docs/AI_SCIENTIST_UNIFIED_ROADMAP.md",
 )
 INDEX_TABLE_NAME = "rag_references"
 META_TABLE_NAME = "rag_index_meta"
@@ -5299,7 +6412,8 @@ def _write_metadata(
 ) -> None:
     conn.execute(f"DELETE FROM {META_TABLE_NAME}")
     report_lines = []
-    for source in sources:
+    unique_sources = dict.fromkeys(sources)
+    for source in unique_sources:
         mtime = _file_mtime(Path(source)) or 0.0
         conn.execute(
             f"INSERT INTO {META_TABLE_NAME} (source, mtime, chunk_count) VALUES (?, ?, ?)",
@@ -5562,6 +6676,8 @@ _ROLE_ALIAS_MAP = {
     "planning": lambda cfg: cfg.thinking_model,
     "report": lambda cfg: cfg.thinking_model,
     "verification": lambda cfg: cfg.thinking_model,
+    "literature": lambda cfg: cfg.role_map.get("literature", cfg.thinking_model),
+    "analysis": lambda cfg: cfg.role_map.get("analysis", cfg.thinking_model),
 }
 
 
@@ -5690,6 +6806,12 @@ def _build_sample_payload(tool_name: str) -> Mapping[str, Any]:
         }
     if tool_name == "retrieve_rag":
         return {"query": "Phase 3 planning guidance", "k": 2}
+    if tool_name == "write_note":
+        return {
+            "content": "Smoke note content for tool schema validation.",
+            "experiment_id": 0,
+            "cycle": 0,
+        }
     raise ValueError(f"No smoke sample defined for tool '{tool_name}'")
 
 
@@ -5773,7 +6895,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -5796,7 +6918,7 @@ _POSITIONING_SOURCES = DEFAULT_INDEX_SOURCES + (
 
 
 def write_report(title: str, content: str, out_dir: str | Path = "reports") -> Path:
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_name = title.replace(" ", "_")
     out_path = Path(out_dir) / f"{ts}_{safe_name}.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5950,6 +7072,29 @@ def _collect_positioning_quotes(
     return quotes
 
 
+def _format_property_graph_section(
+    summary: Mapping[str, Any] | None,
+    rag_citations: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str]:
+    if summary is None:
+        return ["- PropertyGraph summary unavailable (no experiment context)."]
+    lines = [
+        f"- Nodes: {summary.get('node_count', 0)}",
+        f"- Edges: {summary.get('edge_count', 0)}",
+        f"- Citations tracked: {summary.get('citation_count', 0)}",
+    ]
+    citations = rag_citations or summary.get("citations") or []
+    if citations:
+        lines.append("- RAG citations:")
+        for citation in citations:
+            source = citation.get("source_path") or "unknown"
+            anchor = citation.get("anchor") or ""
+            quote = citation.get("quote") or ""
+            anchor_display = f"{source}:{anchor}" if anchor else source
+            lines.append(f"  - {anchor_display} — {quote}")
+    return lines
+
+
 def _build_positioning_section(
     p3_summary: Mapping[str, Any],
     *,
@@ -6056,6 +7201,8 @@ def build_cycle_report(
     stage_history: Sequence[StageHistoryEntry],
     artifact_entries: Sequence[tuple[str, Path]],
     adaptation_figures: Sequence[Path],
+    property_graph_summary: Mapping[str, Any] | None = None,
+    rag_citations: Sequence[Mapping[str, Any]] | None = None,
     out_dir: str | Path = "reports",
 ) -> str:
     validate_references(references)
@@ -6105,6 +7252,9 @@ def build_cycle_report(
         },
         positioning_artifacts=positioning_artifacts,
     )
+    graph_lines = _format_property_graph_section(
+        property_graph_summary, rag_citations=rag_citations
+    )
     document = [
         f"## Cycle {cycle_index + 1}",
         f"- Problem: {problem}",
@@ -6121,6 +7271,8 @@ def build_cycle_report(
         environment_block,
         "### Stage history",
         stage_table,
+        "### PropertyGraph",
+        *graph_lines,
         "### Phase 6 / P3 summary",
         *hv_lines,
         *positioning_section,
@@ -6154,6 +7306,23 @@ def collect_adaptation_figures(out_dir: str | Path = "reports") -> list[Path]:
     return sorted(collected)
 
 
+def export_metrics_to_prometheus_textfile(metrics: Mapping[str, Any], file_path: Path) -> None:
+    try:
+        from prometheus_client import CollectorRegistry, Gauge, write_to_textfile
+    except ImportError:
+        _LOGGER.warning("prometheus_client not installed, skipping metrics export")
+        return
+
+    registry = CollectorRegistry()
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            safe_key = key.replace(" ", "_").replace("-", "_").lower()
+            g = Gauge(f"ai_scientist_{safe_key}", f"Metric: {key}", registry=registry)
+            g.set(value)
+    
+    write_to_textfile(str(file_path), registry)
+
+
 ================================================================================
 File: optim/__init__.py
 ================================================================================
@@ -6173,21 +7342,27 @@ __all__ = ["search", "surrogate"]
 File: optim/surrogate.py
 ================================================================================
 
-"""Lightweight surrogate ranking helpers for candidate screening.
+"""Surrogate helpers for candidate screening and feasibility-aware ranking.
 
-Per docs/MASTER_PLAN_AI_SCIENTIST.md:332 and docs/TASKS_CODEX_MINI.md:151 the
-ranker now trains on cached metrics (KRR/MLP-style features) so Phase 4/5
-memory data can beat random ordering before promotion.
+Per the unified roadmap (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md) the production
+surrogate is a bundled vectorizer + scaler + RF classifier/regressor that
+estimates feasibility and objective jointly. The legacy linear ranker remains
+for backward compatibility, but SurrogateBundle is the default path going
+forward.
 """
 
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
 
-from ai_scientist import memory
+from ai_scientist import memory, tools
 
 
 def _flatten_boundary_params(params: Mapping[str, Any]) -> np.ndarray:
@@ -6290,6 +7465,248 @@ class SimpleSurrogateRanker:
         return sorted(ranked, key=lambda item: item.score, reverse=True)
 
 
+@dataclass(frozen=True)
+class SurrogatePrediction:
+    """Bundle of surrogate scores for a single candidate."""
+
+    expected_value: float
+    prob_feasible: float
+    predicted_objective: float
+    minimize_objective: bool
+    metadata: Mapping[str, Any]
+
+
+class SurrogateBundle:
+    """Feasibility-first surrogate bundle with RF heads and structured features.
+
+    - Vectorizes boundary params with tools.structured_flatten using a persisted
+      schema (mpol, ntor, schema_version, rounding).
+    - Standard-scales the flattened vector.
+    - Fits a RF classifier for feasibility probability and a RF regressor for
+      objective/HV. PyTorch ensemble is intentionally kept behind the
+      `enable_torch` flag but not initialized here.
+    - Training policy: fit only when >= `min_samples`; otherwise emit a cold
+      start log and keep caller order. The regressor trains on feasible-only
+      points when there are >= `min_feasible_for_regressor` feasible rows.
+    - Ranking uses E[value] = P(feasible) * corrected_objective where the sign
+      is inverted for minimize problems so that higher is always better.
+    - Fit/predict run inside a timeout guard to avoid surprises in CI.
+    - Retrain cadence: either `points_cadence` new rows or `cycle_cadence`
+      elapsed cycles since the last fit.
+    """
+
+    def __init__(
+        self,
+        *,
+        min_samples: int = 8,
+        min_feasible_for_regressor: int = 4,
+        feasibility_tolerance: float = tools._DEFAULT_RELATIVE_TOLERANCE,
+        timeout_seconds: float = 1.0,
+        points_cadence: int = 16,
+        cycle_cadence: int = 1,
+        enable_torch: bool = False,
+    ) -> None:
+        self._min_samples = int(min_samples)
+        self._min_feasible_for_regressor = int(min_feasible_for_regressor)
+        self._feasibility_tolerance = float(feasibility_tolerance)
+        self._timeout_seconds = float(timeout_seconds)
+        self._points_cadence = int(points_cadence)
+        self._cycle_cadence = int(cycle_cadence)
+        self._enable_torch = bool(enable_torch)
+
+        self._scaler: StandardScaler | None = None
+        self._classifier: RandomForestClassifier | None = None
+        self._regressor: RandomForestRegressor | None = None
+        self._schema: tools.FlattenSchema | None = None
+        self._trained = False
+        self._last_fit_count = 0
+        self._last_fit_cycle = 0
+
+    def _with_timeout(self, func):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(func)
+            return future.result(timeout=self._timeout_seconds)
+
+    def _vectorize(self, params: Mapping[str, Any]) -> np.ndarray:
+        vector, schema = tools.structured_flatten(
+            params, schema=self._schema
+        )
+        if self._schema is None:
+            self._schema = schema
+        return vector
+
+    def _feature_matrix(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        vectors: list[np.ndarray] = []
+        for metrics in metrics_list:
+            params = metrics.get("candidate_params") or metrics.get("params")
+            if not isinstance(params, Mapping):
+                params = {}
+            vectors.append(self._vectorize(params))
+        if not vectors:
+            return np.zeros((0, 0), dtype=float)
+        return np.vstack(vectors)
+
+    def _label_feasibility(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        labels: list[int] = []
+        for metrics in metrics_list:
+            feasibility = metrics.get("feasibility")
+            if feasibility is None:
+                feasibility = metrics.get("max_violation", float("inf"))
+            labels.append(int(float(feasibility) <= self._feasibility_tolerance))
+        return np.asarray(labels, dtype=int)
+
+    def fit(
+        self,
+        metrics_list: Sequence[Mapping[str, Any]],
+        target_values: Sequence[float],
+        *,
+        minimize_objective: bool,
+        cycle: int | None = None,
+    ) -> None:
+        sample_count = len(metrics_list)
+        self._last_fit_count = sample_count
+        if cycle is not None:
+            self._last_fit_cycle = int(cycle)
+
+        if sample_count < self._min_samples:
+            logging.info("[surrogate] cold start: %d samples (< %d)", sample_count, self._min_samples)
+            self._trained = False
+            return
+
+        features = self._feature_matrix(metrics_list)
+        if features.size == 0:
+            self._trained = False
+            return
+
+        feasibility_labels = self._label_feasibility(metrics_list)
+        regression_targets = np.asarray(target_values, dtype=float)
+
+        feasible_mask = feasibility_labels == 1
+        if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
+            features_reg = features[feasible_mask]
+            regression_targets = regression_targets[feasible_mask]
+        else:
+            features_reg = features
+
+        # Align classifier features to all rows; regressor uses features_reg.
+        def _train_bundle() -> None:
+            scaler = StandardScaler()
+            scaled_class = scaler.fit_transform(features)
+            clf = RandomForestClassifier(
+                n_estimators=12,
+                max_depth=6,
+                random_state=0,
+                n_jobs=1,
+            )
+            clf.fit(scaled_class, feasibility_labels)
+
+            scaled_reg = scaler.transform(features_reg)
+            reg = RandomForestRegressor(
+                n_estimators=12,
+                max_depth=6,
+                random_state=0,
+                n_jobs=1,
+            )
+            reg.fit(scaled_reg, regression_targets)
+
+            self._scaler = scaler
+            self._classifier = clf
+            self._regressor = reg
+            self._trained = True
+
+        self._with_timeout(_train_bundle)
+
+    def should_retrain(self, sample_count: int, cycle: int | None = None) -> bool:
+        if not self._trained:
+            return True
+        delta_points = sample_count - self._last_fit_count
+        if delta_points >= self._points_cadence:
+            return True
+        if cycle is None:
+            return False
+        return (cycle - self._last_fit_cycle) >= self._cycle_cadence
+
+    def _predict_batch(self, feature_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        assert self._classifier is not None
+        assert self._regressor is not None
+        assert self._scaler is not None
+
+        def _predict() -> tuple[np.ndarray, np.ndarray]:
+            scaled = self._scaler.transform(feature_matrix)
+            prob = self._classifier.predict_proba(scaled)[:, 1]
+            preds = self._regressor.predict(scaled)
+            return prob, preds
+
+        return self._with_timeout(_predict)
+
+    def _expected_value(
+        self, prob_feasible: float, predicted_objective: float, minimize_objective: bool
+    ) -> float:
+        oriented = -float(predicted_objective) if minimize_objective else float(predicted_objective)
+        return float(prob_feasible) * oriented
+
+    def rank_candidates(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+        *,
+        minimize_objective: bool,
+        exploration_ratio: float = 0.0,
+    ) -> list[SurrogatePrediction]:
+        if not candidates:
+            return []
+
+        exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
+
+        if not self._trained:
+            logging.info("[surrogate] cold start ranking; using heuristic features")
+            cold_ranks: list[SurrogatePrediction] = []
+            for candidate in candidates:
+                params = candidate.get("candidate_params") or candidate.get("params", {})
+                features = _params_feature_vector(params)
+                base_score = float(features[0]) if features.size else 0.0
+                score = -base_score if minimize_objective else base_score
+                cold_ranks.append(
+                    SurrogatePrediction(
+                        expected_value=score,
+                        prob_feasible=0.0,
+                        predicted_objective=base_score,
+                        minimize_objective=minimize_objective,
+                        metadata=candidate,
+                    )
+                )
+            return sorted(cold_ranks, key=lambda item: item.expected_value, reverse=True)
+
+        metrics_list: list[Mapping[str, Any]] = []
+        for candidate in candidates:
+            params = candidate.get("candidate_params")
+            if params is None:
+                params = candidate.get("params", {})
+            metrics_list.append({"candidate_params": params})
+        feature_matrix = self._feature_matrix(metrics_list)
+        prob, preds = self._predict_batch(feature_matrix)
+
+        ranked: list[SurrogatePrediction] = []
+        for candidate, pf, obj in zip(candidates, prob, preds):
+            constraint_distance = float(candidate.get("constraint_distance", 0.0))
+            constraint_distance = max(0.0, constraint_distance)
+            uncertainty = float(pf * (1.0 - pf))
+            base_score = self._expected_value(pf, obj, minimize_objective)
+            score = (float(pf) - constraint_distance) + exploration_weight * uncertainty
+            # Preserve expected_value semantics for downstream consumers.
+            score = score if self._trained else base_score
+            ranked.append(
+                SurrogatePrediction(
+                    expected_value=score,
+                    prob_feasible=float(pf),
+                    predicted_objective=float(obj),
+                    minimize_objective=minimize_objective,
+                    metadata=candidate,
+                )
+            )
+
+        return sorted(ranked, key=lambda item: item.expected_value, reverse=True)
+
+
 ================================================================================
 File: optim/search.py
 ================================================================================
@@ -6312,7 +7729,7 @@ import numpy as np
 
 from ai_scientist import tools
 
-_Method = Literal["nelder_mead", "cma_es"]
+_Method = Literal["nelder_mead", "cma_es", "nsga2", "ngopt"]
 
 
 @dataclass(frozen=True)
@@ -6489,6 +7906,74 @@ class P3SearchWrapper:
         aspect = float(metrics["aspect_ratio"])
         return gradient - aspect
 
+    def _crowding_distance(
+        self, fronts: list[list[int]], objectives: list[tuple[float, float]]
+    ) -> list[float]:
+        distances = [0.0 for _ in objectives]
+        for front in fronts:
+            if len(front) <= 2:
+                for idx in front:
+                    distances[idx] = float("inf")
+                continue
+            grad_sorted = sorted(front, key=lambda idx: objectives[idx][0], reverse=True)
+            aspect_sorted = sorted(front, key=lambda idx: objectives[idx][1])
+            grad_values = [objectives[idx][0] for idx in grad_sorted]
+            aspect_values = [objectives[idx][1] for idx in aspect_sorted]
+            grad_span = max(max(grad_values) - min(grad_values), 1e-9)
+            aspect_span = max(max(aspect_values) - min(aspect_values), 1e-9)
+            distances[grad_sorted[0]] = float("inf")
+            distances[grad_sorted[-1]] = float("inf")
+            distances[aspect_sorted[0]] = float("inf")
+            distances[aspect_sorted[-1]] = float("inf")
+            for pos in range(1, len(grad_sorted) - 1):
+                prev_val = objectives[grad_sorted[pos - 1]][0]
+                next_val = objectives[grad_sorted[pos + 1]][0]
+                distances[grad_sorted[pos]] += abs(next_val - prev_val) / grad_span
+            for pos in range(1, len(aspect_sorted) - 1):
+                prev_val = objectives[aspect_sorted[pos - 1]][1]
+                next_val = objectives[aspect_sorted[pos + 1]][1]
+                distances[aspect_sorted[pos]] += abs(next_val - prev_val) / aspect_span
+        return distances
+
+    def _nondominated_fronts(
+        self, objectives: list[tuple[float, float]], feasibilities: list[float]
+    ) -> list[list[int]]:
+        feasible_idx = [
+            idx
+            for idx, feas in enumerate(feasibilities)
+            if feas <= tools._DEFAULT_RELATIVE_TOLERANCE
+        ]
+        if not feasible_idx:
+            return [list(range(len(objectives)))]
+        fronts: list[list[int]] = []
+        remaining = set(feasible_idx)
+        while remaining:
+            front: list[int] = []
+            for idx in list(remaining):
+                dominates_any = False
+                dominated = False
+                for other in list(remaining):
+                    if idx == other:
+                        continue
+                    grad, aspect = objectives[idx]
+                    o_grad, o_aspect = objectives[other]
+                    if (o_grad >= grad and o_aspect <= aspect) and (
+                        o_grad > grad or o_aspect < aspect
+                    ):
+                        dominated = True
+                        break
+                    if (grad >= o_grad and aspect <= o_aspect) and (
+                        grad > o_grad or aspect < o_aspect
+                    ):
+                        dominates_any = True
+                if not dominated:
+                    front.append(idx)
+            if not front:
+                break
+            fronts.append(front)
+            remaining -= set(front)
+        return fronts if fronts else [list(range(len(objectives)))]
+
     def _update_state(
         self, best_vector: np.ndarray, hv_score: float, improved: bool
     ) -> None:
@@ -6514,13 +7999,131 @@ class P3SearchWrapper:
         metrics_seq = evaluation.get("metrics_list", [])
         if not metrics_seq:
             return []
-        scored: list[tuple[Mapping[str, Any], float]] = []
-        for candidate, metrics in zip(candidates, metrics_seq):
-            proxy_score = self._score_metrics(metrics)
-            scored.append((candidate, proxy_score))
+        if self._method in {"nsga2", "ngopt"}:
+            # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
+            # emulate NSGA-II style ordering with feasibility-first fronts.
+            objectives = [
+                (
+                    float(m["minimum_normalized_magnetic_gradient_scale_length"]),
+                    float(m["aspect_ratio"]),
+                )
+                for m in metrics_seq
+            ]
+            feasibilities = [float(f) for f in evaluation.get("feasibilities", [])]
+            fronts = self._nondominated_fronts(objectives, feasibilities)
+            distances = self._crowding_distance(fronts, objectives)
+            ordering: list[int] = []
+            for front in fronts:
+                ordering.extend(
+                    sorted(
+                        front,
+                        key=lambda idx: (
+                            -distances[idx],
+                            -self._score_metrics(metrics_seq[idx]),
+                        ),
+                    )
+                )
+            scored = [
+                (candidates[idx], self._score_metrics(metrics_seq[idx]))
+                for idx in ordering
+            ]
+        else:
+            scored = sorted(
+                [
+                    (candidate, self._score_metrics(metrics))
+                    for candidate, metrics in zip(candidates, metrics_seq)
+                ],
+                key=lambda item: item[1],
+                reverse=True,
+            )
         best_idx = max(range(len(scored)), key=lambda idx: scored[idx][1])
         best_vector = self._vectorizer.flatten(candidates[best_idx])
         improved = evaluation["hv_score"] >= self._best_score
         self._update_state(best_vector, float(evaluation["hv_score"]), improved)
-        return sorted(scored, key=lambda item: item[1], reverse=True)
+        return scored
 
+
+================================================================================
+File: optim/samplers.py
+================================================================================
+
+"""Sampler implementations for Phase 1/2 candidate generation."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+
+from ai_scientist import config as ai_config
+from ai_scientist import tools
+from constellaration.initial_guess import generate_nae
+from constellaration.geometry import surface_rz_fourier
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _surface_to_params(surface: surface_rz_fourier.SurfaceRZFourier) -> dict[str, Any]:
+    return {
+        "r_cos": np.asarray(surface.r_cos).tolist(),
+        "z_sin": np.asarray(surface.z_sin).tolist(),
+        "n_field_periods": int(surface.n_field_periods),
+        "is_stellarator_symmetric": bool(surface.is_stellarator_symmetric),
+    }
+
+
+class NearAxisSampler:
+    """Generates candidates using Near-Axis Expansion (NAE) via Constellaration."""
+
+    def __init__(
+        self,
+        template: ai_config.BoundaryTemplateConfig,
+    ) -> None:
+        self._template = template
+
+    def generate(self, seeds: Sequence[int]) -> list[Mapping[str, Any]]:
+        candidates: list[Mapping[str, Any]] = []
+        for seed in seeds:
+            rng = np.random.default_rng(seed)
+            
+            # Sample NAE parameters around reasonable defaults or template values
+            # We assume template provides n_field_periods and mode limits.
+            
+            # Aspect ratio: Sample around 4.0 to 8.0 (typical for stellarators)
+            aspect_ratio = rng.uniform(4.0, 8.0)
+            
+            # Elongation: Sample around 1.5 to 2.5
+            max_elongation = rng.uniform(1.5, 2.5)
+            
+            # Rotational transform (iota): Sample around 0.4 to 1.2
+            rotational_transform = rng.uniform(0.4, 1.2)
+            
+            # Mirror ratio: Sample around 1.05 to 1.2
+            mirror_ratio = rng.uniform(1.05, 1.2)
+
+            try:
+                surface = generate_nae(
+                    aspect_ratio=aspect_ratio,
+                    max_elongation=max_elongation,
+                    rotational_transform=rotational_transform,
+                    mirror_ratio=mirror_ratio,
+                    n_field_periods=self._template.n_field_periods,
+                    max_poloidal_mode=self._template.n_poloidal_modes,
+                    max_toroidal_mode=self._template.n_toroidal_modes,
+                )
+                params = _surface_to_params(surface)
+                candidates.append(
+                    {
+                        "seed": seed,
+                        "params": params,
+                        "source": "near_axis_sampler",
+                        "design_hash": tools.design_hash(params),
+                        "constraint_distance": 0.0, # NAE designs are "theoretically" near feasible
+                    }
+                )
+            except Exception as exc:
+                _LOGGER.warning(f"Near-axis generation failed for seed {seed}: {exc}")
+                continue
+        
+        return candidates

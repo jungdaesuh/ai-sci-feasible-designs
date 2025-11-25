@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import argparse
+import argparse # Import argparse
 import json
 import math
 import os
@@ -14,8 +14,9 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple
+from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple, Callable
 import random
+import multiprocessing # Import multiprocessing
 
 import numpy as np
 import jax.numpy as jnp
@@ -34,13 +35,14 @@ from ai_scientist import tools
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
 from constellaration.geometry import surface_rz_fourier as surface_module
-from constellaration.initial_guess import generate_rotating_ellipse
+from constellaration.initial_guess import generate_nae
 from constellaration.optimization.augmented_lagrangian import (
     AugmentedLagrangianState,
     AugmentedLagrangianSettings,
     augmented_lagrangian_function,
     update_augmented_lagrangian_state,
 )
+from constellaration.optimization import augmented_lagrangian_runner # To register PyTree
 from constellaration.utils import pytree
 from constellaration import problems
 from constellaration import forward_model
@@ -117,25 +119,66 @@ def _build_template_params_for_alm(
     }
 
 
+def _generate_nae_candidate_params(
+    template: ai_config.BoundaryTemplateConfig,
+    aspect_ratio: float = 8.0,
+    max_elongation: float = 1.5,
+    rotational_transform: float = 0.4,
+    mirror_ratio: float = 0.5,
+) -> Mapping[str, Any]:
+    """Generates initial parameters using Near-Axis Expansion (NAE)."""
+    nae_boundary = generate_nae(
+        aspect_ratio=aspect_ratio,
+        max_elongation=max_elongation,
+        rotational_transform=rotational_transform,
+        mirror_ratio=mirror_ratio,
+        n_field_periods=template.n_field_periods,
+        max_poloidal_mode=template.n_poloidal_modes -1, # convert to 0-indexed max
+        max_toroidal_mode=template.n_toroidal_modes -1, # convert to 0-indexed max
+    )
+    # Convert SurfaceRZFourier to dictionary format
+    return {
+        "r_cos": np.asarray(nae_boundary.r_cos).tolist(),
+        "z_sin": np.asarray(nae_boundary.z_sin).tolist(),
+        "n_field_periods": nae_boundary.n_field_periods,
+        "is_stellarator_symmetric": nae_boundary.is_stellarator_symmetric,
+    }
+
+
 # ALM Helpers adapted from constellaration.optimization.augmented_lagrangian_runner
 
 def _objective_constraints(
     x: jnp.ndarray,
     scale: jnp.ndarray,
-    unravel_and_unmask_fn: Any,
+    unravel_and_unmask_fn: Any, # Callable[[jnp.ndarray], surface_module.SurfaceRZFourier],
     settings: forward_model.ConstellarationSettings,
     problem_type: str,
+    predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]] | None = None,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
 ]:
+    # Reconstruct boundary_obj from optimized parameters x using unravel_and_unmask_fn
+    boundary_obj = unravel_and_unmask_fn(jnp.asarray(x * scale))
+    
+    # Convert SurfaceRZFourier to dictionary format for predictor
+    boundary_params = {
+        "r_cos": np.asarray(boundary_obj.r_cos).tolist(),
+        "z_sin": np.asarray(boundary_obj.z_sin).tolist(),
+        "n_field_periods": boundary_obj.n_field_periods,
+        "is_stellarator_symmetric": boundary_obj.is_stellarator_symmetric,
+    }
+    
+    # If a predictor is provided, use it for faster evaluation
+    if predictor:
+        predicted_objective, predicted_constraints = predictor(boundary_params)
+        return ((jnp.asarray(predicted_objective, dtype=jnp.float32), jnp.asarray(predicted_constraints, dtype=jnp.float32)), None)
+        
+    # Otherwise, use the expensive forward model
     with tempfile.TemporaryDirectory() as _:
-        # Reconstruct boundary from optimized parameters x
-        boundary = unravel_and_unmask_fn(jnp.asarray(x * scale))
-
         metrics = None
         try:
             metrics, _ = forward_model.forward_model(
-                boundary=boundary,
+                boundary=boundary_obj,
                 settings=settings,
             )
         except Exception as _:
@@ -1554,6 +1597,25 @@ def _run_cycle(
     sleep_per_eval = 0.05 if runtime and runtime.slow else 0.0
     screen_only = bool(runtime and runtime.screen_only)
 
+    # Apply config-defined run_overrides first (for testing/fixed behavior)
+    if cfg.run_overrides:
+        try:
+            # Merge with existing config_overrides, prioritizing cfg.run_overrides
+            if config_overrides:
+                temp_overrides = dict(config_overrides)
+                for key, value in cfg.run_overrides.items():
+                    if isinstance(value, Mapping) and key in temp_overrides and isinstance(temp_overrides[key], Mapping):
+                        temp_overrides[key] = {**temp_overrides[key], **value}
+                    else:
+                        temp_overrides[key] = value
+                config_overrides = temp_overrides
+            else:
+                config_overrides = cfg.run_overrides
+            if runtime and runtime.verbose:
+                print(f"[runner][cycle={cycle_number}] Applying config-defined run_overrides: {cfg.run_overrides}")
+        except Exception as exc:
+            print(f"[runner][cycle={cycle_number}] Failed to apply run_overrides from config: {exc}")
+
     # Apply agent-driven config overrides
     active_cfg = cfg
     optimizer_mode = "default"  # Default optimizer mode
@@ -1582,6 +1644,10 @@ def _run_cycle(
             if "alm_settings" in config_overrides:
                 alm_settings_overrides = config_overrides["alm_settings"]
                 overrides_log.append(f"alm_settings={alm_settings_overrides}")
+            if "initialization_strategy" in config_overrides:
+                new_init_strategy = str(config_overrides["initialization_strategy"])
+                active_cfg = replace(active_cfg, initialization_strategy=new_init_strategy)
+                overrides_log.append(f"initialization_strategy={new_init_strategy}")
 
             if overrides_log:
                 print(f"[runner][cycle={cycle_number}] Applying agent config overrides: {', '.join(overrides_log)}")
@@ -1619,37 +1685,31 @@ def _run_cycle(
     
     candidate_pool: list[Mapping[str, Any]] = []
     
-    if optimizer_mode == "alm":
+    # Placeholder for ALM/SA-ALM block
+    # Will be replaced with full SA-ALM integration
+    
+    candidate_pool: list[Mapping[str, Any]] = []
+    
+    # START ALM_BLOCK_PLACEHOLDER
+    if optimizer_mode == "alm" or optimizer_mode == "sa-alm":
         # ALM Execution Branch
         if runtime and runtime.verbose:
-            print(f"[runner][cycle={cycle_number}] ALM optimizer mode active.")
+            print(f"[runner][cycle={cycle_number}] {optimizer_mode} optimizer mode active.")
         
         initial_params_map: Mapping[str, Any]
         if suggested_params and suggested_params[0]:
             initial_params_map = suggested_params[0]
         else:
-            # Retrieve the best candidate from history if available
-            # Since we don't have a direct method, we query candidates sorted by hv
-            # This is a workaround; in production we should add `best_candidate` retrieval to world_model
+            if active_cfg.initialization_strategy == "nae":
+                print("[runner] Using NAE for initial ALM design.")
+                initial_params_map = _generate_nae_candidate_params(active_cfg.boundary_template)
+            else: # Default to "template"
+                print("[runner] Using template for initial ALM design.")
+                initial_params_map = _build_template_params_for_alm(active_cfg.boundary_template)
             
-            # Fallback to template
-            initial_params_map = _build_template_params_for_alm(active_cfg.boundary_template)
-            # Attempt to find a better start if history exists
-            try:
-                best_hv = world_model.previous_best_hv(experiment_id, cycle_number)
-                if best_hv is not None:
-                    # We would need a query to get the params associated with this HV
-                    # For now, stick to template or agent suggestion to avoid complex SQL here
-                    pass
-            except Exception:
-                pass
-        
         # Prepare boundary for optimization using constellaration utils
         boundary_obj = tools.make_boundary_from_params(initial_params_map)
         
-        # Use constellaration's masking logic
-        # We need to define max modes based on boundary_template or inferred from params
-        # Assuming boundary_template is authoritative for optimization resolution
         max_poloidal = active_cfg.boundary_template.n_poloidal_modes - 1
         max_toroidal = (active_cfg.boundary_template.n_toroidal_modes - 1) // 2
         
@@ -1670,7 +1730,6 @@ def _run_cycle(
             mask=mask,
         )
         
-        # Compute scaling
         scale = surface_module.compute_infinity_norm_spectrum_scaling_fun(
             poloidal_modes=boundary_obj.poloidal_modes.flatten(),
             toroidal_modes=boundary_obj.toroidal_modes.flatten(),
@@ -1680,16 +1739,58 @@ def _run_cycle(
         
         x0 = jnp.array(initial_guess) / scale
 
-        # Initial evaluation
         fm_settings = tools._settings_for_stage(active_cfg.fidelity_ladder.promote)
         
+        # ALM settings
+        alm_settings_obj = AugmentedLagrangianSettings(**alm_settings_overrides)
+
+        # For SA-ALM, we need a predictor function for the inner loop
+        sa_alm_predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]] | None = None
+        if optimizer_mode == "sa-alm":
+            # Retrain surrogate if needed
+            problem = (cfg.problem or "").lower()
+            target_column = "hv" if problem == "p3" else "objective"
+            history = world_model.surrogate_training_data(
+                target=target_column, problem=cfg.problem
+            )
+            metrics_list: tuple[Mapping[str, Any], ...]
+            target_values: tuple[float, ...]
+            if history:
+                metrics_list, target_values = zip(*history)
+                if _SURROGATE_BUNDLE.should_retrain(len(history), cycle=cycle_number):
+                    _SURROGATE_BUNDLE.fit(
+                        metrics_list,
+                        target_values,
+                        minimize_objective=(problem == "p1"), # assuming P1 objective is minimize
+                        cycle=cycle_number,
+                    )
+            
+            def surrogate_predictor(params: Mapping[str, Any]) -> Tuple[float, Sequence[float]]:
+                # Predict objective and constraints using the surrogate
+                dummy_candidate = {"candidate_params": params}
+                predicted_list = _SURROGATE_BUNDLE.rank_candidates([dummy_candidate], minimize_objective=False) # min_obj doesn't matter much for individual predictions
+                predicted = predicted_list[0]
+                
+                # Default values for constraints if not predicted
+                mhd = predicted.predicted_mhd if predicted.predicted_mhd is not None else 0.0
+                qi = predicted.predicted_qi if predicted.predicted_qi is not None else 1.0 # Assume always positive
+                elongation = predicted.predicted_elongation if predicted.predicted_elongation is not None else 1.0
+                
+                # Simplified prediction of constraint values (positive for violation)
+                predicted_alm_constraints = [
+                    max(0.0, -mhd), # MHD violation: if vacuum_well < 0
+                    max(0.0, qi - FEASIBILITY_CUTOFF), # QI violation: if qi > FEASIBILITY_CUTOFF (needs to be low)
+                    max(0.0, elongation - 5.0), # Elongation violation: if > 5.0 (arbitrary threshold for now)
+                ]
+                
+                return float(predicted.predicted_objective), predicted_alm_constraints
+
+            sa_alm_predictor = surrogate_predictor
+            
         (initial_objective, initial_constraints), _ = _objective_constraints(
-            x0, scale, unravel_and_unmask_fn, fm_settings, cfg.problem
+            x0, scale, unravel_and_unmask_fn, fm_settings, cfg.problem, predictor=sa_alm_predictor
         )
 
-        # ALM settings
-        alm_settings = AugmentedLagrangianSettings(**alm_settings_overrides)
-        
         state = AugmentedLagrangianState(
             x=jnp.copy(x0),
             multipliers=jnp.zeros_like(initial_constraints),
@@ -1721,50 +1822,51 @@ def _run_cycle(
             oracle.suggest(np.array(state.x))
             
             # Inner loop execution
-            # Since we set num_workers=1 and simple loop, we can iterate directly
             for _ in range(budget_per_step):
                 candidate = oracle.ask()
-                # Eval
+                
+                # Eval using predictor if SA-ALM, else use full model
                 (obj, constr), metrics = _objective_constraints(
                     jnp.array(candidate.value),
                     scale,
                     unravel_and_unmask_fn,
                     fm_settings,
-                    cfg.problem
+                    cfg.problem,
+                    predictor=sa_alm_predictor
                 )
                 
-                # Capture candidate
+                # Capture candidate details
+                cand_boundary = unravel_and_unmask_fn(jnp.asarray(candidate.value * scale))
+                cand_params = {
+                    "r_cos": np.array(cand_boundary.r_cos).tolist(),
+                    "z_sin": np.array(cand_boundary.z_sin).tolist(),
+                    "n_field_periods": cand_boundary.n_field_periods,
+                    "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
+                }
+                
+                # For SA-ALM, metrics will be None, so we rely on constraint violation from `constr`
+                # If using SA-ALM, max_viol comes from predicted_alm_constraints
                 if metrics:
-                    # Reconstruct params map for candidate
-                    # This is a bit redundant as _objective_constraints does unravel, but we need it for logging
-                    cand_boundary = unravel_and_unmask_fn(jnp.asarray(candidate.value * scale))
-                    # Convert SurfaceRZFourier back to dict params
-                    # Use tools.structured_flatten logic reversely or just extract
-                    cand_params = {
-                        "r_cos": np.array(cand_boundary.r_cos).tolist(),
-                        "z_sin": np.array(cand_boundary.z_sin).tolist(),
-                        "n_field_periods": cand_boundary.n_field_periods,
-                        "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
-                    }
-                    
-                    # P3 feasibility
                     p3_margins = tools.compute_constraint_margins(metrics, "p3")
                     max_viol = tools._max_violation(p3_margins)
-                    
-                    alm_candidates.append({
-                        "seed": cfg.random_seed + cycle_index * 10000 + len(alm_candidates),
-                        "params": cand_params,
-                        "design_hash": tools.design_hash(cand_params),
-                        "constraint_distance": max_viol,
-                        "source": "alm_inner",
-                        "evaluation": { # Fake evaluation dict to reuse existing tools
-                            "metrics": metrics.model_dump(),
-                            "feasibility": max_viol,
-                            "stage": active_cfg.fidelity_ladder.promote
-                        } 
-                    })
+                else: # From predictor
+                    # The constraints from predictor are already "violations" (positive for violation)
+                    # max_viol is the maximum of these predicted constraint violations.
+                    max_viol = float(jnp.max(constr))
+                
+                alm_candidates.append({
+                    "seed": cfg.random_seed + cycle_index * 10000 + len(alm_candidates),
+                    "params": cand_params,
+                    "design_hash": tools.design_hash(cand_params),
+                    "constraint_distance": max_viol,
+                    "source": optimizer_mode, # "alm_inner" or "sa-alm_inner"
+                    "evaluation": { # Fake evaluation dict to reuse existing tools
+                        "metrics": metrics.model_dump() if metrics else {}, # Can be empty if from predictor
+                        "feasibility": max_viol, # Using max_viol as proxy for feasibility
+                        "stage": active_cfg.fidelity_ladder.promote
+                    } 
+                })
 
-                # Tell optimizer
                 loss = augmented_lagrangian_function(obj, constr, state).item()
                 oracle.tell(candidate, loss)
             
@@ -1772,25 +1874,72 @@ def _run_cycle(
             recommendation = oracle.provide_recommendation()
             x_new = jnp.array(recommendation.value)
             
-            (obj_new, constr_new), _ = _objective_constraints(
-                x_new, scale, unravel_and_unmask_fn, fm_settings, cfg.problem
-            )
-            
-            state = update_augmented_lagrangian_state(
-                x=x_new,
-                objective=obj_new,
-                constraints=constr_new,
-                state=state,
-                settings=alm_settings, # We need to map dict to object if needed or pass valid struct
-            )
+            # Periodically verify with true forward model if SA-ALM
+            if optimizer_mode == "sa-alm" and k % 2 == 0: # Verify every N steps
+                if runtime and runtime.verbose:
+                    print(f"[runner] SA-ALM: Verifying best candidate with true forward model (step {k}).")
+                (obj_new, constr_new), true_metrics = _objective_constraints( # Capture true_metrics
+                    x_new, scale, unravel_and_unmask_fn, fm_settings, cfg.problem, predictor=None # Force true eval
+                )
+                # Add this true evaluation to world model for surrogate retraining
+                # The unravel_and_unmask_fn already converts x to SurfaceRZFourier,
+                # then we need to convert to dict params for log_candidate.
+                # However, this doesn't directly give `FlattenSchema` for `structured_unflatten`.
+                # We need to preserve the initial_params_map's metadata.
+                verified_params_obj = unravel_and_unmask_fn(x_new * scale)
+                verified_params = {
+                    "r_cos": np.asarray(verified_params_obj.r_cos).tolist(),
+                    "z_sin": np.asarray(verified_params_obj.z_sin).tolist(),
+                    "n_field_periods": initial_params_map.get("n_field_periods", 1),
+                    "is_stellarator_symmetric": initial_params_map.get("is_stellarator_symmetric", True),
+                }
+
+                # Use true_metrics for logging to world model
+                if true_metrics:
+                    world_model.log_candidate(
+                        experiment_id=experiment_id,
+                        problem=cfg.problem,
+                        params=verified_params,
+                        seed=cfg.random_seed + cycle_index * 100000 + k, # Unique seed
+                        status=active_cfg.fidelity_ladder.promote,
+                        evaluation={
+                            "objective": obj_new.item(),
+                            "feasibility": float(jnp.max(constr_new)), # Max constraint violation
+                            "stage": active_cfg.fidelity_ladder.promote,
+                            "metrics": true_metrics.model_dump(), # Use actual metrics
+                        },
+                        design_hash=tools.design_hash(verified_params),
+                        commit=False,
+                    )
+                # Now use true obj/constr for ALM state update
+                state = update_augmented_lagrangian_state(
+                    x=x_new,
+                    objective=obj_new,
+                    constraints=constr_new,
+                    state=state,
+                    settings=alm_settings_obj,
+                )
+            else: # Use surrogate prediction for ALM state update
+                (obj_new, constr_new), _ = _objective_constraints(
+                    x_new, scale, unravel_and_unmask_fn, fm_settings, cfg.problem, predictor=sa_alm_predictor
+                )
+                state = update_augmented_lagrangian_state(
+                    x=x_new,
+                    objective=obj_new,
+                    constraints=constr_new,
+                    state=state,
+                    settings=alm_settings_obj,
+                )
 
         candidate_pool = alm_candidates
+    # END ALM_BLOCK_PLACEHOLDER
     
     elif pool_size <= 0:
         if runtime and runtime.verbose:
             print(
                 f"[runner][cycle={cycle_number}] screen budget zero; skipping candidate generation"
             )
+        candidate_pool: list[Mapping[str, Any]] = []
         candidates: list[Mapping[str, Any]] = []
     else:
         candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
