@@ -14,7 +14,7 @@ The current system has a robust infrastructure (World Model, RAG, Tool Definitio
 - [ ] **1.1 Implement "Feasibility Restoration Mode" in `runner.py`**
     - [ ] Modify `_run_cycle` to detect when `feasibility_rate` is effectively zero (or below a threshold) for $N$ consecutive cycles.
     - [ ] Introduce a `mode` flag in the cycle state ("optimization" vs. "restoration").
-    - [ ] In "restoration" mode, override the standard sorting/ranking logic (`_prefer_entry`, `_surrogate_rank_screen_candidates`) to rank candidates solely by `max_violation` (or a weighted sum of violations) rather than the primary objective (e.g., aspect ratio).
+    - [ ] **Update:** When in "restoration" mode, the runner should switch to the **Augmented Lagrangian Method (ALM)** solver (see 1.3) rather than just changing the ranking sort order.
     - [ ] Log the active `mode` in the World Model (`budgets` or `cycles` table) for observability.
 
 - [ ] **1.2 Adaptive Promotion Gates (Fix the "Stall" Bug)**
@@ -24,11 +24,15 @@ The current system has a robust infrastructure (World Model, RAG, Tool Definitio
         - [ ] Instead, select the top $K$ candidates with the *lowest constraint violations* (`min(max_violation)`).
         - [ ] Mark these promoted candidates with a `reason="exploration"` or `reason="restoration"` tag for analysis.
 
-- [ ] **1.3 "Soft ALM" via Agent Configuration**
-    - [ ] Expand `ExperimentConfig` (and `ProposalMixConfig`) to include a `constraint_weights` dictionary (e.g., `{'mhd': 1.0, 'qi': 1.0}`).
-    - [ ] Update `planner.py` prompts to explain that the agent can output `config_overrides` to adjust these weights.
-    - [ ] Update `runner.py` to pass these weights to the ranking/sorting functions.
-    - [ ] **Goal:** Allow the agent to say, "MHD is failing; increase MHD weight to 50.0," effectively implementing an Augmented Lagrangian Method via reasoning.
+- [ ] **1.3 Native ALM Integration (Solver Upgrade)**
+    - [ ] **Context:** The `constellaration` library already implements ALM in `constellaration.optimization.augmented_lagrangian`. We should use this instead of "guessing" weights.
+    - [ ] **Implementation:**
+        - [ ] Import `AugmentedLagrangianState` and `update_augmented_lagrangian_state` in `runner.py`.
+        - [ ] Create a new runner path (or tool) that initializes an ALM state from the current best candidate.
+        - [ ] Execute a batch of ALM updates to actively drive the design toward feasibility using the physics gradients (or simulated gradients).
+    - [ ] **Agent Meta-Control:**
+        - [ ] Empower the Agent to configure the ALM solver via `config_overrides` (e.g., setting `penalty_parameters_initial`, `bounds_initial`).
+        - [ ] Allow the Agent to explicitly trigger this mode: "Switching to ALM to resolve constraints."
 
 ---
 
