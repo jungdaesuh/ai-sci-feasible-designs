@@ -34,6 +34,7 @@ from ai_scientist import reporting
 from ai_scientist import tools
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
+from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
@@ -55,12 +56,11 @@ _LAST_SURROGATE_FIT_SEC = 0.0
 NAN_TO_HIGH_VALUE = 10.0
 
 
-def _create_surrogate(cfg: ai_config.ExperimentConfig) -> SurrogateBundle:
+def _create_surrogate(cfg: ai_config.ExperimentConfig) -> SurrogateBundle | NeuralOperatorSurrogate:
     """Factory to create the appropriate surrogate model based on config."""
     if cfg.surrogate_backend == "neural_operator":
-        print("[runner] Warning: 'neural_operator' backend not fully implemented, falling back to RandomForest bundle.")
-        # In Phase 2.2, we will return NeuralOperatorSurrogate() here.
-        return SurrogateBundle()
+        print("[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend).")
+        return NeuralOperatorSurrogate()
     return SurrogateBundle()
 
 
