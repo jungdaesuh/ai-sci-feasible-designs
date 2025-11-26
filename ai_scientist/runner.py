@@ -1,4 +1,4 @@
-"""Runner that wires budgets, fidelity decisions, and minimal reporting (Tasks 4.1 + B.*)."""
+"Runner that wires budgets, fidelity decisions, and minimal reporting (Tasks 4.1 + B.*)."
 
 from __future__ import annotations
 
@@ -904,8 +904,8 @@ def _surrogate_rank_screen_candidates(
                 valid += 1
         recent_feasibility = valid / len(recent_window)
 
-    metrics_list: tuple[Mapping[str, Any], ...]
-    target_values: tuple[float, ...]
+    metrics_list: tuple[Mapping[str, Any], ...] = ()
+    target_values: tuple[float, ...] = ()
     if history:
         metrics_list, target_values = zip(*history)
         if surrogate_model.should_retrain(len(history), cycle=cycle):
@@ -918,8 +918,8 @@ def _surrogate_rank_screen_candidates(
             )
             _LAST_SURROGATE_FIT_SEC = time.perf_counter() - start
     else:
-        metrics_list = tuple()
-        target_values = tuple()
+        metrics_list = ()
+        target_values = ()
 
     pool_entries: list[Mapping[str, Any]] = []
     for idx, candidate in enumerate(candidates):
@@ -1277,7 +1277,7 @@ def _persist_pareto_archive(
         logged_hashes.add(design_hash)
         metrics_by_hash[design_hash] = metrics_id
         settings_json = json.dumps(
-            evaluation.get("settings", {}), separators=(",", ":")
+            evaluation.get("settings", {}), separators=( ",", ":")
         )
         archive_rows.append(
             {
@@ -1524,7 +1524,7 @@ def _maybe_log_cache_stats(
     log_path = _cache_stats_log_path(cfg.reporting_dir)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        handle.write(json.dumps(entry, separators=( ",", ":")) + "\n")
 
 
 def _vmec_failure_rate(results: Sequence[Mapping[str, Any]]) -> float:
@@ -1567,7 +1567,7 @@ def _log_observability_metrics(
     path = _observability_log_path(cfg.reporting_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        handle.write(json.dumps(entry, separators=( ",", ":")) + "\n")
 
 
 def _build_template_params_for_alm(
@@ -1755,7 +1755,7 @@ def _run_cycle(
         )
         
         # Note: Coordinator handles strategy (Explore/Exploit). 
-        # If Exploit, candidates are already optimized.
+        # If Exploit, candidates are already optimized. 
         
         candidates = _surrogate_rank_screen_candidates(
             active_cfg,
@@ -1829,8 +1829,8 @@ def _run_cycle(
             history = world_model.surrogate_training_data(
                 target=target_column, problem=cfg.problem
             )
-            metrics_list: tuple[Mapping[str, Any], ...]
-            target_values: tuple[float, ...]
+            metrics_list: tuple[Mapping[str, Any], ...] = ()
+            target_values: tuple[float, ...] = ()
             if history:
                 metrics_list, target_values = zip(*history)
                 if surrogate_model.should_retrain(len(history), cycle=cycle_number):
@@ -1982,7 +1982,7 @@ def _run_cycle(
                         "constraint_distance": max_viol,
                         "source": optimizer_mode, 
                         "evaluation": { 
-                            "metrics": metrics.model_dump() if metrics else {}, 
+                            "metrics": metrics.model_dump() if metrics else {},
                             "feasibility": max_viol, 
                             "stage": active_cfg.fidelity_ladder.promote
                         } 
@@ -2092,7 +2092,7 @@ def _run_cycle(
     screen_stage = active_cfg.fidelity_ladder.screen
     if candidates:
         screen_results = _evaluate_stage(
-            candidates,
+            candidates, 
             stage=screen_stage,
             budgets=active_budgets,
             cycle_start=cycle_start,
@@ -2148,7 +2148,7 @@ def _run_cycle(
             # Tag them for analysis
             for candidate in to_promote:
                 candidate["promotion_reason"] = "restoration"
-
+            
     promote_stage = cfg.fidelity_ladder.promote
     promote_results: list[dict[str, Any]] = []
     if not screen_only and promote_limit > 0:
@@ -2386,10 +2386,7 @@ def _run_cycle(
             "import json, sqlite3\n"
             "from ai_scientist import tools\n"
             f"conn = sqlite3.connect('{cfg.memory_db}')\n"
-            "row = conn.execute(\n"
-            '    "SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1",\n'
-            f"    ('{replay_entry.design_hash}',),\n"
-            ").fetchone()\n"
+            "row = conn.execute(\"\n    'SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1',\n    ('{replay_entry.design_hash}',),\n").fetchone()\n"
             "assert row, 'Design hash not found in world model'\n"
             "params = json.loads(row[0])\n"
             f"print(tools.{tool_name}(params, stage='{replay_entry.stage or cfg.fidelity_ladder.promote}'))\n"
@@ -2401,14 +2398,6 @@ def _run_cycle(
             "No Pareto archive entries available to replay this cycle.\n"
         )
     stage_label = best_eval.get("stage") or cfg.fidelity_ladder.promote
-    reproduction_steps = [
-        repro_command,
-        f"git checkout {git_sha}",
-        f"(cd constellaration && git checkout {constellaration_sha})",
-        f"tools.{tool_name}(params, stage='{stage_label}')",
-    ]
-    tool_input = {"params": best_entry["params"], "stage": stage_label}
-    tool_input_hash = memory.hash_payload(tool_input)
     statement_status = _verify_best_claim(
         world_model=world_model,
         experiment_id=experiment_id,
@@ -2423,6 +2412,8 @@ def _run_cycle(
         stage=stage_label,
         metrics_id=best_metrics_id,
     )
+    tool_input = {"params": best_entry["params"], "stage": stage_label}
+    tool_input_hash = memory.hash_payload(tool_input)
     preference_pairs_path = adaptation_helpers.append_preference_pair(
         base_dir=cfg.reporting_dir,
         cycle=cycle_number,
@@ -2446,7 +2437,12 @@ def _run_cycle(
             "seed": best_seed,
             "tool_name": tool_name,
             "tool_input_hash": tool_input_hash,
-            "reproduction_steps": reproduction_steps,
+            "reproduction_steps": [
+                repro_command,
+                f"git checkout {git_sha}",
+                f"(cd constellaration && git checkout {constellaration_sha})",
+                f"tools.{tool_name}(params, stage='{stage_label}')",
+            ],
             "reproduction_snippet": reproduction_snippet,
             "reproduction_command": repro_command,
             "params": best_entry["params"],
@@ -2554,9 +2550,7 @@ def _run_cycle(
         ("p3_summary", p3_summary_anchor),
         ("trajectory", trajectory_anchor),
     )
-    positioning_artifacts = {
-        name: anchor for name, anchor in anchor_candidates if anchor is not None
-    }
+    positioning_artifacts = {name: anchor for name, anchor in anchor_candidates if anchor is not None}
     if not positioning_artifacts:
         positioning_artifacts = None
     references = [
@@ -2567,12 +2561,6 @@ def _run_cycle(
     for anchor in (preference_pairs_anchor, p3_summary_anchor, trajectory_anchor):
         if anchor:
             references.append(anchor)
-    reproduction_steps = [
-        repro_command,
-        f"git checkout {git_sha}",
-        f"(cd constellaration && git checkout {constellaration_sha})",
-        f"tools.{tool_name}(params, stage='{stage_label}')",
-    ]
     content = reporting.build_cycle_report(
         cycle_index=cycle_index,
         problem=cfg.problem,
@@ -2581,7 +2569,12 @@ def _run_cycle(
         governance_stage=governance_stage,
         best_metrics=best_eval["metrics"],
         config_snapshot=config_snapshot,
-        reproduction_steps=reproduction_steps,
+        reproduction_steps=[
+            repro_command,
+            f"git checkout {git_sha}",
+            f"(cd constellaration && git checkout {constellaration_sha})",
+            f"tools.{tool_name}(params, stage='{stage_label}')",
+        ],
         reproduction_snippet=reproduction_snippet,
         environment_block=env_block,
         pareto_lines=pareto_lines,
@@ -2758,19 +2751,19 @@ def run(
                     config_overrides = plan_outcome.config_overrides
 
             report_path, best_eval, p3_summary = _run_cycle(
-                cfg,
-                idx,
-                world_model,
-                experiment_id,
-                governance_stage,
-                git_sha,
-                constellaration_sha,
-                surrogate_model,
-                runtime=runtime,
-                budget_controller=budget_controller,
-                prev_feasibility_rate=last_feasibility_rate,
-                suggested_params=suggested_params,
-                config_overrides=config_overrides,
+                cfg, 
+                idx, 
+                world_model, 
+                experiment_id, 
+                governance_stage, 
+                git_sha, 
+                constellaration_sha, 
+                surrogate_model, 
+                runtime=runtime, 
+                budget_controller=budget_controller, 
+                prev_feasibility_rate=last_feasibility_rate, 
+                suggested_params=suggested_params, 
+                config_overrides=config_overrides, 
                 generative_model=generative_model,
             )
             last_p3_summary = p3_summary
@@ -2778,24 +2771,22 @@ def run(
                 total = max(1, p3_summary.feasible_count + (p3_summary.archive_size or 0)) # approximate total if not tracked directly
                 # Actually p3_summary doesn't store total candidates, but _run_cycle logs feasibility_rate to JSON.
                 # We can infer it from the feasible_count if we knew the total. 
-                # Wait, _run_cycle calculated feasibility_rate internally but didn't return it explicitly except in JSON.
-                # But we can re-calculate if we assume pool size ~ budget. 
                 # Better: _run_cycle *returns* p3_summary, but feasibility_rate was local. 
                 # Let's check _run_cycle output. It returns (Path, dict, P3Summary).
                 # The P3Summary has feasible_count. 
-                # We can track feasibility rate if we modify _run_cycle to return it or just assume 0.5 for now? 
+                # We can track feasibility rate if we modify _run_cycle to return it or just assume 0.5 for now?
                 # No, better to capture it. 
-                # However, modifying return signature again is annoying.
+                # However, modifying return signature again is annoying. 
                 # Let's assume feasibility_rate ~ p3_summary.feasible_count / (screened + promoted) roughly?
-                # Actually, best_eval has "feasibility_rate" in the JSON payload logic but not in the returned dict structure clearly.
+                # Actually, best_eval has "feasibility_rate" in the JSON payload logic but not in the returned dict structure clearly. 
                 # Let's look at how `last_feedback` was constructed in _run_cycle: 
                 # `feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))`
                 # `total_designs` came from `len(latest_by_design)`.
-                # We can approximately reconstruct it or just let the decay be 0 for the first pass if not critical.
-                # BUT, I can calculate it here if I assume total_designs is roughly comparable to what p3_summary holds.
+                # We can approximately reconstruct it or just let the decay be 0 for the first pass if not critical. 
+                # BUT, I can calculate it here if I assume total_designs is roughly comparable to what p3_summary holds. 
                 # `p3_summary` holds `pareto_entries` (tuple). 
-                # The simplest way is to trust that if feasible_count > 0, rate > 0.
-                # Let's check `p3_summary` fields.
+                # The simplest way is to trust that if feasible_count > 0, rate > 0. 
+                # Let's check `p3_summary` fields. 
                 pass
             
             # To properly implement decay, I need the rate. 

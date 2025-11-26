@@ -19,12 +19,6 @@ from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.utils import pytree
 
 
-# Ensure SurfaceRZFourier is registered as a JAX PyTree
-pytree.register_pydantic_data(
-    surface_module.SurfaceRZFourier,
-    meta_fields=["n_field_periods", "is_stellarator_symmetric"],
-)
-
 
 def _compute_index_mapping(
     boundary_template: Any,
