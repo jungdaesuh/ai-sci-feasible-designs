@@ -1855,72 +1855,117 @@ def _run_cycle(
         mp_context = multiprocessing.get_context("spawn") # Safer default for JAX/CUDA
         
         for k in range(num_alm_steps):
-            parametrization = nevergrad.p.Array(
-                init=np.array(state.x),
-                lower=np.array(state.x - state.bounds),
-                upper=np.array(state.x + state.bounds),
-            )
-            
-            # Inner Optimizer (NGOpt)
-            oracle = nevergrad.optimizers.NGOpt(
-                parametrization=parametrization,
-                budget=budget_per_step,
-                num_workers=1, # Keep it simple for now, avoid nested multiprocessing issues
-            )
-            oracle.suggest(np.array(state.x))
-            
-            # Inner loop execution
-            for _ in range(budget_per_step):
-                candidate = oracle.ask()
-                
-                # Eval using predictor if SA-ALM, else use full model
-                (obj, constr), metrics = _objective_constraints(
-                    jnp.array(candidate.value),
-                    scale,
-                    unravel_and_unmask_fn,
-                    fm_settings,
-                    cfg.problem,
-                    predictor=sa_alm_predictor
+            # V2: Differentiable Optimization
+            if cfg.surrogate_backend == "neural_operator" and isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
+                from ai_scientist.optim import differentiable
+                alm_state_dict = {
+                    "multipliers": np.array(state.multipliers),
+                    "penalty_parameters": np.array(state.penalty_parameters),
+                }
+                x_new_np = differentiable.optimize_alm_inner_loop(
+                    x_initial=np.array(state.x),
+                    scale=np.array(scale),
+                    surrogate=surrogate_model,
+                    alm_state=alm_state_dict,
+                    steps=budget_per_step,
                 )
+                x_new = jnp.array(x_new_np)
                 
-                # Capture candidate details
-                cand_boundary = unravel_and_unmask_fn(jnp.asarray(candidate.value * scale))
+                # Log the final result
+                (obj_new, constr_new), metrics = _objective_constraints(
+                    x_new, scale, unravel_and_unmask_fn, fm_settings, cfg.problem, predictor=sa_alm_predictor
+                )
+                cand_boundary = unravel_and_unmask_fn(jnp.asarray(x_new * scale))
                 cand_params = {
                     "r_cos": np.array(cand_boundary.r_cos).tolist(),
                     "z_sin": np.array(cand_boundary.z_sin).tolist(),
                     "n_field_periods": cand_boundary.n_field_periods,
                     "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
                 }
-                
-                # For SA-ALM, metrics will be None, so we rely on constraint violation from `constr`
-                # If using SA-ALM, max_viol comes from predicted_alm_constraints
                 if metrics:
                     p3_margins = tools.compute_constraint_margins(metrics, "p3")
                     max_viol = tools._max_violation(p3_margins)
-                else: # From predictor
-                    # The constraints from predictor are already "violations" (positive for violation)
-                    # max_viol is the maximum of these predicted constraint violations.
-                    max_viol = float(jnp.max(constr))
+                else:
+                    max_viol = float(jnp.max(constr_new))
                 
                 alm_candidates.append({
                     "seed": cfg.random_seed + cycle_index * 10000 + len(alm_candidates),
                     "params": cand_params,
                     "design_hash": tools.design_hash(cand_params),
                     "constraint_distance": max_viol,
-                    "source": optimizer_mode, # "alm_inner" or "sa-alm_inner"
-                    "evaluation": { # Fake evaluation dict to reuse existing tools
-                        "metrics": metrics.model_dump() if metrics else {}, # Can be empty if from predictor
-                        "feasibility": max_viol, # Using max_viol as proxy for feasibility
+                    "source": "sa-alm_diff",
+                    "evaluation": {
+                        "metrics": metrics.model_dump() if metrics else {},
+                        "feasibility": max_viol,
                         "stage": active_cfg.fidelity_ladder.promote
-                    } 
+                    }
                 })
 
-                loss = augmented_lagrangian_function(obj, constr, state).item()
-                oracle.tell(candidate, loss)
-            
-            # Update ALM state
-            recommendation = oracle.provide_recommendation()
-            x_new = jnp.array(recommendation.value)
+            else:
+                # V1: Nevergrad
+                parametrization = nevergrad.p.Array(
+                    init=np.array(state.x),
+                    lower=np.array(state.x - state.bounds),
+                    upper=np.array(state.x + state.bounds),
+                )
+                
+                # Inner Optimizer (NGOpt)
+                oracle = nevergrad.optimizers.NGOpt(
+                    parametrization=parametrization,
+                    budget=budget_per_step,
+                    num_workers=1, # Keep it simple for now, avoid nested multiprocessing issues
+                )
+                oracle.suggest(np.array(state.x))
+                
+                # Inner loop execution
+                for _ in range(budget_per_step):
+                    candidate = oracle.ask()
+                    
+                    # Eval using predictor if SA-ALM, else use full model
+                    (obj, constr), metrics = _objective_constraints(
+                        jnp.array(candidate.value),
+                        scale,
+                        unravel_and_unmask_fn,
+                        fm_settings,
+                        cfg.problem,
+                        predictor=sa_alm_predictor
+                    )
+                    
+                    # Capture candidate details
+                    cand_boundary = unravel_and_unmask_fn(jnp.asarray(candidate.value * scale))
+                    cand_params = {
+                        "r_cos": np.array(cand_boundary.r_cos).tolist(),
+                        "z_sin": np.array(cand_boundary.z_sin).tolist(),
+                        "n_field_periods": cand_boundary.n_field_periods,
+                        "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
+                    }
+                    
+                    # For SA-ALM, we need a functional metric check
+                    if metrics:
+                        p3_margins = tools.compute_constraint_margins(metrics, "p3")
+                        max_viol = tools._max_violation(p3_margins)
+                    else: 
+                        max_viol = float(jnp.max(constr))
+                    
+                    alm_candidates.append({
+                        "seed": cfg.random_seed + cycle_index * 10000 + len(alm_candidates),
+                        "params": cand_params,
+                        "design_hash": tools.design_hash(cand_params),
+                        "constraint_distance": max_viol,
+                        "source": optimizer_mode, 
+                        "evaluation": { 
+                            "metrics": metrics.model_dump() if metrics else {}, 
+                            "feasibility": max_viol, 
+                            "stage": active_cfg.fidelity_ladder.promote
+                        } 
+                    })
+
+                    loss = augmented_lagrangian_function(obj, constr, state).item()
+                    oracle.tell(candidate, loss)
+                
+                # Update ALM state
+                recommendation = oracle.provide_recommendation()
+                x_new = jnp.array(recommendation.value)
             
             # Periodically verify with true forward model if SA-ALM
             if optimizer_mode == "sa-alm" and k % 2 == 0: # Verify every N steps

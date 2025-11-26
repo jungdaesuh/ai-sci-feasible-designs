@@ -144,3 +144,84 @@ def gradient_descent_on_inputs(
         })
         
     return optimized_candidates
+
+
+def optimize_alm_inner_loop(
+    x_initial: np.ndarray,
+    scale: np.ndarray,
+    surrogate: NeuralOperatorSurrogate,
+    alm_state: Mapping[str, Any],
+    *,
+    steps: int = 10,
+    lr: float = 1e-2,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Optimize the ALM inner loop using gradient descent on the surrogate.
+
+    Args:
+        x_initial: Initial scaled parameters (Numpy).
+        scale: Scaling factors (Numpy).
+        surrogate: Differentiable surrogate model.
+        alm_state: Dictionary containing 'multipliers', 'penalty_parameters', 'constraints'.
+        steps: Number of optimization steps.
+        lr: Learning rate.
+        device: Device for optimization.
+
+    Returns:
+        Optimized scaled parameters (Numpy).
+    """
+    # Convert inputs to Torch
+    x_torch = torch.tensor(x_initial, dtype=torch.float32, device=device, requires_grad=True)
+    scale_torch = torch.tensor(scale, dtype=torch.float32, device=device)
+    
+    multipliers = torch.tensor(np.asarray(alm_state["multipliers"]), dtype=torch.float32, device=device)
+    penalty_params = torch.tensor(np.asarray(alm_state["penalty_parameters"]), dtype=torch.float32, device=device)
+    
+    optimizer = torch.optim.Adam([x_torch], lr=lr)
+    
+    # Feasibility cutoff for QI (from runner.py)
+    # FEASIBILITY_CUTOFF = 1e-2
+    # Ideally passed in, but hardcoding for now to match runner.
+    FEASIBILITY_CUTOFF = 1e-2 
+    
+    for _ in range(steps):
+        optimizer.zero_grad()
+        
+        # Unscale for prediction
+        x_unscaled = x_torch * scale_torch
+        
+        # Predict
+        # unsqueeze for batch dim
+        pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_unscaled.unsqueeze(0))
+        
+        obj = pred_obj.squeeze()
+        mhd = pred_mhd.squeeze()
+        qi = pred_qi.squeeze()
+        elo = pred_elo.squeeze()
+        
+        # Construct Constraint Vector (matching runner.py logic)
+        # runner.py:
+        # max(0, -mhd)
+        # max(0, qi - FEASIBILITY_CUTOFF)
+        # max(0, elongation - 5.0)
+        
+        c1 = torch.relu(-mhd)
+        c2 = torch.relu(qi - FEASIBILITY_CUTOFF)
+        c3 = torch.relu(elo - 5.0)
+        
+        constraints = torch.stack([c1, c2, c3])
+        
+        # ALM Loss Formula (PHR)
+        # value = objective + sum(0.5 * mu * (max(0, lambda/mu + c)^2 - (lambda/mu)^2))
+        
+        augmented_term = 0.5 * penalty_params * (
+            torch.relu(multipliers / penalty_params + constraints)**2 - 
+            (multipliers / penalty_params)**2
+        )
+        
+        loss = obj + torch.sum(augmented_term)
+        
+        loss.backward()
+        optimizer.step()
+        
+    return x_torch.detach().cpu().numpy()

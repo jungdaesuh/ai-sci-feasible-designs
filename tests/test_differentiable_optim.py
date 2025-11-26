@@ -69,5 +69,31 @@ class TestDifferentiableOptim(unittest.TestCase):
         # Ensure source is tagged
         self.assertEqual(optimized[0]["source"], "gradient_descent")
 
+    def test_optimize_alm_inner_loop(self):
+        # Setup inputs
+        x_initial = np.ones(10) # Dummy scaled params
+        scale = np.ones(10)
+        
+        alm_state = {
+            "multipliers": np.zeros(3),
+            "penalty_parameters": np.ones(3),
+            "constraints": np.zeros(3)
+        }
+        
+        # Run optimization
+        x_new = differentiable.optimize_alm_inner_loop(
+            x_initial=x_initial,
+            scale=scale,
+            surrogate=self.surrogate,
+            alm_state=alm_state,
+            steps=5,
+            lr=0.1
+        )
+        
+        # Check shape
+        self.assertEqual(x_new.shape, x_initial.shape)
+        # Check that it moved (Mock model gradients should push it)
+        self.assertFalse(np.allclose(x_new, x_initial), "ALM inner loop should update params")
+
 if __name__ == '__main__':
     unittest.main()

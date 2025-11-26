@@ -58,7 +58,7 @@ The current codebase is a robust, production-ready orchestration system ("Versio
 
 *   **3.1 Differentiable Optimizer:** Implement a "Gradient Descent on Inputs" loop.
     *   $\theta_{new} = \theta_{old} - \alpha \nabla_{\theta} \mathcal{L}(\text{Surrogate}(\theta))$
-*   **3.2 SA-ALM Upgrade:** Integrate the differentiable optimizer as the inner loop solver for the Augmented Lagrangian Method.
+*   **3.2 SA-ALM Upgrade:** [x] Integrate the differentiable optimizer as the inner loop solver for the Augmented Lagrangian Method.
 
 ### Phase 4: Exploration & Pareto Mapping
 *Goal: Discover novel designs and map trade-offs.*
@@ -131,3 +131,4 @@ else:
 - [x] **Decouple Runner:** Remove global `_SURROGATE_BUNDLE` in `runner.py` and implement the factory pattern.
 - [x] **Implement V2 Skeleton:** Create the placeholder class for `DeepSurrogate` to prove the A/B architecture works.
 - [x] **Implement Differentiable Optimizer:** Implement `gradient_descent_on_inputs` and integrate it into `runner.py` (Phase 3.1).
+- [x] **Integrate Differentiable ALM into Runner:** Complete Phase 3.2 by integrating the differentiable optimizer into the SA-ALM inner loop.
