@@ -130,5 +130,5 @@ else:
 - [x] **Refactor Config:** Update `config.py` to support backend flags.
 - [x] **Decouple Runner:** Remove global `_SURROGATE_BUNDLE` in `runner.py` and implement the factory pattern.
 - [x] **Implement V2 Skeleton:** Create the placeholder class for `DeepSurrogate` to prove the A/B architecture works.
-- [x] **Implement Differentiable Optimizer:** Implement `gradient_descent_on_inputs` and integrate it into `runner.py` (Phase 3.1).
-- [x] **Integrate Differentiable ALM into Runner:** Complete Phase 3.2 by integrating the differentiable optimizer into the SA-ALM inner loop.
+- [x] **Implement Physics Core (FNOs):** Implemented `StellaratorNeuralOp` in `surrogate_v2.py`.
+- [x] **Implement Differentiable Optimizer:** Implemented `optimize_alm_inner_loop` in `differentiable.py` and integrated into `runner.py`.
