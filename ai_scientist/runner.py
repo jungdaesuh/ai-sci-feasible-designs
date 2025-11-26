@@ -2386,7 +2386,10 @@ def _run_cycle(
             "import json, sqlite3\n"
             "from ai_scientist import tools\n"
             f"conn = sqlite3.connect('{cfg.memory_db}')\n"
-            "row = conn.execute(\"\n    'SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1',\n    ('{replay_entry.design_hash}',),\n").fetchone()\n"
+            "row = conn.execute(\n"
+            '    "SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1",\n'
+            f"    ('{replay_entry.design_hash}',),\n"
+            ").fetchone()\n"
             "assert row, 'Design hash not found in world model'\n"
             "params = json.loads(row[0])\n"
             f"print(tools.{tool_name}(params, stage='{replay_entry.stage or cfg.fidelity_ladder.promote}'))\n"
