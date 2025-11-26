@@ -435,6 +435,30 @@ def test_record_optimization_state_minimal(tmp_path):
         conn.close()
 
 
+def test_record_surrogate_checkpoint_rolls_back_on_failure(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p1"}, "rollbacksha")
+        with pytest.raises(RuntimeError):
+            with wm.transaction():
+                wm.record_surrogate_checkpoint(
+                    experiment_id=experiment_id,
+                    cycle=1,
+                    backend="test_backend",
+                    filepath="/tmp/test.pt",
+                    metrics={"some_metric": 1.0},
+                    commit=False,  # Ensure it doesn't commit by itself
+                )
+                raise RuntimeError("Simulated failure after checkpoint record")
+        
+        # Verify that no surrogate checkpoint was recorded
+        checkpoints_count = wm._conn.execute(
+            "SELECT COUNT(*) FROM surrogate_checkpoints"
+        ).fetchone()[0]
+        assert checkpoints_count == 0
+
+
+
 def test_record_surrogate_checkpoint_minimal(tmp_path):
     """Test recording surrogate checkpoint without optional fields."""
     db_path = tmp_path / "test_v2_surr_min.db"

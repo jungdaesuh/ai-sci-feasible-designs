@@ -497,26 +497,34 @@ class WorldModel:
             else None
         )
 
-        cursor = self._conn.execute(
-            """
-            INSERT INTO surrogate_checkpoints
-            (experiment_id, cycle, backend, filepath, metrics_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                experiment_id,
-                cycle,
-                backend,
-                str(filepath),
-                metrics_json,
-                timestamp,
-            ),
-        )
-        checkpoint_id = cursor.lastrowid
-        assert checkpoint_id is not None
+        def _write() -> None:
+            nonlocal checkpoint_id
+            cursor = self._conn.execute(
+                """
+                INSERT INTO surrogate_checkpoints
+                (experiment_id, cycle, backend, filepath, metrics_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    cycle,
+                    backend,
+                    str(filepath),
+                    metrics_json,
+                    timestamp,
+                ),
+            )
+            checkpoint_id = cursor.lastrowid
+            assert checkpoint_id is not None
 
+        checkpoint_id: int | None = None
         if commit:
-            self._conn.commit()
+            with self._conn:
+                _write()
+        else:
+            _write()
+
+        assert checkpoint_id is not None
         return checkpoint_id
 
     def record_cycle_summary(
