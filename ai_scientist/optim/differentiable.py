@@ -18,6 +18,13 @@ from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.utils import pytree
 
+# Register SurfaceRZFourier as a Pytree to ensure JAX compatibility
+# (In case the installed constellaration library hasn't registered it yet)
+# We treat scalar metadata as meta_fields so they aren't traversed by mask_and_ravel
+pytree.register_pydantic_data(
+    surface_module.SurfaceRZFourier, 
+    meta_fields=["n_field_periods", "is_stellarator_symmetric"]
+)
 
 
 def _compute_index_mapping(
@@ -158,8 +165,13 @@ def gradient_descent_on_inputs(
             x_dense = torch.zeros(dense_size, device=device, dtype=x_torch.dtype)
             x_dense[dense_indices] = x_torch
             
+            # Append n_field_periods
+            nfp_val = float(boundary.n_field_periods)
+            nfp_tensor = torch.tensor([nfp_val], device=device, dtype=x_torch.dtype)
+            x_input = torch.cat([x_dense, nfp_tensor], dim=0)
+            
             # Predict
-            pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_dense.unsqueeze(0))
+            pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_input.unsqueeze(0))
             
             # Loss Formulation
             loss_obj = pred_obj.squeeze()
@@ -256,8 +268,12 @@ def optimize_alm_inner_loop(
         x_dense = torch.zeros(dense_size, device=device, dtype=x_torch.dtype)
         x_dense[dense_indices] = x_unscaled
         
+        # Append n_field_periods (MockTemplate uses 1)
+        nfp_tensor = torch.tensor([1.0], device=device, dtype=x_torch.dtype)
+        x_input = torch.cat([x_dense, nfp_tensor], dim=0)
+        
         # Predict
-        pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_dense.unsqueeze(0))
+        pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_input.unsqueeze(0))
         
         obj = pred_obj.squeeze()
         mhd = pred_mhd.squeeze()

@@ -47,7 +47,7 @@ class TestDifferentiableOptim(unittest.TestCase):
                 # return obj, mhd, qi, elo
                 return out[:, 0], out[:, 1], out[:, 2], out[:, 3]
 
-        self.surrogate._model = DummyModel()
+        self.surrogate._models = [DummyModel()]
         
         # Mock Config
         self.cfg = MagicMock(spec=ai_config.ExperimentConfig)
