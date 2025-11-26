@@ -40,11 +40,10 @@ class StellaratorNeuralOp(nn.Module):
        This provides approximate SE(3) invariance and physical grounding.
     """
 
-    def __init__(self, mpol: int, ntor: int, nfp: int = 1, hidden_dim: int = 64):
+    def __init__(self, mpol: int, ntor: int, hidden_dim: int = 64):
         super().__init__()
         self.mpol = mpol
         self.ntor = ntor
-        self.nfp = nfp
         self.grid_h = mpol + 1
         self.grid_w = 2 * ntor + 1
         self.input_channels = 2  # r_cos, z_sin
@@ -65,8 +64,9 @@ class StellaratorNeuralOp(nn.Module):
 
         # 2. Geometric Branch (Operating on 3D Point Cloud)
         # We use a modest grid for the surrogate to keep training fast.
+        # Increased to 64 total points to cover full torus adequately
         self.geo_n_theta = 16
-        self.geo_n_zeta = 16
+        self.geo_n_zeta = 64 
         self.geo_dim = 128
         self.geo_encoder = equivariance.PointNetEncoder(embedding_dim=self.geo_dim, align_input=True)
 
@@ -88,14 +88,19 @@ class StellaratorNeuralOp(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1))
+            x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1) + 1)
+               The last element is n_field_periods.
         """
         batch_size = x.shape[0]
         
+        # Extract NFP (last column)
+        nfp_batch = x[:, -1]
+        x_spectral = x[:, :-1]
+        
         # --- Spectral Branch ---
         half_size = self.grid_h * self.grid_w
-        r_cos_flat = x[:, :half_size]
-        z_sin_flat = x[:, half_size:]
+        r_cos_flat = x_spectral[:, :half_size]
+        z_sin_flat = x_spectral[:, half_size:]
 
         r_cos_grid = r_cos_flat.view(batch_size, 1, self.grid_h, self.grid_w)
         z_sin_grid = z_sin_flat.view(batch_size, 1, self.grid_h, self.grid_w)
@@ -110,9 +115,10 @@ class StellaratorNeuralOp(nn.Module):
         z_sin_in = z_sin_grid.squeeze(1)
         
         # Generate Point Cloud (Differentiable)
+        # Pass nfp_batch (Tensor) -> n_zeta becomes total points over 2pi
         R, Z, Phi = geometry.batch_fourier_to_real_space(
             r_cos_in, z_sin_in, 
-            n_field_periods=self.nfp,
+            n_field_periods=nfp_batch,
             n_theta=self.geo_n_theta,
             n_zeta=self.geo_n_zeta
         )
@@ -175,7 +181,6 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._model: StellaratorNeuralOp | None = None
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
-        self._nfp: int | None = None
 
     def fit(
         self,
@@ -207,18 +212,19 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         # 1. Prepare Data
         features_list = []
         
-        # Capture schema and nfp from the first item if not set
+        # Capture schema from the first item if not set
         for i, metrics in enumerate(metrics_list):
             params = metrics.get("candidate_params") or metrics.get("params", {})
             
-            if i == 0:
-                if self._nfp is None:
-                    self._nfp = int(params.get("n_field_periods") or params.get("nfp", 1))
-
             vector, schema = tools.structured_flatten(params, schema=self._schema)
             if self._schema is None:
                 self._schema = schema
-            features_list.append(vector)
+            
+            # Append n_field_periods
+            nfp = float(params.get("n_field_periods") or params.get("nfp", 1))
+            vector_aug = np.append(vector, nfp)
+            
+            features_list.append(vector_aug)
             
         if not features_list:
             return
@@ -242,13 +248,13 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
         # 2. Initialize Model if needed
+        # Check dimensions match schema (ignoring appended nfp which is handled in forward)
         if self._model is None or self._model.mpol != self._schema.mpol or self._model.ntor != self._schema.ntor:
-            logging.info("[surrogate_v2] Initializing StellaratorNeuralOp with mpol=%d, ntor=%d, nfp=%d", 
-                         self._schema.mpol, self._schema.ntor, self._nfp)
+            logging.info("[surrogate_v2] Initializing StellaratorNeuralOp with mpol=%d, ntor=%d", 
+                         self._schema.mpol, self._schema.ntor)
             self._model = StellaratorNeuralOp(
                 mpol=self._schema.mpol, 
-                ntor=self._schema.ntor,
-                nfp=self._nfp or 1
+                ntor=self._schema.ntor
             ).to(self._device)
             self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
 
@@ -333,7 +339,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             params = candidate.get("candidate_params") or candidate.get("params", {})
             # Use the stored schema to ensure consistency
             vec, _ = tools.structured_flatten(params, schema=self._schema)
-            vectors.append(vec)
+            
+            # Append n_field_periods
+            nfp = float(params.get("n_field_periods") or params.get("nfp", 1))
+            vec_aug = np.append(vec, nfp)
+            
+            vectors.append(vec_aug)
             
         X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
         

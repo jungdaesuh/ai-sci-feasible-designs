@@ -91,9 +91,14 @@ def test_model_forward_shape():
     mpol, ntor = 3, 3
     model = StellaratorNeuralOp(mpol=mpol, ntor=ntor)
     
-    input_dim = 2 * (mpol + 1) * (2 * ntor + 1)
+    # Input dim includes +1 for n_field_periods
+    spectral_dim = 2 * (mpol + 1) * (2 * ntor + 1)
+    input_dim = spectral_dim + 1
     batch_size = 4
+    
     x = torch.randn(batch_size, input_dim)
+    # Set nfp (last column) to valid positive integers
+    x[:, -1] = torch.randint(1, 5, (batch_size,)).float()
     
     obj, mhd, qi, elong = model(x)
     

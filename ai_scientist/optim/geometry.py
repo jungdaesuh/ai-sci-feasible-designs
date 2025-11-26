@@ -123,7 +123,7 @@ def fourier_to_real_space(
 def batch_fourier_to_real_space(
     r_cos: torch.Tensor,
     z_sin: torch.Tensor,
-    n_field_periods: int,
+    n_field_periods: int | torch.Tensor,
     n_theta: int = 32,
     n_zeta: int = 32,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -133,7 +133,9 @@ def batch_fourier_to_real_space(
     Args:
         r_cos: (Batch, mpol+1, 2*ntor+1)
         z_sin: (Batch, mpol+1, 2*ntor+1)
-        n_field_periods: Nfp.
+        n_field_periods: Nfp. Can be int (fixed) or Tensor (Batch,).
+                         If Tensor, n_zeta is TOTAL points over [0, 2pi].
+                         If int, n_zeta is points PER PERIOD (legacy).
         
     Returns:
         R, Z, Phi with shape (Batch, n_theta, n_zeta_total)
@@ -146,42 +148,31 @@ def batch_fourier_to_real_space(
     device = r_cos.device
     pi = torch.pi
     
-    theta = torch.linspace(0, 2 * pi, n_theta + 1, device=device)[:-1]
-    zeta_one = torch.linspace(0, 2 * pi / n_field_periods, n_zeta + 1, device=device)[:-1]
+    is_variable_nfp = isinstance(n_field_periods, torch.Tensor)
     
-    zeta_list = [zeta_one + i * (2 * pi / n_field_periods) for i in range(n_field_periods)]
-    zeta = torch.cat(zeta_list) # (n_zeta_total,)
+    if is_variable_nfp:
+        # n_zeta is total points over [0, 2pi]
+        # We generate a fixed grid for the whole torus
+        zeta = torch.linspace(0, 2 * pi, n_zeta + 1, device=device)[:-1] # (n_zeta,)
+        
+        # Ensure n_field_periods is (Batch, 1, 1) for broadcasting
+        nfp_tensor = n_field_periods.view(batch_size, 1, 1)
+    else:
+        # Legacy mode: n_zeta per period
+        zeta_one = torch.linspace(0, 2 * pi / n_field_periods, n_zeta + 1, device=device)[:-1]
+        zeta_list = [zeta_one + i * (2 * pi / n_field_periods) for i in range(n_field_periods)]
+        zeta = torch.cat(zeta_list) # (n_zeta * nfp,)
+        nfp_tensor = float(n_field_periods) # Scalar broadcast
+    
+    theta = torch.linspace(0, 2 * pi, n_theta + 1, device=device)[:-1]
     
     # (1, n_theta, 1)
     theta_grid = theta.view(1, n_theta, 1)
     # (1, 1, n_zeta_total)
     zeta_grid = zeta.view(1, 1, -1)
     
-    # Precompute basis functions? 
-    # Angle: m*theta - n*Nfp*zeta
-    # We can sum over m, n efficiently using einsum or just loop accumulation if m,n are small.
-    # Given mpol~8, ntor~8, loop is fine, but let's try to be vectorized over grid if possible.
-    # R = sum_{m,n} C_{b,m,n} * cos(m*t - n*Nfp*z)
-    
     R = torch.zeros(batch_size, n_theta, zeta.size(0), device=device)
     Z = torch.zeros_like(R)
-    
-    # We can construct the full basis matrix (Modes, Theta, Zeta) and use matmul.
-    # Modes count: (mpol+1)*(2*ntor+1).
-    # Grid count: n_theta * n_zeta_total.
-    # Matrix multiplication: (B, Modes) @ (Modes, Grid) -> (B, Grid).
-    
-    # Flatten modes
-    # r_cos: (B, M, N) -> (B, M*N)
-    
-    # Build Basis Matrix (Modes, Theta, Zeta) -> (Modes, GridPoints)
-    # But Theta and Zeta are separable? No, cos(m*t - n*z).
-    
-    # Let's just loop for memory efficiency, broadcasting over batch and grid.
-    # Accumulate into R, Z.
-    
-    # angle (1, T, Z)
-    # r_cos[:, m, n] -> (B, 1, 1)
     
     for m in range(mpol + 1):
         # m*theta term
@@ -190,9 +181,10 @@ def batch_fourier_to_real_space(
         for n_idx in range(2 * ntor + 1):
             n = n_idx - ntor
             # n*Nfp*zeta term
-            n_zeta_term = n * n_field_periods * zeta_grid # (1, 1, Z)
+            # If nfp is tensor: (B, 1, 1) * (1, 1, Z) -> (B, 1, Z)
+            n_zeta_term = n * nfp_tensor * zeta_grid 
             
-            angle = m_theta - n_zeta_term # (1, T, Z)
+            angle = m_theta - n_zeta_term # (B, T, Z)
             
             cos_angle = torch.cos(angle)
             sin_angle = torch.sin(angle)
