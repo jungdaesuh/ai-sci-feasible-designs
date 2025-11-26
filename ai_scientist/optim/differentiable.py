@@ -224,6 +224,7 @@ def optimize_alm_inner_loop(
     surrogate: NeuralOperatorSurrogate,
     alm_state: Mapping[str, Any],
     *,
+    n_field_periods_val: int,
     steps: int = 10,
     lr: float = 1e-2,
     device: str = "cpu",
@@ -236,12 +237,12 @@ def optimize_alm_inner_loop(
     mpol = surrogate._schema.mpol
     ntor = surrogate._schema.ntor
     
-    # Create a temporary template config wrapper to satisfy the helper signature
-    class MockTemplate:
-        n_field_periods = 1 
+    class DummyTemplate:
+        def __init__(self, n_field_periods):
+            self.n_field_periods = n_field_periods
 
     dense_indices, dense_size = _compute_index_mapping(
-        MockTemplate(),
+        DummyTemplate(n_field_periods_val),
         max_poloidal=mpol,
         max_toroidal=ntor,
         device=device
@@ -268,8 +269,8 @@ def optimize_alm_inner_loop(
         x_dense = torch.zeros(dense_size, device=device, dtype=x_torch.dtype)
         x_dense[dense_indices] = x_unscaled
         
-        # Append n_field_periods (MockTemplate uses 1)
-        nfp_tensor = torch.tensor([1.0], device=device, dtype=x_torch.dtype)
+        # Append n_field_periods
+        nfp_tensor = torch.tensor([float(n_field_periods_val)], device=device, dtype=x_torch.dtype)
         x_input = torch.cat([x_dense, nfp_tensor], dim=0)
         
         # Predict
