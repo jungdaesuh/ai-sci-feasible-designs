@@ -172,8 +172,8 @@ class GovernanceConfig:
 class ProposalMixConfig:
     constraint_ratio: float
     exploration_ratio: float
-    exploitation_ratio: float = 0.0 # Added exploitation_ratio
-    jitter_scale: float
+    jitter_scale: float = 0.01 # Add default to match _proposal_mix_from_dict
+    exploitation_ratio: float = 0.0
     surrogate_pool_multiplier: float = 2.0
     sampler_type: str = "standard"
 

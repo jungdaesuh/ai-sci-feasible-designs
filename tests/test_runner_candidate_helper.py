@@ -112,11 +112,16 @@ def test_propose_p3_candidates_mixes_sampler_and_random() -> None:
             exploration_ratio=0.3,
             jitter_scale=0.005,
         ),
-        reporting_dir=Path("."),
-        memory_db=Path("reports/ai_scientist.sqlite"),
-        source_config=Path("configs/experiment.example.yaml"),
-    )
-
+                    reporting_dir=Path("."),
+                    memory_db=Path("reports/ai_scientist.sqlite"),
+                    source_config=Path("configs/experiment.example.yaml"),
+                    constraint_weights=ai_config.ConstraintWeightsConfig(
+                        mhd=1.0,
+                        qi=1.0,
+                        elongation=1.0,
+                    ),
+                    initialization_strategy="template",
+                )
     world_model = _FakeWorldModel()
     candidates, sampler_count, random_count = runner._propose_p3_candidates_for_cycle(
         cfg,
@@ -176,11 +181,16 @@ def test_surrogate_ranker_prefers_high_hv_candidates() -> None:
             exploration_ratio=0.3,
             jitter_scale=0.005,
         ),
-        reporting_dir=Path("."),
-        memory_db=Path("reports/ai_scientist.sqlite"),
-        source_config=Path("configs/experiment.example.yaml"),
-    )
-
+                    reporting_dir=Path("."),
+                    memory_db=Path("reports/ai_scientist.sqlite"),
+                    source_config=Path("configs/experiment.example.yaml"),
+                    constraint_weights=ai_config.ConstraintWeightsConfig(
+                        mhd=1.0,
+                        qi=1.0,
+                        elongation=1.0,
+                    ),
+                    initialization_strategy="template",
+                )
     candidates: list[Mapping[str, Any]] = []
     for idx, value in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 2.5)):
         params = {
@@ -253,11 +263,16 @@ def test_surrogate_candidate_pool_size_allows_zero() -> None:
             exploration_ratio=0.0,
             jitter_scale=0.0,
         ),
-        reporting_dir=Path("."),
-        memory_db=Path("reports/ai_scientist.sqlite"),
-        source_config=Path("configs/experiment.example.yaml"),
-    )
-
+                    reporting_dir=Path("."),
+                    memory_db=Path("reports/ai_scientist.sqlite"),
+                    source_config=Path("configs/experiment.example.yaml"),
+                    constraint_weights=ai_config.ConstraintWeightsConfig(
+                        mhd=1.0,
+                        qi=1.0,
+                        elongation=1.0,
+                    ),
+                    initialization_strategy="template",
+                )
     assert (
         runner._surrogate_candidate_pool_size(
             cfg.budgets.screen_evals_per_cycle,

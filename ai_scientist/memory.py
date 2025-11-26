@@ -1157,6 +1157,9 @@ class WorldModel:
                 params_payload = None
             if params_payload is not None:
                 metrics_payload["candidate_params"] = params_payload
+            # Inject feasibility so runner's restoration logic sees it (P1 fix)
+            if row["feasibility"] is not None:
+                metrics_payload["feasibility"] = float(row["feasibility"])
             history.append((metrics_payload, float(value)))
         return history
 

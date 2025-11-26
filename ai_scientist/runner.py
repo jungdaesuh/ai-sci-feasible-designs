@@ -35,7 +35,7 @@ from ai_scientist import tools
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
 from constellaration.geometry import surface_rz_fourier as surface_module
-from constellaration.initial_guess import generate_nae
+from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
     AugmentedLagrangianState,
     AugmentedLagrangianSettings,
@@ -1662,7 +1662,7 @@ def _run_cycle(
         max_high_fidelity_evals_per_cycle=budget_snapshot.max_high_fidelity_evals_per_cycle,
     )
     
-    # [Fix P1] Re-apply agent overrides if they exist, as snapshot() clobbered them.
+    # Re-apply agent overrides if they exist, as snapshot() clobbered them.
     if config_overrides and "budgets" in config_overrides:
         active_budgets = replace(active_budgets, **config_overrides["budgets"])
         if runtime and runtime.verbose:
@@ -1671,13 +1671,13 @@ def _run_cycle(
     if active_cfg.adaptive_budgets.enabled and runtime and runtime.verbose:
         print(
             f"[runner][budget] cycle={cycle_number} override "
-            f"screen={budget_snapshot.screen_evals_per_cycle} "
-            f"promote_top_k={budget_snapshot.promote_top_k} "
-            f"max_high_fidelity={budget_snapshot.max_high_fidelity_evals_per_cycle}"
+            f"screen={active_budgets.screen_evals_per_cycle} "
+            f"promote_top_k={active_budgets.promote_top_k} "
+            f"max_high_fidelity={active_budgets.max_high_fidelity_evals_per_cycle}"
         )
     cache_hit_rate = 0.0
     pool_size = _surrogate_candidate_pool_size(
-        budget_snapshot.screen_evals_per_cycle,
+        active_budgets.screen_evals_per_cycle,
         active_cfg.proposal_mix.surrogate_pool_multiplier,
     )
     sampler_count = 0
@@ -1802,7 +1802,7 @@ def _run_cycle(
         
         alm_candidates: list[Mapping[str, Any]] = []
         budget_per_step = 8 # Inner evaluations per ALM step
-        num_alm_steps = max(1, budget_snapshot.screen_evals_per_cycle // budget_per_step)
+        num_alm_steps = max(1, active_budgets.screen_evals_per_cycle // budget_per_step)
         
         mp_context = multiprocessing.get_context("spawn") # Safer default for JAX/CUDA
         
@@ -1932,6 +1932,7 @@ def _run_cycle(
                 )
 
         candidate_pool = alm_candidates
+        candidates = list(alm_candidates)
     # END ALM_BLOCK_PLACEHOLDER
     
     elif pool_size <= 0:
@@ -1947,7 +1948,7 @@ def _run_cycle(
             cycle_index,
             world_model,
             experiment_id,
-            screen_budget=budget_snapshot.screen_evals_per_cycle,
+            screen_budget=active_budgets.screen_evals_per_cycle,
             total_candidates=pool_size,
             prev_feasibility_rate=prev_feasibility_rate,
             suggested_params=suggested_params,
@@ -1958,7 +1959,7 @@ def _run_cycle(
             )
         candidates = _surrogate_rank_screen_candidates(
             active_cfg,
-            budget_snapshot.screen_evals_per_cycle,
+            active_budgets.screen_evals_per_cycle,
             candidate_pool,
             world_model,
             cycle=cycle_number,
@@ -2083,7 +2084,7 @@ def _run_cycle(
         vmec_failure_rate=vmec_failure_rate,
         retrain_time=_LAST_SURROGATE_FIT_SEC,
         cache_hit_rate=cache_hit_rate,
-        budget_snapshot=budget_snapshot,
+        budget_snapshot=active_budgets,
     )
     
     if cfg.reporting.get("prometheus_export_enabled", False):
