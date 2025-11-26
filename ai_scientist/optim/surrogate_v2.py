@@ -1,14 +1,18 @@
 """Version 2.0 Surrogate: Neural Operator & Geometric Deep Learning.
 
-This module implements the skeleton for the Physics-Informed Surrogate (Phase 2)
-of the AI Scientist V2 upgrade. It currently serves as a placeholder/interface
-that allows the A/B testing architecture to be established before the full
-Deep Learning stack (e3nn/FNO) is integrated.
+This module implements the Physics-Informed Surrogate (Phase 2) of the AI Scientist V2 upgrade.
+It uses a Deep Learning model (StellaratorNeuralOp) operating directly on the Fourier
+boundary coefficients to predict objective values and feasibility metrics.
 
-Future Implementation (Phase 2.2+):
-- Inputs: 3D Boundary Surfaces (Point Clouds / Fourier Coefficients).
-- Architecture: Equivariant Neural Operators (e3nn) + GNNs.
-- Outputs: Predicted Magnetic Fields (B), Metrics (MHD, QI), and Gradients.
+Implementation Details:
+- Inputs: Flattened Fourier coefficients (r_cos, z_sin).
+- Architecture: "Spectral" Convolutional Network.
+  - Reshapes flattened inputs back to (2, mpol+1, 2*ntor+1) grids.
+  - Applies 2D Convolutions (effectively mixing modes in frequency domain).
+  - MLP heads for specific scalar outputs (Objective, MHD, QI, Elongation).
+- Equivariance: Operates on the spectral representation which implicitly handles toroidal symmetry.
+  Full SE(3) equivariance would require e3nn (currently unavailable), so we focus on
+  spectral convolutions as the "Neural Operator" component.
 """
 
 from __future__ import annotations
@@ -16,49 +20,136 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
-# We will reuse the prediction dataclass for compatibility with the runner
+from ai_scientist import tools
 from ai_scientist.optim.surrogate import SurrogatePrediction
 
 
-class MockNeuralOp(nn.Module):
-    """A simple differentiable mock model for A/B testing."""
-    def __init__(self, input_dim: int = 10):
+class StellaratorNeuralOp(nn.Module):
+    """Spectral Convolutional Neural Operator for Stellarator Geometries.
+
+    Treats the Fourier coefficients (m, n) as a 2D grid and applies convolutions
+    to learn interactions between modes, followed by dense heads for metric prediction.
+    """
+
+    def __init__(self, mpol: int, ntor: int, hidden_dim: int = 64):
         super().__init__()
-        # Simple linear model to provide gradients
-        self.linear = nn.Linear(input_dim, 3) # [objective, mhd, qi]
+        self.mpol = mpol
+        self.ntor = ntor
+        self.grid_h = mpol + 1
+        self.grid_w = 2 * ntor + 1
+        self.input_channels = 2  # r_cos, z_sin
+
+        # "Spectral" Convolutions (operating on coefficient grid)
+        self.conv_net = nn.Sequential(
+            nn.Conv2d(self.input_channels, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+        )
+
+        # Global pooling to aggregate spectral features
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        # Multi-head output
+        self.head_base = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+
+        self.head_objective = nn.Linear(hidden_dim, 1)
+        self.head_mhd = nn.Linear(hidden_dim, 1)
+        self.head_qi = nn.Linear(hidden_dim, 1)
+        self.head_elongation = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1))
+        """
+        batch_size = x.shape[0]
+        expected_size = 2 * self.grid_h * self.grid_w
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
+        if x.shape[1] != expected_size:
+            # Fallback or error if dimension mismatch (e.g. schema change)
+            # For robustness, we might pad or truncate, but here we assume consistency.
+            pass
+
+        # Reshape to (Batch, 2, mpol+1, 2*ntor+1)
+        # The flattening order in tools.structured_flatten is:
+        # r_cos (m=0..mpol, n=-ntor..ntor), then z_sin (m=0..mpol, n=-ntor..ntor)
+        # We need to be careful to match this layout.
+        
+        # Split into r_cos and z_sin parts
+        half_size = self.grid_h * self.grid_w
+        r_cos_flat = x[:, :half_size]
+        z_sin_flat = x[:, half_size:]
+
+        r_cos_grid = r_cos_flat.view(batch_size, 1, self.grid_h, self.grid_w)
+        z_sin_grid = z_sin_flat.view(batch_size, 1, self.grid_h, self.grid_w)
+
+        # Stack channels
+        spectral_grid = torch.cat([r_cos_grid, z_sin_grid], dim=1) # (B, 2, H, W)
+
+        # Convolve
+        features = self.conv_net(spectral_grid) # (B, hidden, H, W)
+        
+        # Pool
+        pooled = self.global_pool(features).view(batch_size, -1) # (B, hidden)
+        
+        # Heads
+        base = self.head_base(pooled)
+        
+        pred_obj = self.head_objective(base).squeeze(-1)
+        pred_mhd = self.head_mhd(base).squeeze(-1)
+        pred_qi = self.head_qi(base).squeeze(-1)
+        pred_elong = self.head_elongation(base).squeeze(-1)
+
+        return pred_obj, pred_mhd, pred_qi, pred_elong
 
 
 class NeuralOperatorSurrogate:
-    """Deep Learning Surrogate (V2) Skeleton.
+    """Deep Learning Surrogate (V2) using PyTorch.
     
-    Currently a pass-through/mock implementation to validate the A/B runner architecture.
+    Uses StellaratorNeuralOp to predict metrics from boundary coefficients.
     """
 
     def __init__(
         self,
         *,
-        min_samples: int = 32,  # DL usually needs more data
+        min_samples: int = 32,
         points_cadence: int = 64,
         cycle_cadence: int = 5,
-        device: str = "cpu",  # "cuda" or "cpu"
+        device: str = "cpu",
+        learning_rate: float = 1e-3,
+        epochs: int = 100,
+        batch_size: int = 32,
     ) -> None:
         self._min_samples = min_samples
         self._points_cadence = points_cadence
         self._cycle_cadence = cycle_cadence
-        self._device = device
+        self._device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
+        self._lr = learning_rate
+        self._epochs = epochs
+        self._batch_size = batch_size
         
         self._trained = False
         self._last_fit_count = 0
         self._last_fit_cycle = 0
         
-        # Placeholder for the actual Neural Network
-        self._model = MockNeuralOp().to(device)
+        self._model: StellaratorNeuralOp | None = None
+        self._schema: tools.FlattenSchema | None = None
+        self._optimizer: optim.Optimizer | None = None
 
     def fit(
         self,
@@ -68,14 +159,7 @@ class NeuralOperatorSurrogate:
         minimize_objective: bool,
         cycle: int | None = None,
     ) -> None:
-        """Train the Neural Operator on the accumulated history.
-        
-        Args:
-            metrics_list: List of evaluation dictionaries (containing params/metrics).
-            target_values: Target scalar values (e.g. HV or Objective).
-            minimize_objective: Whether the target should be minimized.
-            cycle: Current generation cycle.
-        """
+        """Train the Neural Operator on the accumulated history."""
         sample_count = len(metrics_list)
         self._last_fit_count = sample_count
         if cycle is not None:
@@ -90,16 +174,81 @@ class NeuralOperatorSurrogate:
             return
 
         logging.info(
-            "[surrogate_v2] Mock Training Neural Operator on %d samples (Device: %s)...", 
+            "[surrogate_v2] Training Neural Operator on %d samples (Device: %s)...", 
             sample_count, self._device
         )
+
+        # 1. Prepare Data
+        features_list = []
         
-        # TODO (Phase 2.2): 
-        # 1. Convert metrics_list params to Tensor Point Clouds / Fourier Coeffs.
-        # 2. Instantiate/Reset the FNO/GNN model.
-        # 3. Run training loop (Gradient Descent).
-        # For now, we just mark it as trained so we can test the optimizer.
+        # Capture schema from the first item if not set (or update it? NO, we must enforce consistent schema)
+        # Usually schema should be fixed for a run. We'll derive it from the data.
+        # Note: If data has mixed schemas, this might break. We assume consistent history.
         
+        for metrics in metrics_list:
+            params = metrics.get("candidate_params") or metrics.get("params", {})
+            vector, schema = tools.structured_flatten(params, schema=self._schema)
+            if self._schema is None:
+                self._schema = schema
+            features_list.append(vector)
+            
+        if not features_list:
+            return
+
+        X = torch.tensor(np.vstack(features_list), dtype=torch.float32).to(self._device)
+        y_obj = torch.tensor(target_values, dtype=torch.float32).to(self._device)
+        
+        # Auxiliary targets
+        y_mhd_list, y_qi_list, y_elong_list = [], [], []
+        for metrics in metrics_list:
+            m_payload = metrics.get("metrics", metrics)
+            y_mhd_list.append(float(m_payload.get("vacuum_well", -1.0)))
+            y_qi_list.append(float(m_payload.get("qi", 1.0)))
+            y_elong_list.append(float(m_payload.get("max_elongation", 10.0)))
+            
+        y_mhd = torch.tensor(y_mhd_list, dtype=torch.float32).to(self._device)
+        y_qi = torch.tensor(y_qi_list, dtype=torch.float32).to(self._device)
+        y_elong = torch.tensor(y_elong_list, dtype=torch.float32).to(self._device)
+
+        dataset = TensorDataset(X, y_obj, y_mhd, y_qi, y_elong)
+        loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
+
+        # 2. Initialize Model if needed
+        if self._model is None or self._model.mpol != self._schema.mpol or self._model.ntor != self._schema.ntor:
+            logging.info("[surrogate_v2] Initializing StellaratorNeuralOp with mpol=%d, ntor=%d", 
+                         self._schema.mpol, self._schema.ntor)
+            self._model = StellaratorNeuralOp(
+                mpol=self._schema.mpol, 
+                ntor=self._schema.ntor
+            ).to(self._device)
+            self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
+
+        # 3. Train Loop
+        self._model.train()
+        criterion = nn.MSELoss()
+        
+        for epoch in range(self._epochs):
+            epoch_loss = 0.0
+            for xb, yb_obj, yb_mhd, yb_qi, yb_elong in loader:
+                self._optimizer.zero_grad()
+                pred_obj, pred_mhd, pred_qi, pred_elong = self._model(xb)
+                
+                # Multi-task loss
+                loss = (
+                    criterion(pred_obj, yb_obj) + 
+                    0.5 * criterion(pred_mhd, yb_mhd) + 
+                    0.5 * criterion(pred_qi, yb_qi) + 
+                    0.5 * criterion(pred_elong, yb_elong)
+                )
+                
+                loss.backward()
+                self._optimizer.step()
+                epoch_loss += loss.item()
+            
+            # Optional: Early stopping or logging
+            # if epoch % 10 == 0:
+            #    logging.debug(f"Epoch {epoch}: loss {epoch_loss:.4f}")
+
         self._trained = True
 
     def should_retrain(self, sample_count: int, cycle: int | None = None) -> bool:
@@ -116,30 +265,15 @@ class NeuralOperatorSurrogate:
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
     def predict_torch(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Differentiable prediction for optimization loop.
+        """Differentiable prediction for optimization loop."""
+        if self._model is None:
+            raise RuntimeError("NeuralOperatorSurrogate not initialized/trained")
         
-        Args:
-            x: Input tensor (flattened geometry parameters).
+        # Ensure we are on the right device
+        if x.device != torch.device(self._device):
+            x = x.to(self._device)
             
-        Returns:
-            Tuple of (objective, mhd, qi, elongation) tensors.
-        """
-        # Ensure input dimensionality matches mock model if needed, or resize/adapt
-        # For the mock, we just project to correct size or ignore
-        if x.shape[-1] != self._model.linear.in_features:
-            # Dynamic adaptation for mock purposes
-            self._model.linear = nn.Linear(x.shape[-1], 3).to(self._device)
-            
-        out = self._model(x)
-        # out: [batch, 3] -> objective, mhd, qi
-        
-        # Mock values
-        pred_objective = out[..., 0]
-        pred_mhd = out[..., 1]
-        pred_qi = torch.sigmoid(out[..., 2]) # QI usually > 0
-        pred_elongation = torch.tensor(1.5, device=self._device, requires_grad=True) # Constant for now
-        
-        return pred_objective, pred_mhd, pred_qi, pred_elongation
+        return self._model(x)
 
     def rank_candidates(
         self,
@@ -148,55 +282,79 @@ class NeuralOperatorSurrogate:
         minimize_objective: bool,
         exploration_ratio: float = 0.0,
     ) -> list[SurrogatePrediction]:
-        """Rank candidates using the Deep Surrogate (Forward Pass)."""
+        """Rank candidates using the Deep Surrogate."""
         if not candidates:
             return []
+            
+        if not self._trained or self._model is None:
+            # Fallback to heuristic if not trained
+            logging.info("[surrogate_v2] Model not trained, using heuristics")
+            cold_ranks: list[SurrogatePrediction] = []
+            for candidate in candidates:
+                # Just give 0 scores
+                cold_ranks.append(SurrogatePrediction(
+                    expected_value=0.0, prob_feasible=0.0, predicted_objective=0.0,
+                    minimize_objective=minimize_objective, metadata=candidate
+                ))
+            return cold_ranks
 
+        # Vectorize candidates
+        vectors = []
+        for candidate in candidates:
+            params = candidate.get("candidate_params") or candidate.get("params", {})
+            # Use the stored schema to ensure consistency
+            vec, _ = tools.structured_flatten(params, schema=self._schema)
+            vectors.append(vec)
+            
+        X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
+        
+        self._model.eval()
+        with torch.no_grad():
+            pred_obj, pred_mhd, pred_qi, pred_elong = self._model(X)
+            
+        # Convert to CPU/numpy
+        pred_obj = pred_obj.cpu().numpy()
+        pred_mhd = pred_mhd.cpu().numpy()
+        pred_qi = pred_qi.cpu().numpy()
+        pred_elong = pred_elong.cpu().numpy()
+        
         predictions: list[SurrogatePrediction] = []
-        
-        # TODO (Phase 2.2): Batch inference using self._model
-        
         for i, candidate in enumerate(candidates):
-            # Mock Logic: Random scores to simulate "inference" for now, 
-            # but flagging that we are using the V2 backend.
+            # Approximate feasibility probability based on predicted margins?
+            # For now, we don't have a classification head.
+            # We can assume if predicted metrics are good, it's feasible.
+            # Let's use a dummy 0.5 or maybe infer from MHD?
+            # If vacuum_well (mhd) < 0, it's bad.
             
-            # In a real implementation:
-            # input_tensor = _vectorize(candidate["params"])
-            # pred_obj, pred_feas = self._model(input_tensor)
+            # Simple logic: if mhd > 0 and qi < threshold, high prob.
+            # This is just for ranking.
+            is_likely_feasible = (pred_mhd[i] >= 0)
+            prob_feasible = 0.8 if is_likely_feasible else 0.2
             
-            # Placeholder values
-            prob_feasible = 0.5 if self._trained else 0.1
-            pred_objective = 0.0
+            obj_val = float(pred_obj[i])
             
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
             
-            # Calculate expected value similar to V1 for compatibility
-            oriented = -float(pred_objective) if minimize_objective else float(pred_objective)
-            base_score = float(prob_feasible) * oriented
+            oriented = -obj_val if minimize_objective else obj_val
             
-            # Exploration bonus (uncertainty)
-            uncertainty = float(prob_feasible * (1.0 - prob_feasible))
+            # Exploration bonus
+            uncertainty = prob_feasible * (1.0 - prob_feasible)
             exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
             
-            # Score includes feasibility probability minus constraint violation
-            score = (float(prob_feasible) - constraint_distance) + exploration_weight * uncertainty
-            
-            # Use the score as expected_value if trained (matches V1 behavior)
-            final_score = score if self._trained else base_score
+            score = (prob_feasible - constraint_distance) + exploration_weight * uncertainty
             
             predictions.append(
                 SurrogatePrediction(
-                    expected_value=final_score,
+                    expected_value=score,
                     prob_feasible=prob_feasible,
-                    predicted_objective=pred_objective,
+                    predicted_objective=obj_val,
                     minimize_objective=minimize_objective,
                     metadata=candidate,
-                    predicted_mhd=0.0, # Placeholder
-                    predicted_qi=1.0,  # Placeholder
-                    predicted_elongation=1.0 # Placeholder
+                    predicted_mhd=float(pred_mhd[i]),
+                    predicted_qi=float(pred_qi[i]),
+                    predicted_elongation=float(pred_elong[i]),
                 )
             )
             
-        # Sort by score
         return sorted(predictions, key=lambda item: item.expected_value, reverse=True)

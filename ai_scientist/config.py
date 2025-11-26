@@ -198,13 +198,13 @@ class ExperimentConfig:
     governance: GovernanceConfig
     proposal_mix: ProposalMixConfig
     constraint_weights: ConstraintWeightsConfig
-    surrogate_backend: str
-    optimizer_backend: str
-    experiment_tag: str
-    initialization_strategy: str
-    reporting_dir: Path
-    memory_db: Path
-    source_config: Path
+    surrogate_backend: str = "random_forest"
+    optimizer_backend: str = "nevergrad"
+    experiment_tag: str = "default"
+    initialization_strategy: str = "template"
+    reporting_dir: Path = Path("reports")
+    memory_db: Path = DEFAULT_MEMORY_DB_PATH
+    source_config: Path = DEFAULT_EXPERIMENT_CONFIG_PATH
     reporting: Mapping[str, Any] = field(default_factory=dict)
     run_overrides: Mapping[str, Any] = field(default_factory=dict)
 

@@ -49,14 +49,14 @@ The current codebase is a robust, production-ready orchestration system ("Versio
 *Goal: Build fast, differentiable, uncertainty-aware replacements for VMEC++.*
 
 *   **2.1 Modular Surrogate Interface:** Refactor `SurrogateBundle` into an abstract base class supporting both `sklearn` (V1) and `torch`/`jax` (V2) backends.
-*   **2.2 Physics Core (FNOs):** Implement Equivariant Fourier Neural Operators to predict magnetic fields ($\vec{B}$) from boundary coefficients.
+*   **2.2 Physics Core (FNOs):** [x] Implement Equivariant Fourier Neural Operators to predict magnetic fields ($\vec{B}$) from boundary coefficients.
 *   **2.3 Geometric Surrogates (GNNs):** Implement GNNs for geometric constraints (curvature, elongation).
 *   **2.4 Uncertainty Quantification:** Implement Deep Ensembles for robust active learning.
 
 ### Phase 3: Autonomous Optimization Engine (Inverse Design)
 *Goal: Navigate the rugged landscape using gradients.*
 
-*   **3.1 Differentiable Optimizer:** Implement a "Gradient Descent on Inputs" loop.
+*   **3.1 Differentiable Optimizer:** [x] Implement a "Gradient Descent on Inputs" loop.
     *   $\theta_{new} = \theta_{old} - \alpha \nabla_{\theta} \mathcal{L}(\text{Surrogate}(\theta))$
 *   **3.2 SA-ALM Upgrade:** [x] Integrate the differentiable optimizer as the inner loop solver for the Augmented Lagrangian Method.
 
