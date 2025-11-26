@@ -218,7 +218,7 @@ class ExperimentConfig:
     proposal_mix: ProposalMixConfig
     constraint_weights: ConstraintWeightsConfig
     generative: GenerativeConfig
-    surrogate: SurrogateConfig
+    surrogate: SurrogateConfig = field(default_factory=SurrogateConfig)
     optimizer_backend: str = "nevergrad"
     experiment_tag: str = "default"
     initialization_strategy: str = "template"
