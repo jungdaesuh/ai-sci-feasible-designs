@@ -127,9 +127,22 @@ def random_rotation_matrix(batch_size: int, device: torch.device = torch.device(
     # QR decomposition
     q, r = torch.linalg.qr(rand_mat)
     
-    # Ensure determinant is +1 (Rotation, not reflection)
-    d = torch.diagonal(r, dim1=-2, dim2=-1).sign()
-    q *= d.unsqueeze(1)
+    # Ensure orthogonal part has determinant +1 (Rotation, not reflection)
+    # The QR decomposition can return a Q with det=-1. We correct this by
+    # checking the determinant and flipping the last column if it's negative.
+    det_q = torch.det(q) # (batch_size,)
+    
+    # Create a batch of 3x3 identity matrices
+    diag_correction = torch.eye(3, device=device).repeat(batch_size, 1, 1)
+    
+    # For each matrix in the batch, set the last diagonal element to its determinant.
+    # If det_q is -1, this will make the last diagonal element -1.
+    diag_correction[:, 2, 2] = det_q
+    
+    # Apply the correction: q_new = q_old @ diag_correction.
+    # If det_q was -1, this multiplies the last column of q_old by -1,
+    # effectively changing det(q_old) from -1 to 1.
+    q = torch.bmm(q, diag_correction)
     
     return q
 
