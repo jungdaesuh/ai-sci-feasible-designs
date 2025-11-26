@@ -51,9 +51,17 @@ from orchestration import adaptation as adaptation_helpers
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
 P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
 _BOUNDARY_SEED_CACHE: dict[Path, dict[str, Any]] = {}
-_SURROGATE_BUNDLE = SurrogateBundle()
 _LAST_SURROGATE_FIT_SEC = 0.0
 NAN_TO_HIGH_VALUE = 10.0
+
+
+def _create_surrogate(cfg: ai_config.ExperimentConfig) -> SurrogateBundle:
+    """Factory to create the appropriate surrogate model based on config."""
+    if cfg.surrogate_backend == "neural_operator":
+        print("[runner] Warning: 'neural_operator' backend not fully implemented, falling back to RandomForest bundle.")
+        # In Phase 2.2, we will return NeuralOperatorSurrogate() here.
+        return SurrogateBundle()
+    return SurrogateBundle()
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -834,6 +842,7 @@ def _surrogate_rank_screen_candidates(
     screen_budget: int,
     candidates: list[Mapping[str, Any]],
     world_model: memory.WorldModel,
+    surrogate_model: SurrogateBundle,
     *,
     cycle: int = 0,
     verbose: bool = False,
@@ -876,9 +885,9 @@ def _surrogate_rank_screen_candidates(
     target_values: tuple[float, ...]
     if history:
         metrics_list, target_values = zip(*history)
-        if _SURROGATE_BUNDLE.should_retrain(len(history), cycle=cycle):
+        if surrogate_model.should_retrain(len(history), cycle=cycle):
             start = time.perf_counter()
-            _SURROGATE_BUNDLE.fit(
+            surrogate_model.fit(
                 metrics_list,
                 target_values,
                 minimize_objective=minimize_objective,
@@ -900,7 +909,7 @@ def _surrogate_rank_screen_candidates(
             }
         )
 
-    ranked_predictions = _SURROGATE_BUNDLE.rank_candidates(
+    ranked_predictions = surrogate_model.rank_candidates(
         pool_entries,
         minimize_objective=minimize_objective,
         exploration_ratio=cfg.proposal_mix.exploration_ratio,
@@ -1580,6 +1589,7 @@ def _run_cycle(
     governance_stage: str,
     git_sha: str,
     constellaration_sha: str,
+    surrogate_model: SurrogateBundle,
     *,
     runtime: RunnerCLIConfig | None = None,
     budget_controller: BudgetController,
@@ -1691,7 +1701,35 @@ def _run_cycle(
     candidate_pool: list[Mapping[str, Any]] = []
     
     # START ALM_BLOCK_PLACEHOLDER
-    if optimizer_mode == "alm" or optimizer_mode == "sa-alm":
+    if cfg.optimizer_backend == "gradient_descent":
+        if runtime and runtime.verbose:
+            print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active.")
+        
+        # Placeholder for Phase 3.1: Differentiable Optimization
+        # TODO: Implement torch-based optimization loop here.
+        print("[runner] Gradient Descent backend not fully implemented; falling back to standard generation.")
+        
+        candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
+            active_cfg,
+            cycle_index,
+            world_model,
+            experiment_id,
+            screen_budget=active_budgets.screen_evals_per_cycle,
+            total_candidates=pool_size,
+            prev_feasibility_rate=prev_feasibility_rate,
+            suggested_params=suggested_params,
+        )
+        candidates = _surrogate_rank_screen_candidates(
+            active_cfg,
+            active_budgets.screen_evals_per_cycle,
+            candidate_pool,
+            world_model,
+            surrogate_model,
+            cycle=cycle_number,
+            verbose=bool(runtime and runtime.verbose),
+        )
+
+    elif optimizer_mode == "alm" or optimizer_mode == "sa-alm":
         # ALM Execution Branch
         if runtime and runtime.verbose:
             print(f"[runner][cycle={cycle_number}] {optimizer_mode} optimizer mode active.")
@@ -1757,8 +1795,8 @@ def _run_cycle(
             target_values: tuple[float, ...]
             if history:
                 metrics_list, target_values = zip(*history)
-                if _SURROGATE_BUNDLE.should_retrain(len(history), cycle=cycle_number):
-                    _SURROGATE_BUNDLE.fit(
+                if surrogate_model.should_retrain(len(history), cycle=cycle_number):
+                    surrogate_model.fit(
                         metrics_list,
                         target_values,
                         minimize_objective=(problem == "p1"), # assuming P1 objective is minimize
@@ -1768,7 +1806,7 @@ def _run_cycle(
             def surrogate_predictor(params: Mapping[str, Any]) -> Tuple[float, Sequence[float]]:
                 # Predict objective and constraints using the surrogate
                 dummy_candidate = {"candidate_params": params}
-                predicted_list = _SURROGATE_BUNDLE.rank_candidates([dummy_candidate], minimize_objective=False) # min_obj doesn't matter much for individual predictions
+                predicted_list = surrogate_model.rank_candidates([dummy_candidate], minimize_objective=False) # min_obj doesn't matter much for individual predictions
                 predicted = predicted_list[0]
                 
                 # Default values for constraints if not predicted
@@ -1962,6 +2000,7 @@ def _run_cycle(
             active_budgets.screen_evals_per_cycle,
             candidate_pool,
             world_model,
+            surrogate_model,
             cycle=cycle_number,
             verbose=bool(runtime and runtime.verbose),
         )
@@ -2505,6 +2544,8 @@ def run(
     )
     budget_controller = BudgetController(cfg.budgets, cfg.adaptive_budgets)
     last_p3_summary: tools.P3Summary | None = None
+    surrogate_model = _create_surrogate(cfg)
+
     with memory.WorldModel(cfg.memory_db) as world_model:
         git_sha = _resolve_git_sha()
         constellaration_sha = _resolve_git_sha("constellaration")
@@ -2639,6 +2680,7 @@ def run(
                 governance_stage,
                 git_sha,
                 constellaration_sha,
+                surrogate_model,
                 runtime=runtime,
                 budget_controller=budget_controller,
                 prev_feasibility_rate=last_feasibility_rate,

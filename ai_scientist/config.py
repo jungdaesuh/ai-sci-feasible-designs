@@ -198,6 +198,9 @@ class ExperimentConfig:
     governance: GovernanceConfig
     proposal_mix: ProposalMixConfig
     constraint_weights: ConstraintWeightsConfig
+    surrogate_backend: str
+    optimizer_backend: str
+    experiment_tag: str
     initialization_strategy: str
     reporting_dir: Path
     memory_db: Path
@@ -415,6 +418,9 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         constraint_weights=_constraint_weights_from_dict(
             payload.get("constraint_weights")
         ),
+        surrogate_backend=str(payload.get("surrogate_backend", "random_forest")),
+        optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
+        experiment_tag=str(payload.get("experiment_tag", "default")),
         initialization_strategy=str(payload.get("initialization_strategy", "template")),
         run_overrides=payload.get("run_overrides", {}),
         reporting_dir=Path(payload.get("reporting_dir", "reports")),
