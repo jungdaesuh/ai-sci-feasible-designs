@@ -135,8 +135,8 @@ else:
 - [x] **Integrate Differentiable ALM into Runner:** Complete Phase 3.2 by integrating the differentiable optimizer into the SA-ALM inner loop.
 
 ### Pending (Gap Analysis)
-- [ ] **Refactor Surrogate Interface (Phase 2.1):** Create an abstract base class `BaseSurrogate` to unify V1 (`SurrogateBundle`) and V2 (`NeuralOperatorSurrogate`) and remove union types.
-- [ ] **Implement Hybrid Representation (Phase 1.1):** Create utilities in `ai_scientist/optim/geometry.py` to convert Fourier coefficients to 3D Meshes/Point Clouds.
+- [x] **Refactor Surrogate Interface (Phase 2.1):** Create an abstract base class `BaseSurrogate` to unify V1 (`SurrogateBundle`) and V2 (`NeuralOperatorSurrogate`) and remove union types.
+- [x] **Implement Hybrid Representation (Phase 1.1):** Create utilities in `ai_scientist/optim/geometry.py` to convert Fourier coefficients to 3D Meshes/Point Clouds.
 - [ ] **Integrate Equivariance (Phase 1.2):** Investigate and integrate `e3nn` or similar libraries to enforce SE(3) symmetry in `StellaratorNeuralOp`.
 - [ ] **World Model Schema Upgrade (Phase 1.3):** Explicitly store ALM multipliers and surrogate checkpoints in `memory.db` (beyond generic snapshots).
 - [ ] **Geometric Surrogates (Phase 2.3):** Implement Graph Neural Networks (GNNs) for geometric constraint prediction.

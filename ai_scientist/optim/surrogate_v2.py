@@ -27,7 +27,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from ai_scientist import tools
-from ai_scientist.optim.surrogate import SurrogatePrediction
+from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 
 
 class StellaratorNeuralOp(nn.Module):
@@ -118,7 +118,7 @@ class StellaratorNeuralOp(nn.Module):
         return pred_obj, pred_mhd, pred_qi, pred_elong
 
 
-class NeuralOperatorSurrogate:
+class NeuralOperatorSurrogate(BaseSurrogate):
     """Deep Learning Surrogate (V2) using PyTorch.
     
     Uses StellaratorNeuralOp to predict metrics from boundary coefficients.

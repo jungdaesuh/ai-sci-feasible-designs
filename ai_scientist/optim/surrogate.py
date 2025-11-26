@@ -10,6 +10,7 @@ forward.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -135,7 +136,39 @@ class SurrogatePrediction:
     predicted_elongation: float | None = None
 
 
-class SurrogateBundle:
+class BaseSurrogate(ABC):
+    """Abstract base class for all surrogate models."""
+
+    @abstractmethod
+    def fit(
+        self,
+        metrics_list: Sequence[Mapping[str, Any]],
+        target_values: Sequence[float],
+        *,
+        minimize_objective: bool,
+        cycle: int | None = None,
+    ) -> None:
+        """Train the surrogate on historical data."""
+        pass
+
+    @abstractmethod
+    def should_retrain(self, sample_count: int, cycle: int | None = None) -> bool:
+        """Determine if retraining is necessary."""
+        pass
+
+    @abstractmethod
+    def rank_candidates(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+        *,
+        minimize_objective: bool,
+        exploration_ratio: float = 0.0,
+    ) -> list[SurrogatePrediction]:
+        """Rank candidates using the surrogate model."""
+        pass
+
+
+class SurrogateBundle(BaseSurrogate):
     """Feasibility-first surrogate bundle with RF heads and structured features.
 
     - Vectorizes boundary params with tools.structured_flatten using a persisted
