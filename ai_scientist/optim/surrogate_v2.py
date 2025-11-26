@@ -27,25 +27,29 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from ai_scientist import tools
+from ai_scientist.optim import equivariance, geometry
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 
 
 class StellaratorNeuralOp(nn.Module):
-    """Spectral Convolutional Neural Operator for Stellarator Geometries.
+    """Spectral Convolutional Neural Operator with Geometric Equivariance.
 
-    Treats the Fourier coefficients (m, n) as a 2D grid and applies convolutions
-    to learn interactions between modes, followed by dense heads for metric prediction.
+    Hybrid architecture:
+    1. Spectral Branch: 2D Convolutions on Fourier coefficient grid (r_cos, z_sin).
+    2. Geometric Branch: PointNet with T-Net alignment operating on generated 3D point clouds.
+       This provides approximate SE(3) invariance and physical grounding.
     """
 
-    def __init__(self, mpol: int, ntor: int, hidden_dim: int = 64):
+    def __init__(self, mpol: int, ntor: int, nfp: int = 1, hidden_dim: int = 64):
         super().__init__()
         self.mpol = mpol
         self.ntor = ntor
+        self.nfp = nfp
         self.grid_h = mpol + 1
         self.grid_w = 2 * ntor + 1
         self.input_channels = 2  # r_cos, z_sin
 
-        # "Spectral" Convolutions (operating on coefficient grid)
+        # 1. Spectral Branch (Operating on coefficient grid)
         self.conv_net = nn.Sequential(
             nn.Conv2d(self.input_channels, hidden_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(hidden_dim),
@@ -57,12 +61,21 @@ class StellaratorNeuralOp(nn.Module):
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
         )
-
-        # Global pooling to aggregate spectral features
         self.global_pool = nn.AdaptiveAvgPool2d(1)
 
-        # Multi-head output
+        # 2. Geometric Branch (Operating on 3D Point Cloud)
+        # We use a modest grid for the surrogate to keep training fast.
+        self.geo_n_theta = 16
+        self.geo_n_zeta = 16
+        self.geo_dim = 128
+        self.geo_encoder = equivariance.PointNetEncoder(embedding_dim=self.geo_dim, align_input=True)
+
+        # Multi-head output (Fusion of Spectral + Geometric)
+        fusion_dim = hidden_dim + self.geo_dim
+        
         self.head_base = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
         )
@@ -78,37 +91,49 @@ class StellaratorNeuralOp(nn.Module):
             x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1))
         """
         batch_size = x.shape[0]
-        expected_size = 2 * self.grid_h * self.grid_w
         
-        if x.shape[1] != expected_size:
-            # Fallback or error if dimension mismatch (e.g. schema change)
-            # For robustness, we might pad or truncate, but here we assume consistency.
-            pass
-
-        # Reshape to (Batch, 2, mpol+1, 2*ntor+1)
-        # The flattening order in tools.structured_flatten is:
-        # r_cos (m=0..mpol, n=-ntor..ntor), then z_sin (m=0..mpol, n=-ntor..ntor)
-        # We need to be careful to match this layout.
-        
-        # Split into r_cos and z_sin parts
+        # --- Spectral Branch ---
         half_size = self.grid_h * self.grid_w
         r_cos_flat = x[:, :half_size]
         z_sin_flat = x[:, half_size:]
 
         r_cos_grid = r_cos_flat.view(batch_size, 1, self.grid_h, self.grid_w)
         z_sin_grid = z_sin_flat.view(batch_size, 1, self.grid_h, self.grid_w)
-
-        # Stack channels
         spectral_grid = torch.cat([r_cos_grid, z_sin_grid], dim=1) # (B, 2, H, W)
 
-        # Convolve
-        features = self.conv_net(spectral_grid) # (B, hidden, H, W)
+        spectral_feat = self.conv_net(spectral_grid) # (B, hidden, H, W)
+        spectral_vec = self.global_pool(spectral_feat).view(batch_size, -1) # (B, hidden)
         
-        # Pool
-        pooled = self.global_pool(features).view(batch_size, -1) # (B, hidden)
+        # --- Geometric Branch ---
+        # Recover (B, mpol+1, 2*ntor+1) for geometry tool
+        r_cos_in = r_cos_grid.squeeze(1)
+        z_sin_in = z_sin_grid.squeeze(1)
         
-        # Heads
-        base = self.head_base(pooled)
+        # Generate Point Cloud (Differentiable)
+        R, Z, Phi = geometry.batch_fourier_to_real_space(
+            r_cos_in, z_sin_in, 
+            n_field_periods=self.nfp,
+            n_theta=self.geo_n_theta,
+            n_zeta=self.geo_n_zeta
+        )
+        
+        X, Y, Z_cart = geometry.to_cartesian(R, Z, Phi)
+        
+        # Stack to (Batch, 3, N_points)
+        # R, Z, Phi are (Batch, T, ZetaTotal)
+        # Flatten spatial dims
+        X_flat = X.view(batch_size, -1)
+        Y_flat = Y.view(batch_size, -1)
+        Z_flat = Z_cart.view(batch_size, -1)
+        
+        points = torch.stack([X_flat, Y_flat, Z_flat], dim=1) # (B, 3, N)
+        
+        geo_vec = self.geo_encoder(points) # (B, geo_dim)
+        
+        # --- Fusion ---
+        combined = torch.cat([spectral_vec, geo_vec], dim=1)
+        
+        base = self.head_base(combined)
         
         pred_obj = self.head_objective(base).squeeze(-1)
         pred_mhd = self.head_mhd(base).squeeze(-1)
@@ -150,6 +175,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._model: StellaratorNeuralOp | None = None
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
+        self._nfp: int | None = None
 
     def fit(
         self,
@@ -181,12 +207,14 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         # 1. Prepare Data
         features_list = []
         
-        # Capture schema from the first item if not set (or update it? NO, we must enforce consistent schema)
-        # Usually schema should be fixed for a run. We'll derive it from the data.
-        # Note: If data has mixed schemas, this might break. We assume consistent history.
-        
-        for metrics in metrics_list:
+        # Capture schema and nfp from the first item if not set
+        for i, metrics in enumerate(metrics_list):
             params = metrics.get("candidate_params") or metrics.get("params", {})
+            
+            if i == 0:
+                if self._nfp is None:
+                    self._nfp = int(params.get("n_field_periods") or params.get("nfp", 1))
+
             vector, schema = tools.structured_flatten(params, schema=self._schema)
             if self._schema is None:
                 self._schema = schema
@@ -215,11 +243,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
         # 2. Initialize Model if needed
         if self._model is None or self._model.mpol != self._schema.mpol or self._model.ntor != self._schema.ntor:
-            logging.info("[surrogate_v2] Initializing StellaratorNeuralOp with mpol=%d, ntor=%d", 
-                         self._schema.mpol, self._schema.ntor)
+            logging.info("[surrogate_v2] Initializing StellaratorNeuralOp with mpol=%d, ntor=%d, nfp=%d", 
+                         self._schema.mpol, self._schema.ntor, self._nfp)
             self._model = StellaratorNeuralOp(
                 mpol=self._schema.mpol, 
-                ntor=self._schema.ntor
+                ntor=self._schema.ntor,
+                nfp=self._nfp or 1
             ).to(self._device)
             self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
 

@@ -8,7 +8,7 @@ for Geometric Deep Learning (GNNs) and equivariant networks.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Tuple
+from typing import Any, Tuple
 
 import numpy as np
 import torch
@@ -117,6 +117,95 @@ def fourier_to_real_space(
             Z = Z + zs * sin(angle)
             
     Phi = zeta_grid.expand_as(R) if is_torch else np.broadcast_to(zeta_grid, R.shape)
+    return R, Z, Phi
+
+
+def batch_fourier_to_real_space(
+    r_cos: torch.Tensor,
+    z_sin: torch.Tensor,
+    n_field_periods: int,
+    n_theta: int = 32,
+    n_zeta: int = 32,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Batched version of fourier_to_real_space for PyTorch.
+    
+    Args:
+        r_cos: (Batch, mpol+1, 2*ntor+1)
+        z_sin: (Batch, mpol+1, 2*ntor+1)
+        n_field_periods: Nfp.
+        
+    Returns:
+        R, Z, Phi with shape (Batch, n_theta, n_zeta_total)
+    """
+    batch_size, mpol_plus_1, two_ntor_plus_1 = r_cos.shape
+    mpol = mpol_plus_1 - 1
+    ntor = (two_ntor_plus_1 - 1) // 2
+    
+    # Create grid (shared across batch)
+    device = r_cos.device
+    pi = torch.pi
+    
+    theta = torch.linspace(0, 2 * pi, n_theta + 1, device=device)[:-1]
+    zeta_one = torch.linspace(0, 2 * pi / n_field_periods, n_zeta + 1, device=device)[:-1]
+    
+    zeta_list = [zeta_one + i * (2 * pi / n_field_periods) for i in range(n_field_periods)]
+    zeta = torch.cat(zeta_list) # (n_zeta_total,)
+    
+    # (1, n_theta, 1)
+    theta_grid = theta.view(1, n_theta, 1)
+    # (1, 1, n_zeta_total)
+    zeta_grid = zeta.view(1, 1, -1)
+    
+    # Precompute basis functions? 
+    # Angle: m*theta - n*Nfp*zeta
+    # We can sum over m, n efficiently using einsum or just loop accumulation if m,n are small.
+    # Given mpol~8, ntor~8, loop is fine, but let's try to be vectorized over grid if possible.
+    # R = sum_{m,n} C_{b,m,n} * cos(m*t - n*Nfp*z)
+    
+    R = torch.zeros(batch_size, n_theta, zeta.size(0), device=device)
+    Z = torch.zeros_like(R)
+    
+    # We can construct the full basis matrix (Modes, Theta, Zeta) and use matmul.
+    # Modes count: (mpol+1)*(2*ntor+1).
+    # Grid count: n_theta * n_zeta_total.
+    # Matrix multiplication: (B, Modes) @ (Modes, Grid) -> (B, Grid).
+    
+    # Flatten modes
+    # r_cos: (B, M, N) -> (B, M*N)
+    
+    # Build Basis Matrix (Modes, Theta, Zeta) -> (Modes, GridPoints)
+    # But Theta and Zeta are separable? No, cos(m*t - n*z).
+    
+    # Let's just loop for memory efficiency, broadcasting over batch and grid.
+    # Accumulate into R, Z.
+    
+    # angle (1, T, Z)
+    # r_cos[:, m, n] -> (B, 1, 1)
+    
+    for m in range(mpol + 1):
+        # m*theta term
+        m_theta = m * theta_grid # (1, T, 1)
+        
+        for n_idx in range(2 * ntor + 1):
+            n = n_idx - ntor
+            # n*Nfp*zeta term
+            n_zeta_term = n * n_field_periods * zeta_grid # (1, 1, Z)
+            
+            angle = m_theta - n_zeta_term # (1, T, Z)
+            
+            cos_angle = torch.cos(angle)
+            sin_angle = torch.sin(angle)
+            
+            # Coefficients: (B, 1, 1)
+            rc = r_cos[:, m, n_idx].view(batch_size, 1, 1)
+            zs = z_sin[:, m, n_idx].view(batch_size, 1, 1)
+            
+            R = R + rc * cos_angle
+            Z = Z + zs * sin_angle
+            
+    Phi = zeta_grid.expand(batch_size, n_theta, zeta.size(0))
+    
     return R, Z, Phi
 
 
