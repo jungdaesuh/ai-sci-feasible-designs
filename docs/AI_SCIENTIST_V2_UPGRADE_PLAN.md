@@ -69,8 +69,8 @@ The current codebase is a robust, production-ready orchestration system ("Versio
 ### Phase 5: Orchestration & Autonomy
 *Goal: Self-driving research.*
 
-*   **5.1 Hierarchical Agents:** Refactor `planner.py` into a Coordinator that manages specialized Worker Agents (Optimization Worker, Exploration Worker).
-*   **5.2 Adaptive Switching:** Coordinator dynamically switches strategies based on World Model state (e.g., "Stuck in local minima" $\to$ "Switch to Exploration").
+*   **5.1 Hierarchical Agents:** [x] Refactor `planner.py` into a Coordinator that manages specialized Worker Agents (Optimization Worker, Exploration Worker).
+*   **5.2 Adaptive Switching:** [x] Coordinator dynamically switches strategies based on World Model state (e.g., "Stuck in local minima" $\to$ "Switch to Exploration").
 
 ---
 

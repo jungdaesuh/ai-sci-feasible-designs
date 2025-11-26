@@ -32,6 +32,7 @@ from ai_scientist import planner as ai_planner
 from ai_scientist import rag
 from ai_scientist import reporting
 from ai_scientist import tools
+from ai_scientist.coordinator import Coordinator
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
@@ -1735,33 +1736,27 @@ def _run_cycle(
     # START ALM_BLOCK_PLACEHOLDER
     if cfg.optimizer_backend == "gradient_descent":
         if runtime and runtime.verbose:
-            print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active.")
+            print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active (Phase 5 Coordinator).")
         
-        candidate_pool, sampler_count, random_count, vae_count = _propose_p3_candidates_for_cycle(
-            active_cfg,
-            cycle_index,
-            world_model,
-            experiment_id,
-            screen_budget=active_budgets.screen_evals_per_cycle,
-            total_candidates=pool_size,
-            prev_feasibility_rate=prev_feasibility_rate,
-            suggested_params=suggested_params,
-            generative_model=generative_model,
+        # Initialize Coordinator (Phase 5)
+        coordinator = Coordinator(
+            active_cfg, 
+            world_model, 
+            planner=None, # We don't pass the legacy planner instance here to avoid confusion, or we could. 
+            surrogate=surrogate_model if isinstance(surrogate_model, NeuralOperatorSurrogate) else None, 
+            generative_model=generative_model
         )
-
-        # Run Differentiable Optimization if surrogate is capable
-        if isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
-            try:
-                from ai_scientist.optim import differentiable
-                print(f"[runner] Optimizing {len(candidate_pool)} candidates with Gradient Descent...")
-                candidate_pool = differentiable.gradient_descent_on_inputs(
-                    candidate_pool,
-                    surrogate_model,
-                    active_cfg,
-                )
-            except Exception as exc:
-                print(f"[runner] Gradient Descent failed: {exc}; proceeding with initial candidates.")
-
+        
+        candidate_pool = coordinator.produce_candidates(
+            cycle=cycle_number,
+            experiment_id=experiment_id,
+            n_candidates=pool_size,
+            template=active_cfg.boundary_template
+        )
+        
+        # Note: Coordinator handles strategy (Explore/Exploit). 
+        # If Exploit, candidates are already optimized.
+        
         candidates = _surrogate_rank_screen_candidates(
             active_cfg,
             active_budgets.screen_evals_per_cycle,
