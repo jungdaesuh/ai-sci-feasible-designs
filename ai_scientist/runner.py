@@ -1780,6 +1780,21 @@ def _run_cycle(
             n_candidates=pool_size,
             template=active_cfg.boundary_template
         )
+
+        if not candidate_pool:
+            if runtime and runtime.verbose:
+                print(f"[runner][cycle={cycle_number}] Coordinator produced no candidates. Falling back to legacy sampler.")
+            
+            # Fallback to standard P3 candidates
+            candidate_pool, _, _, _ = _propose_p3_candidates_for_cycle(
+                cfg=active_cfg,
+                cycle_index=cycle_number,
+                world_model=world_model,
+                experiment_id=experiment_id,
+                screen_budget=active_budgets.screen_evals_per_cycle,
+                total_candidates=pool_size,
+                generative_model=generative_model
+            )
         
         # Note: Coordinator handles strategy (Explore/Exploit). 
         # If Exploit, candidates are already optimized. 
