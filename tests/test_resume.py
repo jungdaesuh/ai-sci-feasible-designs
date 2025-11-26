@@ -74,6 +74,7 @@ def temp_workspace(tmp_path):
         ),
         generative=ai_config.GenerativeConfig(
             enabled=False,
+            backend="vae",
             latent_dim=16,
             learning_rate=1e-3,
             epochs=1,

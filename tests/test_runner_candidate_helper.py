@@ -114,6 +114,7 @@ def test_propose_p3_candidates_mixes_sampler_and_random() -> None:
         ),
         generative=ai_config.GenerativeConfig(
             enabled=False,
+            backend="vae",
             latent_dim=16,
             learning_rate=0.001,
             epochs=100,
@@ -190,6 +191,7 @@ def test_surrogate_ranker_prefers_high_hv_candidates() -> None:
         ),
         generative=ai_config.GenerativeConfig(
             enabled=False,
+            backend="vae",
             latent_dim=16,
             learning_rate=0.001,
             epochs=100,
@@ -280,6 +282,7 @@ def test_surrogate_candidate_pool_size_allows_zero() -> None:
         ),
         generative=ai_config.GenerativeConfig(
             enabled=False,
+            backend="vae",
             latent_dim=16,
             learning_rate=0.001,
             epochs=100,
