@@ -37,7 +37,7 @@ def _training_history(rows: int) -> tuple[list[dict], list[float]]:
 def test_neural_surrogate_init():
     surrogate = NeuralOperatorSurrogate(min_samples=2, epochs=1)
     assert not surrogate._trained
-    assert surrogate._model is None
+    assert len(surrogate._models) == 0
 
 def test_neural_surrogate_fit_and_predict():
     surrogate = NeuralOperatorSurrogate(
@@ -51,8 +51,8 @@ def test_neural_surrogate_fit_and_predict():
     # Test fit
     surrogate.fit(metrics, targets, minimize_objective=False, cycle=1)
     assert surrogate._trained
-    assert surrogate._model is not None
-    assert isinstance(surrogate._model, StellaratorNeuralOp)
+    assert len(surrogate._models) > 0
+    assert isinstance(surrogate._models[0], StellaratorNeuralOp)
     
     # Check schema capture
     assert surrogate._schema is not None

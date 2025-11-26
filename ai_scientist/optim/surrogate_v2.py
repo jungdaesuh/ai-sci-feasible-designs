@@ -152,7 +152,8 @@ class StellaratorNeuralOp(nn.Module):
 class NeuralOperatorSurrogate(BaseSurrogate):
     """Deep Learning Surrogate (V2) using PyTorch.
     
-    Uses StellaratorNeuralOp to predict metrics from boundary coefficients.
+    Uses an ensemble of StellaratorNeuralOp models to predict metrics 
+    and quantify epistemic uncertainty (Deep Ensembles).
     """
 
     def __init__(
@@ -165,6 +166,8 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         learning_rate: float = 1e-3,
         epochs: int = 100,
         batch_size: int = 32,
+        n_ensembles: int = 1,
+        hidden_dim: int = 64,
     ) -> None:
         self._min_samples = min_samples
         self._points_cadence = points_cadence
@@ -173,14 +176,16 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._lr = learning_rate
         self._epochs = epochs
         self._batch_size = batch_size
+        self._n_ensembles = max(1, n_ensembles)
+        self._hidden_dim = hidden_dim
         
         self._trained = False
         self._last_fit_count = 0
         self._last_fit_cycle = 0
         
-        self._model: StellaratorNeuralOp | None = None
+        self._models: list[StellaratorNeuralOp] = []
+        self._optimizers: list[optim.Optimizer] = []
         self._schema: tools.FlattenSchema | None = None
-        self._optimizer: optim.Optimizer | None = None
 
     def fit(
         self,
@@ -190,7 +195,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         minimize_objective: bool,
         cycle: int | None = None,
     ) -> None:
-        """Train the Neural Operator on the accumulated history."""
+        """Train the Neural Operator Ensemble on the accumulated history."""
         sample_count = len(metrics_list)
         self._last_fit_count = sample_count
         if cycle is not None:
@@ -205,8 +210,8 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             return
 
         logging.info(
-            "[surrogate_v2] Training Neural Operator on %d samples (Device: %s)...", 
-            sample_count, self._device
+            "[surrogate_v2] Training Ensemble (N=%d) on %d samples (Device: %s)...", 
+            self._n_ensembles, sample_count, self._device
         )
 
         # 1. Prepare Data
@@ -245,44 +250,59 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_elong = torch.tensor(y_elong_list, dtype=torch.float32).to(self._device)
 
         dataset = TensorDataset(X, y_obj, y_mhd, y_qi, y_elong)
+        # Use a larger batch size for efficiency if possible, but keep it stochastic
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
-        # 2. Initialize Model if needed
-        # Check dimensions match schema (ignoring appended nfp which is handled in forward)
-        if self._model is None or self._model.mpol != self._schema.mpol or self._model.ntor != self._schema.ntor:
-            logging.info("[surrogate_v2] Initializing StellaratorNeuralOp with mpol=%d, ntor=%d", 
-                         self._schema.mpol, self._schema.ntor)
-            self._model = StellaratorNeuralOp(
-                mpol=self._schema.mpol, 
-                ntor=self._schema.ntor
-            ).to(self._device)
-            self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
+        # 2. Initialize Models if needed or if schema changed
+        # Check dimensions match schema (ignoring appended nfp)
+        current_mpol = self._schema.mpol
+        current_ntor = self._schema.ntor
+        
+        reinit = False
+        if not self._models:
+            reinit = True
+        elif self._models[0].mpol != current_mpol or self._models[0].ntor != current_ntor:
+            reinit = True
+            
+        if reinit:
+            logging.info("[surrogate_v2] Initializing %d models with mpol=%d, ntor=%d", 
+                         self._n_ensembles, current_mpol, current_ntor)
+            self._models = []
+            self._optimizers = []
+            for _ in range(self._n_ensembles):
+                model = StellaratorNeuralOp(
+                    mpol=current_mpol, 
+                    ntor=current_ntor,
+                    hidden_dim=self._hidden_dim
+                ).to(self._device)
+                self._models.append(model)
+                self._optimizers.append(optim.Adam(model.parameters(), lr=self._lr))
 
-        # 3. Train Loop
-        self._model.train()
+        # 3. Train Loop (Sequential over ensemble members)
+        # Deep Ensembles rely on random initialization and stochastic shuffling
         criterion = nn.MSELoss()
         
-        for epoch in range(self._epochs):
-            epoch_loss = 0.0
-            for xb, yb_obj, yb_mhd, yb_qi, yb_elong in loader:
-                self._optimizer.zero_grad()
-                pred_obj, pred_mhd, pred_qi, pred_elong = self._model(xb)
-                
-                # Multi-task loss
-                loss = (
-                    criterion(pred_obj, yb_obj) + 
-                    0.5 * criterion(pred_mhd, yb_mhd) + 
-                    0.5 * criterion(pred_qi, yb_qi) + 
-                    0.5 * criterion(pred_elong, yb_elong)
-                )
-                
-                loss.backward()
-                self._optimizer.step()
-                epoch_loss += loss.item()
+        for idx, model in enumerate(self._models):
+            model.train()
+            optimizer = self._optimizers[idx]
             
-            # Optional: Early stopping or logging
-            # if epoch % 10 == 0:
-            #    logging.debug(f"Epoch {epoch}: loss {epoch_loss:.4f}")
+            # Optional: Bagging (bootstrap sampling) could be added here by resampling the dataset
+            # For now, we use the full dataset with shuffling, which is standard for Deep Ensembles.
+            
+            for epoch in range(self._epochs):
+                for xb, yb_obj, yb_mhd, yb_qi, yb_elong in loader:
+                    optimizer.zero_grad()
+                    pred_obj, pred_mhd, pred_qi, pred_elong = model(xb)
+                    
+                    loss = (
+                        criterion(pred_obj, yb_obj) + 
+                        0.5 * criterion(pred_mhd, yb_mhd) + 
+                        0.5 * criterion(pred_qi, yb_qi) + 
+                        0.5 * criterion(pred_elong, yb_elong)
+                    )
+                    
+                    loss.backward()
+                    optimizer.step()
 
         self._trained = True
 
@@ -300,15 +320,32 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
     def predict_torch(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Differentiable prediction for optimization loop."""
-        if self._model is None:
+        """Differentiable prediction for optimization loop (Mean of Ensemble)."""
+        if not self._models:
             raise RuntimeError("NeuralOperatorSurrogate not initialized/trained")
         
-        # Ensure we are on the right device
         if x.device != torch.device(self._device):
             x = x.to(self._device)
             
-        return self._model(x)
+        # Collect predictions from all models
+        preds_obj, preds_mhd, preds_qi, preds_elong = [], [], [], []
+        
+        for model in self._models:
+            o, m, q, e = model(x)
+            preds_obj.append(o)
+            preds_mhd.append(m)
+            preds_qi.append(q)
+            preds_elong.append(e)
+            
+        # Stack and average
+        # x is (Batch, Dim), output is (Batch,)
+        # Stack -> (Ensemble, Batch) -> Mean over dim 0 -> (Batch,)
+        mean_obj = torch.mean(torch.stack(preds_obj), dim=0)
+        mean_mhd = torch.mean(torch.stack(preds_mhd), dim=0)
+        mean_qi = torch.mean(torch.stack(preds_qi), dim=0)
+        mean_elong = torch.mean(torch.stack(preds_elong), dim=0)
+        
+        return mean_obj, mean_mhd, mean_qi, mean_elong
 
     def rank_candidates(
         self,
@@ -317,72 +354,82 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         minimize_objective: bool,
         exploration_ratio: float = 0.0,
     ) -> list[SurrogatePrediction]:
-        """Rank candidates using the Deep Surrogate."""
+        """Rank candidates using the Deep Ensemble (Mean + Std for Exploration)."""
         if not candidates:
             return []
             
-        if not self._trained or self._model is None:
-            # Fallback to heuristic if not trained
+        if not self._trained or not self._models:
             logging.info("[surrogate_v2] Model not trained, using heuristics")
             cold_ranks: list[SurrogatePrediction] = []
             for candidate in candidates:
-                # Just give 0 scores
                 cold_ranks.append(SurrogatePrediction(
                     expected_value=0.0, prob_feasible=0.0, predicted_objective=0.0,
                     minimize_objective=minimize_objective, metadata=candidate
                 ))
             return cold_ranks
 
-        # Vectorize candidates
         vectors = []
         for candidate in candidates:
             params = candidate.get("candidate_params") or candidate.get("params", {})
-            # Use the stored schema to ensure consistency
             vec, _ = tools.structured_flatten(params, schema=self._schema)
-            
-            # Append n_field_periods
             nfp = float(params.get("n_field_periods") or params.get("nfp", 1))
             vec_aug = np.append(vec, nfp)
-            
             vectors.append(vec_aug)
             
         X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
         
-        self._model.eval()
-        with torch.no_grad():
-            pred_obj, pred_mhd, pred_qi, pred_elong = self._model(X)
-            
-        # Convert to CPU/numpy
-        pred_obj = pred_obj.cpu().numpy()
-        pred_mhd = pred_mhd.cpu().numpy()
-        pred_qi = pred_qi.cpu().numpy()
-        pred_elong = pred_elong.cpu().numpy()
+        # Evaluation
+        preds_obj, preds_mhd, preds_qi, preds_elong = [], [], [], []
+        
+        for model in self._models:
+            model.eval()
+            with torch.no_grad():
+                o, m, q, e = model(X)
+                preds_obj.append(o)
+                preds_mhd.append(m)
+                preds_qi.append(q)
+                preds_elong.append(e)
+        
+        # Convert to numpy (Ensemble, Batch)
+        obj_stack = torch.stack(preds_obj).cpu().numpy()
+        mhd_stack = torch.stack(preds_mhd).cpu().numpy()
+        qi_stack = torch.stack(preds_qi).cpu().numpy()
+        elong_stack = torch.stack(preds_elong).cpu().numpy()
+        
+        # Statistics
+        obj_mean = np.mean(obj_stack, axis=0)
+        obj_std = np.std(obj_stack, axis=0)
+        
+        mhd_mean = np.mean(mhd_stack, axis=0)
+        qi_mean = np.mean(qi_stack, axis=0)
+        elong_mean = np.mean(elong_stack, axis=0)
         
         predictions: list[SurrogatePrediction] = []
         for i, candidate in enumerate(candidates):
-            # Approximate feasibility probability based on predicted margins?
-            # For now, we don't have a classification head.
-            # We can assume if predicted metrics are good, it's feasible.
-            # Let's use a dummy 0.5 or maybe infer from MHD?
-            # If vacuum_well (mhd) < 0, it's bad.
-            
-            # Simple logic: if mhd > 0 and qi < threshold, high prob.
-            # This is just for ranking.
-            is_likely_feasible = (pred_mhd[i] >= 0)
+            # Feasibility based on mean predictions
+            is_likely_feasible = (mhd_mean[i] >= 0)
             prob_feasible = 0.8 if is_likely_feasible else 0.2
             
-            obj_val = float(pred_obj[i])
+            obj_val = float(obj_mean[i])
+            uncertainty = float(obj_std[i])
             
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
             
-            oriented = -obj_val if minimize_objective else obj_val
+            # Score: Improvement + Exploration Bonus - Violations
+            # For ranking, we usually maximize expected_value
+            # If minimizing objective, we use -obj_val
             
-            # Exploration bonus
-            uncertainty = prob_feasible * (1.0 - prob_feasible)
-            exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
+            base_score = -obj_val if minimize_objective else obj_val
             
-            score = (prob_feasible - constraint_distance) + exploration_weight * uncertainty
+            # Active Learning: Add exploration bonus (UCB-like)
+            # exploration_ratio scales the standard deviation contribution
+            exploration_bonus = max(0.0, float(exploration_ratio)) * uncertainty
+            
+            # Combine: Feasibility * (Performance + Exploration)
+            # Or simply additive?
+            # Let's stick to a robust scoring:
+            score = base_score + exploration_bonus - (10.0 * constraint_distance)
             
             predictions.append(
                 SurrogatePrediction(
@@ -391,9 +438,9 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     predicted_objective=obj_val,
                     minimize_objective=minimize_objective,
                     metadata=candidate,
-                    predicted_mhd=float(pred_mhd[i]),
-                    predicted_qi=float(pred_qi[i]),
-                    predicted_elongation=float(pred_elong[i]),
+                    predicted_mhd=float(mhd_mean[i]),
+                    predicted_qi=float(qi_mean[i]),
+                    predicted_elongation=float(elong_mean[i]),
                 )
             )
             

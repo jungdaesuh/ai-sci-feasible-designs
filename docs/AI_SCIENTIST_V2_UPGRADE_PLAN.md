@@ -50,8 +50,8 @@ The current codebase is a robust, production-ready orchestration system ("Versio
 
 *   **2.1 Modular Surrogate Interface:** Refactor `SurrogateBundle` into an abstract base class supporting both `sklearn` (V1) and `torch`/`jax` (V2) backends.
 *   **2.2 Physics Core (FNOs):** [x] Implement Equivariant Fourier Neural Operators to predict magnetic fields ($\vec{B}$) from boundary coefficients.
-*   **2.3 Geometric Surrogates (GNNs):** Implement GNNs for geometric constraints (curvature, elongation).
-*   **2.4 Uncertainty Quantification:** Implement Deep Ensembles for robust active learning.
+*   **2.3 Geometric Surrogates (GNNs):** [x] (Substituted) Implemented "Geometric Branch" using PointNet (`StellaratorNeuralOp`) instead of GNNs to predict geometric constraints.
+*   **2.4 Uncertainty Quantification:** [x] Implement Deep Ensembles for robust active learning.
 
 ### Phase 3: Autonomous Optimization Engine (Inverse Design)
 *Goal: Navigate the rugged landscape using gradients.*
@@ -139,6 +139,6 @@ else:
 - [x] **World Model Schema Upgrade (Phase 1.3):** Explicitly store ALM multipliers and surrogate checkpoints in `memory.db` (beyond generic snapshots).
 
 ### Pending (Gap Analysis)
-- [ ] **Geometric Surrogates (Phase 2.3):** Implement Graph Neural Networks (GNNs) for geometric constraint prediction.
-- [ ] **Uncertainty Quantification (Phase 2.4):** Upgrade `NeuralOperatorSurrogate` to support Deep Ensembles for robust active learning.
+- [x] **Geometric Surrogates (Phase 2.3):** Implemented Geometric Branch (PointNet) in `StellaratorNeuralOp`.
+- [x] **Uncertainty Quantification (Phase 2.4):** Upgrade `NeuralOperatorSurrogate` to support Deep Ensembles for robust active learning.
 - [x] **Conditional Generation (Phase 4.2):** Implement Diffusion models for $P(\text{Geometry} | \text{Metrics})$.
