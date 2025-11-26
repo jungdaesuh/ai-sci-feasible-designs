@@ -28,7 +28,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from ai_scientist import tools
-from ai_scientist.optim import equivariance, geometry
+from ai_scientist.optim import equivariance, geometry, gnn
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 
 
@@ -69,7 +69,13 @@ class StellaratorNeuralOp(nn.Module):
         self.geo_n_theta = 16
         self.geo_n_zeta = 64 
         self.geo_dim = 128
-        self.geo_encoder = equivariance.PointNetEncoder(embedding_dim=self.geo_dim, align_input=True)
+        # Substituted PointNet with GeometricGNN (Phase 2.3)
+        self.geo_encoder = gnn.GeometricGNN(
+            n_theta=self.geo_n_theta, 
+            n_zeta=self.geo_n_zeta, 
+            output_dim=self.geo_dim,
+            align_input=True
+        )
 
         # Multi-head output (Fusion of Spectral + Geometric)
         fusion_dim = hidden_dim + self.geo_dim
