@@ -61,9 +61,14 @@ NAN_TO_HIGH_VALUE = 10.0
 
 def _create_surrogate(cfg: ai_config.ExperimentConfig) -> BaseSurrogate:
     """Factory to create the appropriate surrogate model based on config."""
-    if cfg.surrogate_backend == "neural_operator":
-        print("[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend).")
-        return NeuralOperatorSurrogate()
+    if cfg.surrogate.backend == "neural_operator":
+        print(f"[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend, Ensembles={cfg.surrogate.n_ensembles}).")
+        return NeuralOperatorSurrogate(
+            learning_rate=cfg.surrogate.learning_rate,
+            epochs=cfg.surrogate.epochs,
+            n_ensembles=cfg.surrogate.n_ensembles,
+            hidden_dim=cfg.surrogate.hidden_dim,
+        )
     return SurrogateBundle()
 
 
@@ -1906,7 +1911,7 @@ def _run_cycle(
         
         for k in range(num_alm_steps):
             # V2: Differentiable Optimization
-            if cfg.surrogate_backend == "neural_operator" and isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
+            if cfg.surrogate.backend == "neural_operator" and isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
                 from ai_scientist.optim import differentiable
                 alm_state_dict = {
                     "multipliers": np.array(state.multipliers),

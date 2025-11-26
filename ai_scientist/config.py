@@ -196,6 +196,15 @@ class GenerativeConfig:
 
 
 @dataclass(frozen=True)
+class SurrogateConfig:
+    backend: str = "random_forest"
+    n_ensembles: int = 1
+    learning_rate: float = 1e-3
+    epochs: int = 100
+    hidden_dim: int = 64
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     problem: str
     cycles: int
@@ -209,7 +218,7 @@ class ExperimentConfig:
     proposal_mix: ProposalMixConfig
     constraint_weights: ConstraintWeightsConfig
     generative: GenerativeConfig
-    surrogate_backend: str = "random_forest"
+    surrogate: SurrogateConfig
     optimizer_backend: str = "nevergrad"
     experiment_tag: str = "default"
     initialization_strategy: str = "template"
@@ -218,6 +227,11 @@ class ExperimentConfig:
     source_config: Path = DEFAULT_EXPERIMENT_CONFIG_PATH
     reporting: Mapping[str, Any] = field(default_factory=dict)
     run_overrides: Mapping[str, Any] = field(default_factory=dict)
+    
+    @property
+    def surrogate_backend(self) -> str:
+        """Backward compatibility alias."""
+        return self.surrogate.backend
 
 
 def _boundary_template_from_dict(
@@ -401,6 +415,21 @@ def _generative_config_from_dict(
     )
 
 
+def _surrogate_config_from_dict(
+    data: Mapping[str, Any] | None,
+    legacy_backend: str | None = None,
+) -> SurrogateConfig:
+    config = data or {}
+    backend = str(config.get("backend", legacy_backend or "random_forest"))
+    return SurrogateConfig(
+        backend=backend,
+        n_ensembles=int(config.get("n_ensembles", 1)),
+        learning_rate=float(config.get("learning_rate", 1e-3)),
+        epochs=int(config.get("epochs", 100)),
+        hidden_dim=int(config.get("hidden_dim", 64)),
+    )
+
+
 def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
     config_path = Path(path) if path is not None else DEFAULT_EXPERIMENT_CONFIG_PATH
     payload = load(config_path)
@@ -421,6 +450,14 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         n_workers=int(budgets.get("n_workers", 1)),
         pool_type=str(budgets.get("pool_type", "process")),
     )
+    
+    # Handle legacy surrogate_backend at top level
+    legacy_surrogate_backend = payload.get("surrogate_backend")
+    surrogate_config = _surrogate_config_from_dict(
+        payload.get("surrogate"), 
+        legacy_backend=legacy_surrogate_backend
+    )
+
     return ExperimentConfig(
         problem=str(payload.get("problem", "p1")),
         cycles=int(payload.get("cycles", 1)),
@@ -444,7 +481,7 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
             payload.get("constraint_weights")
         ),
         generative=_generative_config_from_dict(payload.get("generative")),
-        surrogate_backend=str(payload.get("surrogate_backend", "random_forest")),
+        surrogate=surrogate_config,
         optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
         experiment_tag=str(payload.get("experiment_tag", "default")),
         initialization_strategy=str(payload.get("initialization_strategy", "template")),
