@@ -72,6 +72,7 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     governance_stage=expected_stage,
                     git_sha="deadbeef",
                     constellaration_sha="deadbeef",
+                    surrogate_model=runner.SurrogateBundle(),
                     runtime=activated,
                     budget_controller=budget_controller,
                 )

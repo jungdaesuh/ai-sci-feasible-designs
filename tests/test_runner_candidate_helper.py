@@ -213,6 +213,7 @@ def test_surrogate_ranker_prefers_high_hv_candidates() -> None:
         cfg.budgets.screen_evals_per_cycle,
         candidates,
         cast(memory.WorldModel, world_model),
+        runner.SurrogateBundle(),
         verbose=False,
     )
 

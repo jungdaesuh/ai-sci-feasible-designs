@@ -2,24 +2,58 @@ import unittest
 from unittest.mock import MagicMock
 import numpy as np
 import torch
+import torch.nn as nn
 
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist import config as ai_config
+from ai_scientist import tools
 from constellaration.geometry import surface_rz_fourier
 
 class TestDifferentiableOptim(unittest.TestCase):
 
     def setUp(self):
         self.surrogate = NeuralOperatorSurrogate(device="cpu")
-        # Mark as trained so it uses the mock model
         self.surrogate._trained = True
+        
+        # Mock Model
+        # We need a model that accepts input and returns 4 values
+        # Input shape is (Batch, DenseSize). 
+        # DenseSize depends on mpol/ntor.
+        mpol = 3
+        ntor = 3
+        
+        # Create a schema mock
+        self.schema = MagicMock()
+        self.schema.mpol = mpol
+        self.schema.ntor = ntor
+        self.surrogate._schema = self.schema
+        
+        # Create a simple dummy model
+        class DummyModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mpol = mpol
+                self.ntor = ntor
+                # Just some learnable params to allow gradients
+                self.layer = nn.Linear(1, 4) 
+                
+            def forward(self, x):
+                # x is (Batch, DenseSize)
+                # We ignore x content for shape, but use it for gradient flow
+                # Collapse x to 1 dim to feed linear
+                val = x.mean(dim=1, keepdim=True)
+                out = self.layer(val)
+                # return obj, mhd, qi, elo
+                return out[:, 0], out[:, 1], out[:, 2], out[:, 3]
+
+        self.surrogate._model = DummyModel()
         
         # Mock Config
         self.cfg = MagicMock(spec=ai_config.ExperimentConfig)
         self.cfg.boundary_template = ai_config.BoundaryTemplateConfig(
-            n_poloidal_modes=3,
-            n_toroidal_modes=3,
+            n_poloidal_modes=mpol + 1, # Template uses num modes, not max index
+            n_toroidal_modes=ntor * 2 + 1,
             n_field_periods=1,
             base_major_radius=1.0,
             base_minor_radius=0.1,
@@ -31,12 +65,13 @@ class TestDifferentiableOptim(unittest.TestCase):
 
     def test_gradient_descent_updates_params(self):
         # Create a dummy candidate
-        # r_cos: [pol, tor] -> [3, 3]
-        # Only center index of tor is usually non-zero for axis, but let's just make a valid shape
-        r_cos = np.zeros((3, 3))
-        r_cos[0, 1] = 1.0 # Major radius
-        z_sin = np.zeros((3, 3))
-        z_sin[1, 1] = 0.1 # Minor radius
+        # r_cos: [pol, tor] -> [4, 4] (mpol=3, ntor=3, so size is 4, 7?)
+        # Template n_pol = 4, n_tor = 7. 
+        
+        r_cos = np.zeros((4, 7))
+        r_cos[0, 3] = 1.0 # Major radius at center
+        z_sin = np.zeros((4, 7))
+        z_sin[1, 3] = 0.1 # Minor radius
         
         params = {
             "r_cos": r_cos.tolist(),
@@ -71,8 +106,21 @@ class TestDifferentiableOptim(unittest.TestCase):
 
     def test_optimize_alm_inner_loop(self):
         # Setup inputs
-        x_initial = np.ones(10) # Dummy scaled params
-        scale = np.ones(10)
+        # We need correct size for x_initial.
+        # We can use _compute_index_mapping to find size or just guess large enough.
+        # But wait, optimize_alm_inner_loop uses _compute_index_mapping inside.
+        # We should ensure x_initial matches the expected compact size.
+        
+        # Let's use the helper from differentiable to get size
+        dense_indices, dense_size = differentiable._compute_index_mapping(
+            self.cfg.boundary_template, 3, 3, "cpu"
+        )
+        # dense_indices is for mapping compact->dense.
+        # x_initial is compact vector.
+        compact_size = dense_indices.shape[0]
+        
+        x_initial = np.ones(compact_size) 
+        scale = np.ones(compact_size)
         
         alm_state = {
             "multipliers": np.zeros(3),
@@ -92,7 +140,7 @@ class TestDifferentiableOptim(unittest.TestCase):
         
         # Check shape
         self.assertEqual(x_new.shape, x_initial.shape)
-        # Check that it moved (Mock model gradients should push it)
+        # Check that it moved
         self.assertFalse(np.allclose(x_new, x_initial), "ALM inner loop should update params")
 
 if __name__ == '__main__':

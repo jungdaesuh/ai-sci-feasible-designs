@@ -208,6 +208,7 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
                     governance_stage="s1",
                     git_sha=git_sha,
                     constellaration_sha=constellaration_sha,
+                    surrogate_model=runner.SurrogateBundle(),
                     runtime=None,
                     budget_controller=budget_controller,
                 )
