@@ -342,3 +342,117 @@ def test_record_deterministic_snapshot(tmp_path):
     assert json.loads(row[0]) == snapshot_payload
     assert row[1] == "deadcafe"
     assert row[2] == 17
+
+
+def test_world_model_v2_schema(tmp_path):
+    """Verify that new tables for V2 upgrade (Phase 1.3) are created and usable."""
+    db_path = tmp_path / "test_v2.db"
+
+    # 1. Initialize DB (should create new tables)
+    memory.init_db(db_path)
+
+    with memory.WorldModel(db_path) as wm:
+        # Start an experiment
+        exp_id = wm.start_experiment(
+            config_payload={"foo": "bar"},
+            git_sha="abc1234",
+        )
+
+        # 2. Test record_optimization_state
+        cycle = 1
+        multipliers = {"constraint_1": 1.5, "constraint_2": 0.0}
+        penalty = 100.0
+        opt_state = {"momentum": 0.9, "step": 50}
+
+        wm.record_optimization_state(
+            experiment_id=exp_id,
+            cycle=cycle,
+            alm_multipliers=multipliers,
+            penalty_parameter=penalty,
+            optimizer_state=opt_state,
+        )
+
+        # Verify directly in DB
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM optimization_state WHERE experiment_id = ? AND cycle = ?",
+            (exp_id, cycle),
+        ).fetchone()
+
+        assert row is not None
+        assert json.loads(row["alm_multipliers_json"]) == multipliers
+        assert float(row["penalty_parameter"]) == penalty
+        assert json.loads(row["optimizer_state_json"]) == opt_state
+
+        # 3. Test record_surrogate_checkpoint
+        backend = "neural_operator"
+        filepath = "/tmp/model_checkpoint.pt"
+        metrics = {"val_loss": 0.05, "r2": 0.98}
+
+        ckpt_id = wm.record_surrogate_checkpoint(
+            experiment_id=exp_id,
+            cycle=cycle,
+            backend=backend,
+            filepath=filepath,
+            metrics=metrics,
+        )
+
+        row = conn.execute(
+            "SELECT * FROM surrogate_checkpoints WHERE id = ?", (ckpt_id,)
+        ).fetchone()
+
+        assert row is not None
+        assert row["backend"] == backend
+        assert row["filepath"] == filepath
+        assert json.loads(row["metrics_json"]) == metrics
+        assert row["experiment_id"] == exp_id
+        assert row["cycle"] == cycle
+
+        conn.close()
+
+
+def test_record_optimization_state_minimal(tmp_path):
+    """Test recording optimization state without optional fields."""
+    db_path = tmp_path / "test_v2_min.db"
+    memory.init_db(db_path)
+
+    with memory.WorldModel(db_path) as wm:
+        exp_id = wm.start_experiment({}, "sha")
+
+        wm.record_optimization_state(
+            experiment_id=exp_id,
+            cycle=1,
+            alm_multipliers={"c1": 1.0},
+            penalty_parameter=10.0,
+        )
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM optimization_state").fetchone()
+        assert row is not None
+        assert row["optimizer_state_json"] is None
+        conn.close()
+
+
+def test_record_surrogate_checkpoint_minimal(tmp_path):
+    """Test recording surrogate checkpoint without optional fields."""
+    db_path = tmp_path / "test_v2_surr_min.db"
+    memory.init_db(db_path)
+
+    with memory.WorldModel(db_path) as wm:
+        exp_id = wm.start_experiment({}, "sha")
+
+        wm.record_surrogate_checkpoint(
+            experiment_id=exp_id,
+            cycle=1,
+            backend="rf",
+            filepath="model.pkl",
+        )
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM surrogate_checkpoints").fetchone()
+        assert row is not None
+        assert row["metrics_json"] is None
+        conn.close()

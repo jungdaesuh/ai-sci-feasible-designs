@@ -231,6 +231,28 @@ CREATE TABLE IF NOT EXISTS literature_notes (
     created_at TEXT NOT NULL,
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
+
+CREATE TABLE IF NOT EXISTS optimization_state (
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    alm_multipliers_json TEXT NOT NULL,
+    penalty_parameter REAL NOT NULL,
+    optimizer_state_json TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, cycle),
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
+CREATE TABLE IF NOT EXISTS surrogate_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    backend TEXT NOT NULL,
+    filepath TEXT NOT NULL,
+    metrics_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
 """
 
 DEFAULT_RELATIVE_TOLERANCE = 1e-2
@@ -412,6 +434,90 @@ class WorldModel:
                 _write()
         else:
             _write()
+
+    def record_optimization_state(
+        self,
+        experiment_id: int,
+        cycle: int,
+        alm_multipliers: Mapping[str, float],
+        penalty_parameter: float,
+        optimizer_state: Mapping[str, Any] | None = None,
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> None:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        multipliers_json = json.dumps(
+            _normalize_to_json(alm_multipliers), separators=(",", ":")
+        )
+        optimizer_state_json = (
+            json.dumps(_normalize_to_json(optimizer_state), separators=(",", ":"))
+            if optimizer_state is not None
+            else None
+        )
+
+        def _write() -> None:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO optimization_state
+                (experiment_id, cycle, alm_multipliers_json, penalty_parameter, optimizer_state_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    cycle,
+                    multipliers_json,
+                    float(penalty_parameter),
+                    optimizer_state_json,
+                    timestamp,
+                ),
+            )
+
+        if commit:
+            with self._conn:
+                _write()
+        else:
+            _write()
+
+    def record_surrogate_checkpoint(
+        self,
+        experiment_id: int,
+        cycle: int,
+        backend: str,
+        filepath: str | Path,
+        metrics: Mapping[str, Any] | None = None,
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        metrics_json = (
+            json.dumps(_normalize_to_json(metrics), separators=(",", ":"))
+            if metrics is not None
+            else None
+        )
+
+        cursor = self._conn.execute(
+            """
+            INSERT INTO surrogate_checkpoints
+            (experiment_id, cycle, backend, filepath, metrics_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                experiment_id,
+                cycle,
+                backend,
+                str(filepath),
+                metrics_json,
+                timestamp,
+            ),
+        )
+        checkpoint_id = cursor.lastrowid
+        assert checkpoint_id is not None
+
+        if commit:
+            self._conn.commit()
+        return checkpoint_id
 
     def record_cycle_summary(
         self,
