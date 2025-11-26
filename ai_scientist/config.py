@@ -188,6 +188,7 @@ class ConstraintWeightsConfig:
 @dataclass(frozen=True)
 class GenerativeConfig:
     enabled: bool
+    backend: str
     latent_dim: int
     learning_rate: float
     epochs: int
@@ -392,6 +393,7 @@ def _generative_config_from_dict(
     config = data or {}
     return GenerativeConfig(
         enabled=bool(config.get("enabled", False)),
+        backend=str(config.get("backend", "vae")),
         latent_dim=int(config.get("latent_dim", 16)),
         learning_rate=float(config.get("learning_rate", 1e-3)),
         epochs=int(config.get("epochs", 100)),

@@ -36,7 +36,7 @@ from ai_scientist.coordinator import Coordinator
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogateBundle, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from ai_scientist.optim.generative import GenerativeDesignModel
+from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
 from ai_scientist import pytree_guard
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
@@ -67,17 +67,26 @@ def _create_surrogate(cfg: ai_config.ExperimentConfig) -> BaseSurrogate:
     return SurrogateBundle()
 
 
-def _create_generative_model(cfg: ai_config.ExperimentConfig) -> GenerativeDesignModel | None:
+def _create_generative_model(cfg: ai_config.ExperimentConfig) -> GenerativeDesignModel | DiffusionDesignModel | None:
     """Factory to create the generative model if enabled."""
-    if cfg.generative.enabled:
-        print("[runner] Generative Model Enabled (VAE).")
-        return GenerativeDesignModel(
-            latent_dim=cfg.generative.latent_dim,
+    if not cfg.generative.enabled:
+        return None
+        
+    if cfg.generative.backend == "diffusion":
+        print("[runner] Generative Model Enabled (Diffusion).")
+        return DiffusionDesignModel(
             learning_rate=cfg.generative.learning_rate,
             epochs=cfg.generative.epochs,
-            kl_weight=cfg.generative.kl_weight,
+            min_samples=32,
         )
-    return None
+
+    print("[runner] Generative Model Enabled (VAE).")
+    return GenerativeDesignModel(
+        latent_dim=cfg.generative.latent_dim,
+        learning_rate=cfg.generative.learning_rate,
+        epochs=cfg.generative.epochs,
+        kl_weight=cfg.generative.kl_weight,
+    )
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -708,9 +717,9 @@ def _propose_p3_candidates_for_cycle(
     total_candidates: int | None = None,
     prev_feasibility_rate: float | None = None,
     suggested_params: list[Mapping[str, Any]] | None = None,
-    generative_model: GenerativeDesignModel | None = None,
+    generative_model: GenerativeDesignModel | DiffusionDesignModel | None = None,
 ) -> tuple[list[Mapping[str, Any]], int, int, int]:
-    """Blend constraint-aware sampling, VAE generation, and random noise per roadmap."""
+    """Blend constraint-aware sampling, VAE/Diffusion generation, and random noise per roadmap."""
 
     pool_size = total_candidates if total_candidates is not None else screen_budget
     total_candidates = int(pool_size)
@@ -735,16 +744,28 @@ def _propose_p3_candidates_for_cycle(
     if remaining_candidates == 0:
          return agent_results, 0, 0, 0
 
-    # VAE Generation
-    vae_results: list[Mapping[str, Any]] = []
+    # Generative Generation (VAE or Diffusion)
+    gen_results: list[Mapping[str, Any]] = []
     if generative_model and generative_model._trained:
-        # Allocate up to 40% to VAE if trained, to allow mixing
-        vae_target = int(remaining_candidates * 0.4)
-        if vae_target > 0:
+        # Allocate up to 40% to generative model if trained, to allow mixing
+        gen_target = int(remaining_candidates * 0.4)
+        if gen_target > 0:
             seed_base = cfg.random_seed + cycle_index * 20000
-            vae_results = generative_model.sample(vae_target, seed=seed_base)
+            
+            if isinstance(generative_model, DiffusionDesignModel):
+                # Default target (can be refined with adaptive logic)
+                target_metrics = {
+                    "aspect_ratio": 8.0,
+                    "minimum_normalized_magnetic_gradient_scale_length": 20.0,
+                    "max_elongation": 1.5,
+                    "edge_rotational_transform_over_n_field_periods": 0.4
+                }
+                gen_results = generative_model.sample(gen_target, target_metrics=target_metrics, seed=seed_base)
+            else:
+                # VAE
+                gen_results = generative_model.sample(gen_target, seed=seed_base)
     
-    remaining_candidates = max(0, remaining_candidates - len(vae_results))
+    remaining_candidates = max(0, remaining_candidates - len(gen_results))
 
     mix = cfg.proposal_mix
     exploration_weight = mix.exploration_ratio
@@ -846,8 +867,8 @@ def _propose_p3_candidates_for_cycle(
             }
         )
 
-    candidates = agent_results + vae_results + sampler_results + random_results
-    return candidates, len(sampler_results), len(random_results), len(vae_results)
+    candidates = agent_results + gen_results + sampler_results + random_results
+    return candidates, len(sampler_results), len(random_results), len(gen_results)
 
 
 def _surrogate_candidate_pool_size(

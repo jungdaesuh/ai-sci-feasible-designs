@@ -141,4 +141,4 @@ else:
 ### Pending (Gap Analysis)
 - [ ] **Geometric Surrogates (Phase 2.3):** Implement Graph Neural Networks (GNNs) for geometric constraint prediction.
 - [ ] **Uncertainty Quantification (Phase 2.4):** Upgrade `NeuralOperatorSurrogate` to support Deep Ensembles for robust active learning.
-- [ ] **Conditional Generation (Phase 4.2):** Implement Diffusion models for $P(\text{Geometry} | \text{Metrics})$.
+- [x] **Conditional Generation (Phase 4.2):** Implement Diffusion models for $P(\text{Geometry} | \text{Metrics})$.
