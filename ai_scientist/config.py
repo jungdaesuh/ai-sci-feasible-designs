@@ -186,6 +186,15 @@ class ConstraintWeightsConfig:
 
 
 @dataclass(frozen=True)
+class GenerativeConfig:
+    enabled: bool
+    latent_dim: int
+    learning_rate: float
+    epochs: int
+    kl_weight: float
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     problem: str
     cycles: int
@@ -198,6 +207,7 @@ class ExperimentConfig:
     governance: GovernanceConfig
     proposal_mix: ProposalMixConfig
     constraint_weights: ConstraintWeightsConfig
+    generative: GenerativeConfig
     surrogate_backend: str = "random_forest"
     optimizer_backend: str = "nevergrad"
     experiment_tag: str = "default"
@@ -376,6 +386,19 @@ def _constraint_weights_from_dict(
     )
 
 
+def _generative_config_from_dict(
+    data: Mapping[str, Any] | None,
+) -> GenerativeConfig:
+    config = data or {}
+    return GenerativeConfig(
+        enabled=bool(config.get("enabled", False)),
+        latent_dim=int(config.get("latent_dim", 16)),
+        learning_rate=float(config.get("learning_rate", 1e-3)),
+        epochs=int(config.get("epochs", 100)),
+        kl_weight=float(config.get("kl_weight", 0.001)),
+    )
+
+
 def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
     config_path = Path(path) if path is not None else DEFAULT_EXPERIMENT_CONFIG_PATH
     payload = load(config_path)
@@ -418,6 +441,7 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         constraint_weights=_constraint_weights_from_dict(
             payload.get("constraint_weights")
         ),
+        generative=_generative_config_from_dict(payload.get("generative")),
         surrogate_backend=str(payload.get("surrogate_backend", "random_forest")),
         optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
         experiment_tag=str(payload.get("experiment_tag", "default")),

@@ -35,6 +35,7 @@ from ai_scientist import tools
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+from ai_scientist.optim.generative import GenerativeDesignModel
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
@@ -62,6 +63,19 @@ def _create_surrogate(cfg: ai_config.ExperimentConfig) -> SurrogateBundle | Neur
         print("[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend).")
         return NeuralOperatorSurrogate()
     return SurrogateBundle()
+
+
+def _create_generative_model(cfg: ai_config.ExperimentConfig) -> GenerativeDesignModel | None:
+    """Factory to create the generative model if enabled."""
+    if cfg.generative.enabled:
+        print("[runner] Generative Model Enabled (VAE).")
+        return GenerativeDesignModel(
+            latent_dim=cfg.generative.latent_dim,
+            learning_rate=cfg.generative.learning_rate,
+            epochs=cfg.generative.epochs,
+            kl_weight=cfg.generative.kl_weight,
+        )
+    return None
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -692,17 +706,14 @@ def _propose_p3_candidates_for_cycle(
     total_candidates: int | None = None,
     prev_feasibility_rate: float | None = None,
     suggested_params: list[Mapping[str, Any]] | None = None,
-) -> tuple[list[Mapping[str, Any]], int, int]:
-    """Blend constraint-aware sampling and random noise per roadmap Phase 1 guidance.
-
-    If total_candidates is omitted, screen_budget drives the pool size.
-    See /Users/suhjungdae/code/software/proxima_fusion/RL-feasible-designs/ai_scientist/roadmap.md for the Phase 1 candidate-generation recipe that introduced this helper.
-    """
+    generative_model: GenerativeDesignModel | None = None,
+) -> tuple[list[Mapping[str, Any]], int, int, int]:
+    """Blend constraint-aware sampling, VAE generation, and random noise per roadmap."""
 
     pool_size = total_candidates if total_candidates is not None else screen_budget
     total_candidates = int(pool_size)
     if total_candidates <= 0:
-        return [], 0, 0
+        return [], 0, 0, 0
 
     agent_results: list[Mapping[str, Any]] = []
     if suggested_params:
@@ -720,7 +731,18 @@ def _propose_p3_candidates_for_cycle(
     # Adjust remaining quota
     remaining_candidates = max(0, total_candidates - len(agent_results))
     if remaining_candidates == 0:
-         return agent_results, 0, 0
+         return agent_results, 0, 0, 0
+
+    # VAE Generation
+    vae_results: list[Mapping[str, Any]] = []
+    if generative_model and generative_model._trained:
+        # Allocate up to 40% to VAE if trained, to allow mixing
+        vae_target = int(remaining_candidates * 0.4)
+        if vae_target > 0:
+            seed_base = cfg.random_seed + cycle_index * 20000
+            vae_results = generative_model.sample(vae_target, seed=seed_base)
+    
+    remaining_candidates = max(0, remaining_candidates - len(vae_results))
 
     mix = cfg.proposal_mix
     exploration_weight = mix.exploration_ratio
@@ -822,8 +844,8 @@ def _propose_p3_candidates_for_cycle(
             }
         )
 
-    candidates = agent_results + sampler_results + random_results
-    return candidates, len(sampler_results), len(random_results)
+    candidates = agent_results + vae_results + sampler_results + random_results
+    return candidates, len(sampler_results), len(random_results), len(vae_results)
 
 
 def _surrogate_candidate_pool_size(
@@ -1596,6 +1618,7 @@ def _run_cycle(
     prev_feasibility_rate: float | None = None,
     suggested_params: list[Mapping[str, Any]] | None = None,
     config_overrides: Mapping[str, Any] | None = None,
+    generative_model: GenerativeDesignModel | None = None,
 ) -> tuple[Path | None, dict[str, Any] | None, tools.P3Summary | None]:
     tool_name = _problem_tool_name(cfg.problem)
     base_evaluate = _problem_evaluator(cfg.problem)
@@ -1690,6 +1713,15 @@ def _run_cycle(
         active_budgets.screen_evals_per_cycle,
         active_cfg.proposal_mix.surrogate_pool_multiplier,
     )
+
+    if generative_model:
+        gen_history = world_model.surrogate_training_data(
+            target="hv" if cfg.problem == "p3" else "objective", 
+            problem=cfg.problem
+        )
+        if gen_history:
+            generative_model.fit([item[0] for item in gen_history])
+
     sampler_count = 0
     random_count = 0
     
@@ -1705,7 +1737,7 @@ def _run_cycle(
         if runtime and runtime.verbose:
             print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active.")
         
-        candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
+        candidate_pool, sampler_count, random_count, vae_count = _propose_p3_candidates_for_cycle(
             active_cfg,
             cycle_index,
             world_model,
@@ -1714,6 +1746,7 @@ def _run_cycle(
             total_candidates=pool_size,
             prev_feasibility_rate=prev_feasibility_rate,
             suggested_params=suggested_params,
+            generative_model=generative_model,
         )
 
         # Run Differentiable Optimization if surrogate is capable
@@ -2036,7 +2069,7 @@ def _run_cycle(
         candidate_pool: list[Mapping[str, Any]] = []
         candidates: list[Mapping[str, Any]] = []
     else:
-        candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
+        candidate_pool, sampler_count, random_count, vae_count = _propose_p3_candidates_for_cycle(
             active_cfg,
             cycle_index,
             world_model,
@@ -2045,10 +2078,11 @@ def _run_cycle(
             total_candidates=pool_size,
             prev_feasibility_rate=prev_feasibility_rate,
             suggested_params=suggested_params,
+            generative_model=generative_model,
         )
         if runtime and runtime.verbose:
             print(
-                f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count} agent={len(suggested_params or [])}"
+                f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count} vae={vae_count} agent={len(suggested_params or [])}"
             )
         candidates = _surrogate_rank_screen_candidates(
             active_cfg,
@@ -2600,6 +2634,7 @@ def run(
     budget_controller = BudgetController(cfg.budgets, cfg.adaptive_budgets)
     last_p3_summary: tools.P3Summary | None = None
     surrogate_model = _create_surrogate(cfg)
+    generative_model = _create_generative_model(cfg)
 
     with memory.WorldModel(cfg.memory_db) as world_model:
         git_sha = _resolve_git_sha()
@@ -2741,6 +2776,7 @@ def run(
                 prev_feasibility_rate=last_feasibility_rate,
                 suggested_params=suggested_params,
                 config_overrides=config_overrides,
+                generative_model=generative_model,
             )
             last_p3_summary = p3_summary
             if p3_summary:
