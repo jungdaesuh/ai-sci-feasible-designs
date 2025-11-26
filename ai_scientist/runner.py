@@ -34,9 +34,10 @@ from ai_scientist import reporting
 from ai_scientist import tools
 from ai_scientist.coordinator import Coordinator
 from ai_scientist.optim.samplers import NearAxisSampler
-from ai_scientist.optim.surrogate import SurrogateBundle, SurrogatePrediction
+from ai_scientist.optim.surrogate import BaseSurrogate, SurrogateBundle, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel
+from ai_scientist import pytree_guard
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
@@ -58,7 +59,7 @@ _LAST_SURROGATE_FIT_SEC = 0.0
 NAN_TO_HIGH_VALUE = 10.0
 
 
-def _create_surrogate(cfg: ai_config.ExperimentConfig) -> SurrogateBundle | NeuralOperatorSurrogate:
+def _create_surrogate(cfg: ai_config.ExperimentConfig) -> BaseSurrogate:
     """Factory to create the appropriate surrogate model based on config."""
     if cfg.surrogate_backend == "neural_operator":
         print("[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend).")
@@ -865,7 +866,7 @@ def _surrogate_rank_screen_candidates(
     screen_budget: int,
     candidates: list[Mapping[str, Any]],
     world_model: memory.WorldModel,
-    surrogate_model: SurrogateBundle,
+    surrogate_model: BaseSurrogate,
     *,
     cycle: int = 0,
     verbose: bool = False,
@@ -1612,7 +1613,7 @@ def _run_cycle(
     governance_stage: str,
     git_sha: str,
     constellaration_sha: str,
-    surrogate_model: SurrogateBundle,
+    surrogate_model: BaseSurrogate,
     *,
     runtime: RunnerCLIConfig | None = None,
     budget_controller: BudgetController,

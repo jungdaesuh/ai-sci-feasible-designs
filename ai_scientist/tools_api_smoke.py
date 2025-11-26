@@ -18,6 +18,10 @@ SAMPLE_PARAMS: Mapping[str, Any] = {
 def _build_sample_payload(tool_name: str) -> Mapping[str, Any]:
     if tool_name == "make_boundary":
         return {"params": SAMPLE_PARAMS}
+    if tool_name == "propose_boundary":
+        return {"params": SAMPLE_PARAMS, "perturbation_scale": 0.05, "seed": 0}
+    if tool_name == "recombine_designs":
+        return {"parent_a": SAMPLE_PARAMS, "parent_b": SAMPLE_PARAMS, "alpha": 0.5}
     if tool_name in {"evaluate_p1", "evaluate_p2", "evaluate_p3"}:
         return {
             "params": SAMPLE_PARAMS,

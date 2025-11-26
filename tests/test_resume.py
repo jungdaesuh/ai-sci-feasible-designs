@@ -67,6 +67,18 @@ def temp_workspace(tmp_path):
         governance=ai_config.GovernanceConfig(
             hv_lookback=5, min_feasible_for_promotion=1
         ),
+        constraint_weights=ai_config.ConstraintWeightsConfig(
+            mhd=1.0,
+            qi=1.0,
+            elongation=1.0,
+        ),
+        generative=ai_config.GenerativeConfig(
+            enabled=False,
+            latent_dim=16,
+            learning_rate=1e-3,
+            epochs=1,
+            kl_weight=1e-3,
+        ),
         source_config=tmp_path / "experiment.yaml",
         reporting_dir=report_dir,
         memory_db=db_path,
