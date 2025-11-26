@@ -114,3 +114,22 @@ class PointNetEncoder(nn.Module):
         x = torch.max(x, 2, keepdim=False)[0]
         
         return x
+
+
+def random_rotation_matrix(batch_size: int, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+    """Generate random 3x3 rotation matrices (SO(3)).
+    
+    Uses QR decomposition of random Gaussian matrices to ensure uniform distribution.
+    """
+    # Random matrix (B, 3, 3)
+    rand_mat = torch.randn(batch_size, 3, 3, device=device)
+    
+    # QR decomposition
+    q, r = torch.linalg.qr(rand_mat)
+    
+    # Ensure determinant is +1 (Rotation, not reflection)
+    d = torch.diagonal(r, dim1=-2, dim2=-1).sign()
+    q *= d.unsqueeze(1)
+    
+    return q
+

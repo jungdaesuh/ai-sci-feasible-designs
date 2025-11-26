@@ -121,7 +121,7 @@ else:
 ## 5. Recommended Tech Stack
 
 *   **Deep Learning:** PyTorch (Mature ecosystem for optimization/equivariance).
-*   **Equivariance:** `e3nn` (Euclidean Neural Networks).
+*   **Equivariance:** `PointNet` + Data Augmentation (Approximate SE(3) via T-Net).
 *   **Optimization:** `torch.optim` (Adam/LBFGS) + `BoTorch` (Bayesian Optimization).
 *   **Physics:** JAX (if tight integration with `constellaration` physics kernels is needed later).
 

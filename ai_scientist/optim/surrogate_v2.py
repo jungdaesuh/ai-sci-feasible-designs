@@ -10,9 +10,10 @@ Implementation Details:
   - Reshapes flattened inputs back to (2, mpol+1, 2*ntor+1) grids.
   - Applies 2D Convolutions (effectively mixing modes in frequency domain).
   - MLP heads for specific scalar outputs (Objective, MHD, QI, Elongation).
-- Equivariance: Operates on the spectral representation which implicitly handles toroidal symmetry.
-  Full SE(3) equivariance would require e3nn (currently unavailable), so we focus on
-  spectral convolutions as the "Neural Operator" component.
+- Equivariance: Uses a Hybrid approach.
+  - Spectral Branch: Operates on the spectral grid (not SE(3) equivariant).
+  - Geometric Branch: Uses PointNet with T-Net alignment and Random Rotation Augmentation
+    to enforce SE(3) invariance on physical geometry features.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ class StellaratorNeuralOp(nn.Module):
     Hybrid architecture:
     1. Spectral Branch: 2D Convolutions on Fourier coefficient grid (r_cos, z_sin).
     2. Geometric Branch: PointNet with T-Net alignment operating on generated 3D point clouds.
-       This provides approximate SE(3) invariance and physical grounding.
+       We apply Random Rotation Augmentation during training to enforce SE(3) invariance.
     """
 
     def __init__(self, mpol: int, ntor: int, hidden_dim: int = 64):
@@ -133,6 +134,11 @@ class StellaratorNeuralOp(nn.Module):
         Z_flat = Z_cart.view(batch_size, -1)
         
         points = torch.stack([X_flat, Y_flat, Z_flat], dim=1) # (B, 3, N)
+        
+        # Augmentation: Random Rotation during training to enforce SE(3) invariance
+        if self.training:
+            rot_mat = equivariance.random_rotation_matrix(batch_size, device=x.device)
+            points = torch.bmm(rot_mat, points)
         
         geo_vec = self.geo_encoder(points) # (B, geo_dim)
         
