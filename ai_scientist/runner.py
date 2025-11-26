@@ -1705,10 +1705,6 @@ def _run_cycle(
         if runtime and runtime.verbose:
             print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active.")
         
-        # Placeholder for Phase 3.1: Differentiable Optimization
-        # TODO: Implement torch-based optimization loop here.
-        print("[runner] Gradient Descent backend not fully implemented; falling back to standard generation.")
-        
         candidate_pool, sampler_count, random_count = _propose_p3_candidates_for_cycle(
             active_cfg,
             cycle_index,
@@ -1719,6 +1715,20 @@ def _run_cycle(
             prev_feasibility_rate=prev_feasibility_rate,
             suggested_params=suggested_params,
         )
+
+        # Run Differentiable Optimization if surrogate is capable
+        if isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
+            try:
+                from ai_scientist.optim import differentiable
+                print(f"[runner] Optimizing {len(candidate_pool)} candidates with Gradient Descent...")
+                candidate_pool = differentiable.gradient_descent_on_inputs(
+                    candidate_pool,
+                    surrogate_model,
+                    active_cfg,
+                )
+            except Exception as exc:
+                print(f"[runner] Gradient Descent failed: {exc}; proceeding with initial candidates.")
+
         candidates = _surrogate_rank_screen_candidates(
             active_cfg,
             active_budgets.screen_evals_per_cycle,

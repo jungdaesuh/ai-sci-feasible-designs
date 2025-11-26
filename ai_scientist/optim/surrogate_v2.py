@@ -16,8 +16,22 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Sequence
 
+import torch
+import torch.nn as nn
+
 # We will reuse the prediction dataclass for compatibility with the runner
 from ai_scientist.optim.surrogate import SurrogatePrediction
+
+
+class MockNeuralOp(nn.Module):
+    """A simple differentiable mock model for A/B testing."""
+    def __init__(self, input_dim: int = 10):
+        super().__init__()
+        # Simple linear model to provide gradients
+        self.linear = nn.Linear(input_dim, 3) # [objective, mhd, qi]
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
 
 
 class NeuralOperatorSurrogate:
@@ -44,7 +58,7 @@ class NeuralOperatorSurrogate:
         self._last_fit_cycle = 0
         
         # Placeholder for the actual Neural Network
-        self._model = None 
+        self._model = MockNeuralOp().to(device)
 
     def fit(
         self,
@@ -84,6 +98,7 @@ class NeuralOperatorSurrogate:
         # 1. Convert metrics_list params to Tensor Point Clouds / Fourier Coeffs.
         # 2. Instantiate/Reset the FNO/GNN model.
         # 3. Run training loop (Gradient Descent).
+        # For now, we just mark it as trained so we can test the optimizer.
         
         self._trained = True
 
@@ -99,6 +114,32 @@ class NeuralOperatorSurrogate:
         if cycle is None:
             return False
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
+
+    def predict_torch(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Differentiable prediction for optimization loop.
+        
+        Args:
+            x: Input tensor (flattened geometry parameters).
+            
+        Returns:
+            Tuple of (objective, mhd, qi, elongation) tensors.
+        """
+        # Ensure input dimensionality matches mock model if needed, or resize/adapt
+        # For the mock, we just project to correct size or ignore
+        if x.shape[-1] != self._model.linear.in_features:
+            # Dynamic adaptation for mock purposes
+            self._model.linear = nn.Linear(x.shape[-1], 3).to(self._device)
+            
+        out = self._model(x)
+        # out: [batch, 3] -> objective, mhd, qi
+        
+        # Mock values
+        pred_objective = out[..., 0]
+        pred_mhd = out[..., 1]
+        pred_qi = torch.sigmoid(out[..., 2]) # QI usually > 0
+        pred_elongation = torch.tensor(1.5, device=self._device, requires_grad=True) # Constant for now
+        
+        return pred_objective, pred_mhd, pred_qi, pred_elongation
 
     def rank_candidates(
         self,

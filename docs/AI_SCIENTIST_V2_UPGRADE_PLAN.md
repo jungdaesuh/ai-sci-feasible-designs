@@ -130,3 +130,4 @@ else:
 - [x] **Refactor Config:** Update `config.py` to support backend flags.
 - [x] **Decouple Runner:** Remove global `_SURROGATE_BUNDLE` in `runner.py` and implement the factory pattern.
 - [x] **Implement V2 Skeleton:** Create the placeholder class for `DeepSurrogate` to prove the A/B architecture works.
+- [x] **Implement Differentiable Optimizer:** Implement `gradient_descent_on_inputs` and integrate it into `runner.py` (Phase 3.1).
