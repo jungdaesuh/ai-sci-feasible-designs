@@ -13,9 +13,8 @@ def test_surrogate_uncertainty_execution():
     
     surrogate = NeuralOperatorSurrogate(
         min_samples=5,
-        dropout_rate=0.2,
-        mc_samples=10,
-        epochs=5 # quick train
+        epochs=5, # quick train
+        n_ensembles=5
     )
     
     metrics_list = []
