@@ -188,11 +188,11 @@ class ConstraintWeightsConfig:
 @dataclass(frozen=True)
 class GenerativeConfig:
     enabled: bool
-    backend: str
-    latent_dim: int
-    learning_rate: float
-    epochs: int
-    kl_weight: float
+    backend: str = "vae"
+    latent_dim: int = 16
+    learning_rate: float = 1e-3
+    epochs: int = 100
+    kl_weight: float = 0.001
 
 
 @dataclass(frozen=True)
