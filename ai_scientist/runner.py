@@ -592,7 +592,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--planner",
         choices=["deterministic", "agent"],
-        default="deterministic",
+        default=None,
         help="Choose the planning driver (deterministic loop or Phase 3 agent).",
     )
     parser.add_argument(
@@ -2662,7 +2662,9 @@ def run(
     )
     tools.clear_evaluation_cache()
     planner_mode = (
-        runtime.planner.lower() if runtime and runtime.planner else "deterministic"
+        runtime.planner.lower()
+        if runtime and runtime.planner
+        else cfg.planner.lower()
     )
     budget_controller = BudgetController(cfg.budgets, cfg.adaptive_budgets)
     last_p3_summary: tools.P3Summary | None = None
@@ -2924,6 +2926,8 @@ def _serialize_experiment_config(
         "reporting_dir": str(cfg.reporting_dir),
         "memory_db": str(cfg.memory_db),
         "constellaration_sha": constellaration_sha or "unknown",
+        "reporting": cfg.reporting,
+        "planner": cfg.planner,
     }
 
 

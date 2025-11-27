@@ -227,6 +227,7 @@ class ExperimentConfig:
     source_config: Path = DEFAULT_EXPERIMENT_CONFIG_PATH
     reporting: Mapping[str, Any] = field(default_factory=dict)
     run_overrides: Mapping[str, Any] = field(default_factory=dict)
+    planner: str = "deterministic"
     
     @property
     def surrogate_backend(self) -> str:
@@ -490,4 +491,5 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         memory_db=Path(payload.get("memory_db", DEFAULT_MEMORY_DB_PATH)),
         source_config=config_path,
         reporting=payload.get("reporting", {}),
+        planner=str(payload.get("planner", "deterministic")),
     )
