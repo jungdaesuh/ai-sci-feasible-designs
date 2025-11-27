@@ -10,9 +10,9 @@
 
 We possess a massive asset: the **~158k sample "Constellaration" dataset** hosted on Hugging Face. Currently, the `ai_scientist` V2 system ignores this data, starting every experiment from a "cold start" (random initialization).
 
-This plan outlines the integration of this dataset to **Pre-train** the V2 Neural Surrogates and Generative Models. Crucially, it recognizes the operational challenges of such a large dataset: training is slow, data is messy, and models are fragile.
+This plan outlines the integration of this dataset to **Pre-train** the V2 Neural Surrogates and Generative Models. Crucially, it recognizes the operational challenges of such a large dataset (training is slow, data is messy) and the architectural necessity of separating "Physics" (learned) from "Geometry" (calculated).
 
-Therefore, the strategy prioritizes **Offline Pre-training** (Phase 0) to create a robust data pipeline and cached model checkpoints, rather than attempting to train on 158k rows dynamically at runtime. This transforms the system from a "naive searcher" to an "expert navigator" without destroying developer velocity.
+The strategy prioritizes **Offline Pre-training** (Phase 0) to create a robust data pipeline and cached model checkpoints. It adopts a **Hybrid Neuro-Symbolic Architecture** where deep learning is reserved for expensive physics approximations ($W_{MHD}$, $QI$), while exact geometry (Elongation, Curvature) is handled by differentiable analytical functions.
 
 ---
 
@@ -31,110 +31,125 @@ Starting from NAE (Near-Axis Expansion) is often far from the solution. We will 
 
 ---
 
-## 3. Implementation Roadmap
+## 3. Architecture: Hybrid Neuro-Symbolic Experts
+
+To maximize efficiency and gradient quality, we split the optimization feedback into two distinct experts:
+
+### 3.1. The "Physicist" (Neural Network)
+*   **Role:** Approximate expensive, non-linear plasma physics.
+*   **Implementation:** `NeuralOperatorSurrogate` (PyTorch FNO).
+*   **Targets:** $W_{MHD}$ (Vacuum Well), $QI$ (Quasisymmetry Error).
+*   **Input:** Boundary Coefficients ($\theta$).
+*   **Training:** Supervised learning on the 158k dataset.
+
+### 3.2. The "Engineer" (Differentiable Math)
+*   **Role:** Calculate exact geometric constraints.
+*   **Implementation:** `DifferentiableGeometry` (PyTorch Module).
+*   **Targets:** Elongation, Mean Curvature, Aspect Ratio.
+*   **Input:** Boundary Coefficients ($\theta$).
+*   **Training:** **None.** Calculated analytically using differentiable tensor operations.
+*   **Why:** Prevents "gradient starvation" (where the NN lazily learns easy geometry and ignores hard physics) and provides noiseless, perfect gradients for engineering constraints.
+
+---
+
+## 4. Implementation Roadmap
 
 ### Phase 0: Offline Data Pipeline (The Foundation)
 *Goal: Build a robust, standalone pipeline to clean, normalize, and pre-train models once.*
 
-*   **Task 0.1:** Create `ai_scientist/optim/data_loader.py`.
-    *   Wrap `constellaration` loader.
-    *   **Geometric QA:** Implement filters to reject geometrically invalid shapes (e.g., self-intersection heuristics, spectral decay checks) to prevent "garbage in, garbage out."
-    *   **Strict Schema:** Define required columns per benchmark (P1, P2, P3) and drop rows with missing critical metrics.
-*   **Task 0.2:** Implement **Robust Normalization**.
-    *   Use `LogRobustScaler` (log1p + RobustScaler) for heavy-tailed physics metrics (e.g., $W_{MHD}$).
-    *   Save the fitted scaler as `scaler.pkl`.
-*   **Task 0.3:** Create `scripts/train_offline.py`.
-    *   Load cleaned data.
-    *   Train `NeuralOperatorSurrogate` and save weights to `checkpoints/surrogate_v2.pt`.
-    *   Train `DiffusionDesignModel` and save weights to `checkpoints/diffusion_v2.pt`.
-    *   Generate problem-specific seed files: `seeds_p1.json`, `seeds_p2.json`, `seeds_p3.json`.
+*   [ ] **Task 0.1:** Create `ai_scientist/optim/data_loader.py`.
+    *   [ ] Wrap `constellaration` loader.
+    *   [ ] **Geometric QA:** Implement filters to reject geometrically invalid shapes (e.g., self-intersection heuristics, spectral decay checks) to prevent "garbage in, garbage out."
+    *   [ ] **Strict Schema:** Define required columns per benchmark (P1, P2, P3) and drop rows with missing critical metrics.
+*   [ ] **Task 0.2:** Implement **Robust Normalization**.
+    *   [ ] Use `LogRobustScaler` (log1p + RobustScaler) for heavy-tailed physics metrics (e.g., $W_{MHD}$).
+    *   [ ] Save the fitted scaler as `scaler.pkl`.
+*   [ ] **Task 0.3:** Create `scripts/train_offline.py`.
+    *   [ ] Load cleaned data.
+    *   [ ] Train `NeuralOperatorSurrogate` (Physics targets only) and save weights to `checkpoints/surrogate_v2.pt`.
+    *   [ ] Train `DiffusionDesignModel` and save weights to `checkpoints/diffusion_v2.pt`.
+    *   [ ] Generate problem-specific seed files: `seeds_p1.json`, `seeds_p2.json`, `seeds_p3.json`.
 
-### Phase 1: Runtime Integration (The Consumer)
-*Goal: Update `runner.py` to load artifacts instead of training.*
+### Phase 1: Differentiable Geometry (The Engineer)
+*Goal: Implement the analytic expert.*
 
-*   **Task 1.1:** Modify `ai_scientist/runner.py` to accept `checkpoint_dir` in config.
-*   **Task 1.2:** Load the pre-trained `surrogate_v2.pt` and `scaler.pkl` at startup.
-*   **Task 1.3:** Load the pre-trained `diffusion_v2.pt` for the generative model.
-*   **Task 1.4:** Update `SmartSeeder` to load the relevant `seeds_p{X}.json` based on the active `cfg.problem`.
+*   [ ] **Task 1.1:** Create `ai_scientist/optim/geometry.py`.
+    *   [ ] Implement differentiable PyTorch versions of surface generation ($R(\theta, \phi), Z(\theta, \phi)$) from coefficients.
+    *   [ ] Implement differentiable metrics: Aspect Ratio, Elongation, Mean Curvature.
+    *   [ ] **Constraint:** Must use pure `torch` operations to maintain the autograd graph (no NumPy).
+
+### Phase 2: Runtime Integration (The Consumer)
+*Goal: Update `runner.py` to load artifacts and combine gradients.*
+
+*   [ ] **Task 2.1:** Modify `ai_scientist/runner.py` to accept `checkpoint_dir` in config.
+*   [ ] **Task 2.2:** Load the pre-trained `surrogate_v2.pt` and `scaler.pkl`.
+*   [ ] **Task 2.3:** Update `differentiable.py` (Optimizer) to use the Hybrid Loss:
+    $$ \mathcal{L} = w_p \cdot \text{Neural}(x) + w_e \cdot \text{Analytic}(x) $$
+*   [ ] **Task 2.4:** Update `SmartSeeder` to load problem-specific seeds.
 
 ---
 
-## 4. Technical Integration Details
+## 5. Technical Integration Details
 
-### 4.1 New Config Flags
+### 5.1 New Config Flags
 In `ai_scientist/config.py`:
 ```python
 @dataclass
 class ExperimentConfig:
     # ...
     use_offline_dataset: bool = False  # Master switch
-    offline_checkpoint_dir: Path = Path("checkpoints/v2_1") # Path to .pt and .pkl files
-    offline_seed_file: Path | None = None # Optional override for seed file
+    offline_checkpoint_dir: Path = Path("checkpoints/v2_1")
+    offline_seed_file: Path | None = None
 ```
 
-### 4.2 The Offline Trainer (`scripts/train_offline.py`)
+### 5.2 The Offline Trainer (`scripts/train_offline.py`)
 ```python
 def main():
     # 1. Load & Clean
     df = load_source_datasets_with_no_errors()
     df = filter_geometric_validity(df)
     
-    # 2. Normalize
+    # 2. Normalize (LogRobust for Physics, Standard for Geometry if needed)
     scaler = LogRobustScaler()
-    metrics_norm = scaler.fit_transform(df[METRIC_COLS])
+    physics_metrics = scaler.fit_transform(df[PHYSICS_COLS])
     joblib.dump(scaler, "checkpoints/scaler.pkl")
     
-    # 3. Train Surrogate
+    # 3. Train Surrogate (PHYSICS ONLY)
     surrogate = NeuralOperatorSurrogate()
-    surrogate.fit(df[PARAMS], metrics_norm)
+    surrogate.fit(df[PARAMS], physics_metrics)
     torch.save(surrogate.state_dict(), "checkpoints/surrogate_v2.pt")
     
     # 4. Smart Seeding
     seeds_p1 = select_best_seeds(df, problem="p1")
-    save_seeds(seeds_p1, "checkpoints/seeds_p1.json")
-    # ... (repeat for p2, p3)
+    # ...
 ```
 
-### 4.3 Runner Logic
+### 5.3 Runner Logic
 In `ai_scientist/runner.py`:
 ```python
 def run(...):
-    # ... setup ...
-    
+    # ...
     if cfg.use_offline_dataset:
-        print(f"[runner] Loading V2.1 checkpoints from {cfg.offline_checkpoint_dir}...")
+        # Load Pre-trained Physics Brain
+        surrogate.load_state_dict(torch.load(...))
+        surrogate.set_scaler(joblib.load(...))
         
-        # Load Scaler
-        scaler = joblib.load(cfg.offline_checkpoint_dir / "scaler.pkl")
-        
-        # Load Surrogate
-        if isinstance(surrogate, NeuralOperatorSurrogate):
-            surrogate.load_state_dict(torch.load(cfg.offline_checkpoint_dir / "surrogate_v2.pt"))
-            surrogate.set_scaler(scaler) # Inject scaler for inference
-            
-        # Load Generator
-        if generative_model:
-            generative_model.load_state_dict(torch.load(cfg.offline_checkpoint_dir / "diffusion_v2.pt"))
-            
         # Load Seeds
-        seed_file = cfg.offline_seed_file or (cfg.offline_checkpoint_dir / f"seeds_{cfg.problem}.json")
-        initial_pool = load_seeds(seed_file)
-        
-    # ... proceed to Cycle 1 with populated pool ...
+        initial_pool = load_seeds(...)
 ```
 
 ---
 
-## 5. Expected Impact
+## 6. Expected Impact
 
-| Metric | V2 (Cold Start) | V2.1 (Pre-trained) | Reason |
+| Metric | V2 (Cold Start) | V2.1 (Hybrid + Pre-trained) | Reason |
 | :--- | :--- | :--- | :--- |
 | **Startup Time** | Fast (0 min) | **Fast (0 min)** | Heavy training is moved offline. |
 | **Cycle 1 Feasibility** | ~0% | **~5-10%** | Seeds are "best failures"; optimizer has valid gradients. |
-| **Surrogate Accuracy** | Random | **High** | Model sees 158k examples before inference. |
-| **Stability** | Fragile | **Robust** | LogRobustScaler handles heavy-tailed physics metrics. |
+| **Gradient Quality** | Noisy | **High** | Analytic geometry provides perfect gradients; NN focuses on physics. |
+| **Stability** | Fragile | **Robust** | LogRobustScaler handles heavy tails; Hybrid architecture prevents gradient starvation. |
 
-## 6. Agent Role (AGENTS.md)
+## 7. Agent Role (AGENTS.md)
 
-*   **Data Engineer Agent:** Responsible for running `scripts/train_offline.py` periodically when new data is available and validating the `scaler.pkl` statistics.
+*   **Data Engineer Agent:** Responsible for running `scripts/train_offline.py` and validating `scaler.pkl` statistics.
 *   **Planning Agent:** Can request a "re-seed" from the offline cache if the runtime optimization stalls.

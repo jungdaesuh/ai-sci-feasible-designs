@@ -310,10 +310,10 @@ class PlanningAgent:
             graph_dir.mkdir(parents=True, exist_ok=True)
             graph_file = graph_dir / f"cycle_{cycle_number}.json"
             
-            nodes = [{"id": node_id, **attrs} for node_id, attrs in pg.nodes.items()]
+            nodes = [{"id": node_id, **attrs} for node_id, attrs in pg.nodes(data=True)]
             edges = [
                 {"src": src, "dst": dst, "attrs": attrs}
-                for src, dst, attrs in pg.edges
+                for src, dst, attrs in pg.edges(data=True)
             ]
             snapshot_data = {"nodes": nodes, "edges": edges}
             graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
