@@ -249,11 +249,6 @@ class P3SearchWrapper:
                     ):
                         dominated = True
                         break
-                    if (grad >= o_grad and aspect <= o_aspect) and (
-                        grad > o_grad or aspect < o_aspect
-                    ):
-                        dominated = True
-                        break
                 if not dominated:
                     front.append(idx)
             if not front:
