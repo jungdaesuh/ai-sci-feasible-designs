@@ -41,16 +41,16 @@ The current codebase is a robust, production-ready orchestration system ("Versio
 ### Phase 1: Infrastructure & Representation
 *Goal: Establish the data representations and infrastructural backbone.*
 
-*   **1.1 Hybrid Representation:** Utilities to convert between Fourier coefficients (Global) and 3D Mesh/Point Clouds (Local).
-*   **1.2 Equivariance Integration:** Integrated `PointNetEncoder` (with T-Net) to enforce approximate SE(3) symmetry in networks.
-*   **1.3 World Model Upgrade:** Expand `memory.db` schema to store advanced optimization states (ALM multipliers, surrogate checkpoints).
+*   [x] **1.1 Hybrid Representation:** Utilities to convert between Fourier coefficients (Global) and 3D Mesh/Point Clouds (Local).
+*   [x] **1.2 Equivariance Integration:** Integrated `PointNetEncoder` (with T-Net) to enforce approximate SE(3) symmetry in networks.
+*   [x] **1.3 World Model Upgrade:** Expand `memory.db` schema to store advanced optimization states (ALM multipliers, surrogate checkpoints).
 
 ### Phase 2: Advanced Physics-Informed Surrogates (The Physics Core)
 *Goal: Build fast, differentiable, uncertainty-aware replacements for VMEC++.*
 
-*   **2.1 Modular Surrogate Interface:** Refactor `SurrogateBundle` into an abstract base class supporting both `sklearn` (V1) and `torch`/`jax` (V2) backends.
+*   [x] **2.1 Modular Surrogate Interface:** Refactor `SurrogateBundle` into an abstract base class supporting both `sklearn` (V1) and `torch`/`jax` (V2) backends.
 *   **2.2 Physics Core (FNOs):** [x] Implement Equivariant Fourier Neural Operators to predict magnetic fields ($\vec{B}$) from boundary coefficients.
-*   **2.3 Geometric Surrogates (GNNs):** [x] Implemented "Geometric Branch" using custom Toroidal GNN (`ai_scientist.optim.gnn`) to predict geometric constraints, replacing the interim PointNet implementation.
+*   [x] **2.3 Geometric Surrogates (GNNs):** Implemented "Geometric Branch" using `PointNetEncoder` (`ai_scientist.optim.equivariance`) for geometric constraint prediction.
 *   **2.4 Uncertainty Quantification:** [x] Implement Deep Ensembles for robust active learning.
 
 ### Phase 3: Autonomous Optimization Engine (Inverse Design)
@@ -64,7 +64,7 @@ The current codebase is a robust, production-ready orchestration system ("Versio
 *Goal: Discover novel designs and map trade-offs.*
 
 *   **4.1 VAE / Latent Optimization:** [x] Train a VAE to learn a smooth latent space for optimization.
-*   **4.2 Conditional Generation:** (Advanced) Diffusion models for $P(\text{Geometry} | \text{Metrics})$.
+*   [x] **4.2 Conditional Generation:** (Advanced) Diffusion models for $P(\text{Geometry} | \text{Metrics})$.
 
 ### Phase 5: Orchestration & Autonomy
 *Goal: Self-driving research.*
