@@ -1,9 +1,8 @@
 import pytest
-import numpy as np
 try:
     import torch
     from ai_scientist.optim import differentiable
-    from ai_scientist import tools
+
 except ImportError:
     pytest.skip("PyTorch not available", allow_module_level=True)
 

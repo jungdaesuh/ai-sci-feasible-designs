@@ -1,7 +1,5 @@
 
 import torch
-import pytest
-import numpy as np
 from ai_scientist.optim import geometry
 
 def test_batch_fourier_to_real_space():

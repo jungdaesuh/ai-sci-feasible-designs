@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
 
 from constellaration.geometry import surface_rz_fourier
 from constellaration.utils import pytree

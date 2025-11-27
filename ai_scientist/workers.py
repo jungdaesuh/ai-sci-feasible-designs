@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping
-import numpy as np
-import jax.numpy as jnp
-import torch
+from typing import Any, Dict
 
 from ai_scientist import config as ai_config
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from ai_scientist.optim.generative import GenerativeDesignModel
+from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
 from ai_scientist.optim.samplers import NearAxisSampler
 
 class Worker(ABC):
@@ -90,17 +87,31 @@ class ExplorationWorker(Worker):
         
         # VAE Sampling
         if self.generative_model and self.cfg.generative.enabled:
-            # Calculate VAE ratio (e.g., 40% as in runner.py)
-            vae_count = int(n_samples * 0.4)
+            # Calculate VAE ratio (e.g., 40% as in runner.py, or override via context)
+            vae_ratio = context.get("vae_ratio", 0.4)
+            vae_count = int(n_samples * vae_ratio)
             if vae_count > 0:
-                print(f"[ExplorationWorker] Sampling {vae_count} from VAE...")
-                # Assuming generative_model has a sample method
-                # Note: generative_model.sample returns list of dicts
+                print(f"[ExplorationWorker] Sampling {vae_count} from Generative Model...")
+                
+                cycle_index = context.get("cycle", 0)
+                seed_base = self.cfg.random_seed + cycle_index * 20000
+                
                 try:
-                    vae_candidates = self.generative_model.sample(vae_count)
+                    if isinstance(self.generative_model, DiffusionDesignModel):
+                        target_metrics = {
+                            "aspect_ratio": 8.0,
+                            "minimum_normalized_magnetic_gradient_scale_length": 20.0,
+                            "max_elongation": 1.5,
+                            "edge_rotational_transform_over_n_field_periods": 0.4
+                        }
+                        vae_candidates = self.generative_model.sample(vae_count, target_metrics=target_metrics, seed=seed_base)
+                    else:
+                        # VAE
+                        vae_candidates = self.generative_model.sample(vae_count, seed=seed_base)
+
                     candidates.extend(vae_candidates)
                 except Exception as exc:
-                     print(f"[ExplorationWorker] VAE sampling failed: {exc}")
+                     print(f"[ExplorationWorker] Generative sampling failed: {exc}")
 
         # Near Axis Sampling (Fallback or mix)
         remaining = n_samples - len(candidates)

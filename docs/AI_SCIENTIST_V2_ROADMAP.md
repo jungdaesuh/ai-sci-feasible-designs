@@ -62,7 +62,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 ### Phase 4: The Autonomy (Hierarchical Agents)
 *Focus: The "Manager" adjusting the weights.*
 
-- [ ] **4.1 Implement Coordinator Logic**
+- [x] **4.1 Implement Coordinator Logic**
     - *Source:* `V2_UPGRADE_PLAN` (Phase 5)
     - *Action:* Update `ai_scientist/coordinator.py`.
     - *Logic:*

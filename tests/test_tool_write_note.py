@@ -1,6 +1,5 @@
 """Test the write_note tool."""
 
-from pathlib import Path
 
 from ai_scientist import memory, tools
 

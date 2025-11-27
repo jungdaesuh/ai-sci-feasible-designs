@@ -1,5 +1,4 @@
 import warnings
-import jax.tree_util as jtu
 import pytest
 
 

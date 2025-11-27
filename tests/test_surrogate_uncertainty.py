@@ -1,9 +1,9 @@
 
-import pytest
-import torch
+
+
 import numpy as np
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from ai_scientist.optim.surrogate import SurrogatePrediction
+
 
 def test_surrogate_uncertainty_execution():
     # 1. Setup Dummy Data
@@ -21,21 +21,7 @@ def test_surrogate_uncertainty_execution():
     targets = []
     
     for i in range(10):
-        # Create dummy params
-        params = {
-            "n_field_periods": 3,
-            "rc00": 1.0 + np.random.normal(0, 0.1),
-            # Add other dummy coeffs to match flattening if needed, 
-            # but structured_flatten handles incomplete dicts by schema or robustly?
-            # We need to match the schema expectation. 
-            # Let's just rely on structured_flatten to create a schema from the first one.
-            # To be safe, let's use a fixed set of keys.
-            "coeffs": [0.1] * 12 # This might not work if structured_flatten expects specific keys
-        }
-        # Actually tools.structured_flatten works on specific keys usually.
-        # Let's look at how it's used.
-        # For the test, we can mock tools.structured_flatten or provide a dense dict.
-        
+
         # Let's construct a proper detailed dict
         detailed_params = {"n_field_periods": 3}
         for m in range(2): # mpol=1

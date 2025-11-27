@@ -8,7 +8,6 @@ using pure PyTorch scatter/gather operations.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ai_scientist.optim import equivariance
 

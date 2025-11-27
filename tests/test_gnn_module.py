@@ -1,5 +1,4 @@
 
-import pytest
 import torch
 from ai_scientist.optim import gnn
 

@@ -237,7 +237,7 @@ class P3SearchWrapper:
         while remaining:
             front: list[int] = []
             for idx in list(remaining):
-                dominates_any = False
+
                 dominated = False
                 for other in list(remaining):
                     if idx == other:
@@ -252,7 +252,8 @@ class P3SearchWrapper:
                     if (grad >= o_grad and aspect <= o_aspect) and (
                         grad > o_grad or aspect < o_aspect
                     ):
-                        dominates_any = True
+                        dominated = True
+                        break
                 if not dominated:
                     front.append(idx)
             if not front:

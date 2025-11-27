@@ -7,7 +7,6 @@ switching between Exploration (gathering new data/seeds) and Exploitation (optim
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-import numpy as np
 
 from ai_scientist import config as ai_config
 from ai_scientist import memory
@@ -15,7 +14,6 @@ from ai_scientist.planner import PlanningAgent
 from ai_scientist.workers import OptimizationWorker, ExplorationWorker
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel
-from ai_scientist.optim.samplers import NearAxisSampler
 
 class Coordinator:
     """
@@ -82,14 +80,15 @@ class Coordinator:
         
         if strategy == "EXPLORE":
             # Pure exploration: Generate more samples, skip aggressive optimization
-            explore_ctx = {"n_samples": n_candidates}
+            # Increase VAE ratio to 80% to escape local minima
+            explore_ctx = {"n_samples": n_candidates, "cycle": cycle, "vae_ratio": 0.8}
             res = self.explore_worker.run(explore_ctx)
             candidates = res.get("candidates", [])
             
         elif strategy == "EXPLOIT":
             # Pure exploitation: Take best previous, or generates seeds and heavily optimizes
             # For now, we treat "EXPLOIT" as "Generate seeds -> Optimize"
-            explore_ctx = {"n_samples": n_candidates}
+            explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
             seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
             
             opt_ctx = {"initial_guesses": seeds}
@@ -99,7 +98,7 @@ class Coordinator:
         else: # HYBRID
             # Standard workflow: Generate seeds -> Optimize
             # But maybe we mix unoptimized seeds?
-            explore_ctx = {"n_samples": n_candidates}
+            explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
             seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
             
             opt_ctx = {"initial_guesses": seeds}

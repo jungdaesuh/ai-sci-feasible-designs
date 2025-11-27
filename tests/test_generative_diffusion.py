@@ -1,9 +1,7 @@
 
-import pytest
 import torch
-import numpy as np
 from ai_scientist.optim import generative
-from ai_scientist import test_helpers, tools
+from ai_scientist import test_helpers
 
 def test_diffusion_model_training_and_sampling():
     # 1. Create mock data

@@ -1,0 +1,5 @@
+vacuum_well
+edge_magnetic_mirror_ratio
+qi
+minimum_normalized_magnetic_gradient_scale_length
+edge_rotational_transform_over_n_field_periods
