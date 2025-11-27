@@ -243,6 +243,30 @@ CREATE TABLE IF NOT EXISTS optimization_state (
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
 
+CREATE TABLE IF NOT EXISTS alm_state_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    step_index INTEGER NOT NULL,
+    constraint_name TEXT NOT NULL,
+    multiplier_value REAL NOT NULL,
+    penalty_parameter REAL NOT NULL,
+    violation_magnitude REAL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
+CREATE TABLE IF NOT EXISTS surrogate_registry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    backend_type TEXT NOT NULL,
+    training_samples INTEGER NOT NULL,
+    validation_mse REAL,
+    model_hash TEXT NOT NULL,
+    weights_path TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
 CREATE TABLE IF NOT EXISTS surrogate_checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     experiment_id INTEGER NOT NULL,
@@ -478,6 +502,86 @@ class WorldModel:
                 _write()
         else:
             _write()
+
+    def log_alm_state(
+        self,
+        experiment_id: int,
+        cycle: int,
+        step_index: int,
+        constraint_name: str,
+        multiplier_value: float,
+        penalty_parameter: float,
+        violation_magnitude: float | None = None,
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Record the trajectory of ALM multipliers/penalties per step."""
+        def _write() -> None:
+            self._conn.execute(
+                """
+                INSERT INTO alm_state_history
+                (experiment_id, cycle, step_index, constraint_name, multiplier_value, penalty_parameter, violation_magnitude)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    cycle,
+                    step_index,
+                    constraint_name,
+                    multiplier_value,
+                    penalty_parameter,
+                    violation_magnitude,
+                ),
+            )
+        
+        if commit:
+            with self._conn:
+                _write()
+        else:
+            _write()
+
+    def register_surrogate(
+        self,
+        experiment_id: int,
+        cycle: int,
+        backend_type: str,
+        training_samples: int,
+        model_hash: str,
+        weights_path: str,
+        *,
+        validation_mse: float | None = None,
+        commit: bool = True,
+    ) -> int:
+        """Register a trained surrogate model version."""
+        def _write() -> None:
+            nonlocal row_id
+            cursor = self._conn.execute(
+                """
+                INSERT INTO surrogate_registry
+                (experiment_id, cycle, backend_type, training_samples, validation_mse, model_hash, weights_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    cycle,
+                    backend_type,
+                    training_samples,
+                    validation_mse,
+                    model_hash,
+                    weights_path,
+                ),
+            )
+            row_id = cursor.lastrowid
+            assert row_id is not None
+
+        row_id: int | None = None
+        if commit:
+            with self._conn:
+                _write()
+        else:
+            _write()
+        assert row_id is not None
+        return row_id
 
     def record_surrogate_checkpoint(
         self,

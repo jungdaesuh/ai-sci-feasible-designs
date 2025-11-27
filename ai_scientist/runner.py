@@ -1882,6 +1882,17 @@ def _run_cycle(
                         minimize_objective=(problem == "p1"), # assuming P1 objective is minimize
                         cycle=cycle_number,
                     )
+                    # Register the new surrogate version (Phase 1.3)
+                    if isinstance(surrogate_model, NeuralOperatorSurrogate):
+                        world_model.register_surrogate(
+                            experiment_id=experiment_id,
+                            cycle=cycle_number,
+                            backend_type="neural_operator_ensemble",
+                            training_samples=len(history),
+                            model_hash=f"ensemble_n{surrogate_model._n_ensembles}_c{cycle_number}",
+                            weights_path="memory_only", # TODO: Save to disk
+                            commit=False
+                        )
             
             def surrogate_predictor(params: Mapping[str, Any]) -> Tuple[float, Sequence[float]]:
                 # Predict objective and constraints using the surrogate
@@ -1924,6 +1935,8 @@ def _run_cycle(
         
         mp_context = multiprocessing.get_context("spawn") # Safer default for JAX/CUDA
         
+        constraint_names = ["mhd", "qi", "elongation"]
+        
         for k in range(num_alm_steps):
             # V2: Differentiable Optimization
             if cfg.surrogate.backend == "neural_operator" and isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
@@ -1937,6 +1950,7 @@ def _run_cycle(
                     scale=np.array(scale),
                     surrogate=surrogate_model,
                     alm_state=alm_state_dict,
+                    n_field_periods_val=initial_params_map.get("n_field_periods", 1),
                     steps=budget_per_step,
                 )
                 x_new = jnp.array(x_new_np)
@@ -2092,6 +2106,20 @@ def _run_cycle(
                     constraints=constr_new,
                     state=state,
                     settings=alm_settings_obj,
+                )
+            
+            # Log ALM State History (Phase 1.3)
+            for i, c_name in enumerate(constraint_names):
+                # state.multipliers, etc are JAX arrays
+                world_model.log_alm_state(
+                    experiment_id=experiment_id,
+                    cycle=cycle_number,
+                    step_index=k,
+                    constraint_name=c_name,
+                    multiplier_value=float(state.multipliers[i]),
+                    penalty_parameter=float(state.penalty_parameters[i]),
+                    violation_magnitude=float(state.constraints[i]),
+                    commit=False
                 )
 
         candidate_pool = alm_candidates

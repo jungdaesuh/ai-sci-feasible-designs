@@ -28,7 +28,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from ai_scientist import tools
-from ai_scientist.optim import equivariance, geometry, gnn
+from ai_scientist.optim import equivariance, geometry
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 
 
@@ -65,15 +65,12 @@ class StellaratorNeuralOp(nn.Module):
 
         # 2. Geometric Branch (Operating on 3D Point Cloud)
         # We use a modest grid for the surrogate to keep training fast.
-        # Increased to 64 total points to cover full torus adequately
         self.geo_n_theta = 16
         self.geo_n_zeta = 64 
         self.geo_dim = 128
-        # Substituted PointNet with GeometricGNN (Phase 2.3)
-        self.geo_encoder = gnn.GeometricGNN(
-            n_theta=self.geo_n_theta, 
-            n_zeta=self.geo_n_zeta, 
-            output_dim=self.geo_dim,
+        
+        self.geo_encoder = equivariance.PointNetEncoder(
+            embedding_dim=self.geo_dim, 
             align_input=True
         )
 
@@ -178,7 +175,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         learning_rate: float = 1e-3,
         epochs: int = 100,
         batch_size: int = 32,
-        n_ensembles: int = 1,
+        n_ensembles: int = 5,
         hidden_dim: int = 64,
     ) -> None:
         self._min_samples = min_samples
@@ -331,8 +328,15 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             return False
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
-    def predict_torch(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Differentiable prediction for optimization loop (Mean of Ensemble)."""
+    def predict_torch(
+        self, 
+        x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Differentiable prediction for optimization loop (Mean + Std).
+        
+        Returns:
+            (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std, elong_mean, elong_std)
+        """
         if not self._models:
             raise RuntimeError("NeuralOperatorSurrogate not initialized/trained")
         
@@ -349,15 +353,19 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             preds_qi.append(q)
             preds_elong.append(e)
             
-        # Stack and average
-        # x is (Batch, Dim), output is (Batch,)
-        # Stack -> (Ensemble, Batch) -> Mean over dim 0 -> (Batch,)
-        mean_obj = torch.mean(torch.stack(preds_obj), dim=0)
-        mean_mhd = torch.mean(torch.stack(preds_mhd), dim=0)
-        mean_qi = torch.mean(torch.stack(preds_qi), dim=0)
-        mean_elong = torch.mean(torch.stack(preds_elong), dim=0)
+        # Stack (Ensemble, Batch)
+        stack_obj = torch.stack(preds_obj)
+        stack_mhd = torch.stack(preds_mhd)
+        stack_qi = torch.stack(preds_qi)
+        stack_elong = torch.stack(preds_elong)
         
-        return mean_obj, mean_mhd, mean_qi, mean_elong
+        # Compute Mean and Std
+        return (
+            torch.mean(stack_obj, dim=0), torch.std(stack_obj, dim=0),
+            torch.mean(stack_mhd, dim=0), torch.std(stack_mhd, dim=0),
+            torch.mean(stack_qi, dim=0), torch.std(stack_qi, dim=0),
+            torch.mean(stack_elong, dim=0), torch.std(stack_elong, dim=0),
+        )
 
     def rank_candidates(
         self,

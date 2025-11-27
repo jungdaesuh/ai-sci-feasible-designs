@@ -171,15 +171,30 @@ def gradient_descent_on_inputs(
             x_input = torch.cat([x_dense, nfp_tensor], dim=0)
             
             # Predict
-            pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_input.unsqueeze(0))
+            pred_obj, std_obj, pred_mhd, std_mhd, pred_qi, std_qi, pred_elo, std_elo = surrogate.predict_torch(x_input.unsqueeze(0))
             
-            # Loss Formulation
-            loss_obj = pred_obj.squeeze()
+            # Loss Formulation (Risk-Averse: Penalize Uncertainty)
+            beta = 0.1
+            loss_obj = pred_obj.squeeze() + beta * std_obj.squeeze()
             
-            # Constraints (Penalty Method)
-            viol_mhd = torch.relu(-pred_mhd.squeeze())
-            viol_qi = torch.relu(pred_qi.squeeze()) 
-            viol_elo = torch.relu(pred_elo.squeeze()) 
+            # Constraints (Penalty Method) with Pessimistic Bounds
+            # MHD: Good if > 0. Pessimistic: mean - beta*std
+            viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
+            
+            # QI: Good if < cutoff. Pessimistic: mean + beta*std
+            # Assuming cutoff is implicit or we minimize it. Here we use raw value as penalty?
+            # Original code: viol_qi = torch.relu(pred_qi.squeeze())
+            # This implies we want QI <= 0? Or QI is a violation metric?
+            # Usually QI is a value, closer to 0 is better.
+            # Let's assume we want to minimize QI.
+            viol_qi = torch.relu(pred_qi.squeeze() + beta * std_qi.squeeze())
+            
+            # Elongation: Good if < 5.0?
+            # Original code: viol_elo = torch.relu(pred_elo.squeeze())
+            # Wait, original code was: viol_elo = torch.relu(pred_elo.squeeze())
+            # But in alm loop it was: c3 = torch.relu(elo - 5.0)
+            # Let's stick to the previous logic but add uncertainty.
+            viol_elo = torch.relu(pred_elo.squeeze() + beta * std_elo.squeeze()) 
             
             loss_penalty = (
                 weights.mhd * viol_mhd + 
@@ -258,6 +273,7 @@ def optimize_alm_inner_loop(
     optimizer = torch.optim.Adam([x_torch], lr=lr)
     
     FEASIBILITY_CUTOFF = 1e-2 
+    beta = 0.1 # Uncertainty penalty factor
     
     for _ in range(steps):
         optimizer.zero_grad()
@@ -274,16 +290,25 @@ def optimize_alm_inner_loop(
         x_input = torch.cat([x_dense, nfp_tensor], dim=0)
         
         # Predict
-        pred_obj, pred_mhd, pred_qi, pred_elo = surrogate.predict_torch(x_input.unsqueeze(0))
+        (pred_obj, std_obj, 
+         pred_mhd, std_mhd, 
+         pred_qi, std_qi, 
+         pred_elo, std_elo) = surrogate.predict_torch(x_input.unsqueeze(0))
         
-        obj = pred_obj.squeeze()
+        obj = pred_obj.squeeze() + beta * std_obj.squeeze()
         mhd = pred_mhd.squeeze()
         qi = pred_qi.squeeze()
         elo = pred_elo.squeeze()
         
-        c1 = torch.relu(-mhd)
-        c2 = torch.relu(qi - FEASIBILITY_CUTOFF)
-        c3 = torch.relu(elo - 5.0)
+        # Std
+        s_mhd = std_mhd.squeeze()
+        s_qi = std_qi.squeeze()
+        s_elo = std_elo.squeeze()
+        
+        # Constraints (Pessimistic)
+        c1 = torch.relu(-(mhd - beta * s_mhd))
+        c2 = torch.relu((qi + beta * s_qi) - FEASIBILITY_CUTOFF)
+        c3 = torch.relu((elo + beta * s_elo) - 5.0)
         
         constraints = torch.stack([c1, c2, c3])
         

@@ -127,18 +127,21 @@ else:
 
 ## 6. Immediate Next Steps & Outstanding Tasks
 
+### Completed (V2.1 Refinement)
+- [x] **Uncertainty Quantification (Phase 2.4):** Implemented **Deep Ensembles** ($K=5$) in `NeuralOperatorSurrogate`.
+    - *Goal:* Provide $\mu(x)$ and $\sigma(x)$ to the optimizer to prevent "hallucinated" high scores in unseen regions.
+- [x] **World Model Schema Upgrade (Phase 1.3):** Implement **Relational State Tracking** in `memory.py`.
+    - *Tables:* `alm_state_history` (track multipliers/penalties per step) and `surrogate_registry` (track model versions/weights).
+- [x] **Geometric Surrogates (Phase 2.3):** Implement **Hybrid Feature Fusion**.
+    - *Goal:* Create a `HybridSurrogate` that fuses Global Fourier features (FNO) with Local Geometric features (PointNet) to detect local defects like self-intersections.
+
 ### Completed
 - [x] **Refactor Config:** Update `config.py` to support backend flags.
 - [x] **Decouple Runner:** Remove global `_SURROGATE_BUNDLE` in `runner.py` and implement the factory pattern.
 - [x] **Implement V2 Skeleton:** Create the placeholder class for `DeepSurrogate` to prove the A/B architecture works.
 - [x] **Implement Differentiable Optimizer:** Implement `gradient_descent_on_inputs` and integrate it into `runner.py` (Phase 3.1).
 - [x] **Integrate Differentiable ALM into Runner:** Complete Phase 3.2 by integrating the differentiable optimizer into the SA-ALM inner loop.
-- [x] **Refactor Surrogate Interface (Phase 2.1):** Create an abstract base class `BaseSurrogate` to unify V1 (`SurrogateBundle`) and V2 (`NeuralOperatorSurrogate`) and remove union types.
-- [x] **Implement Hybrid Representation (Phase 1.1):** Create utilities in `ai_scientist/optim/geometry.py` to convert Fourier coefficients to 3D Meshes/Point Clouds.
-- [x] **Integrate Equivariance (Phase 1.2):** Investigate and integrate `e3nn` or similar libraries to enforce SE(3) symmetry in `StellaratorNeuralOp`.
-- [x] **World Model Schema Upgrade (Phase 1.3):** Explicitly store ALM multipliers and surrogate checkpoints in `memory.db` (beyond generic snapshots).
-
-### Pending (Gap Analysis)
-- [x] **Geometric Surrogates (Phase 2.3):** Implemented Geometric Branch using custom GNN in `StellaratorNeuralOp`.
-- [x] **Uncertainty Quantification (Phase 2.4):** Upgrade `NeuralOperatorSurrogate` to support Deep Ensembles for robust active learning.
-- [x] **Conditional Generation (Phase 4.2):** Implement Diffusion models for $P(\text{Geometry} | \text{Metrics})$.
+- [x] **Refactor Surrogate Interface (Phase 2.1):** Abstract base class `BaseSurrogate` implemented in `ai_scientist/optim/surrogate.py`.
+- [x] **Implement Hybrid Representation (Phase 1.1):** `ai_scientist/optim/geometry.py` implemented for Fourier-to-Real-Space conversion.
+- [x] **Integrate Equivariance (Phase 1.2):** Implemented `PointNetEncoder` with T-Net in `ai_scientist/optim/equivariance.py` (Alternative to `e3nn`).
+- [x] **Conditional Generation (Phase 4.2):** Implemented `StellaratorDiffusion` in `ai_scientist/optim/generative.py`.
