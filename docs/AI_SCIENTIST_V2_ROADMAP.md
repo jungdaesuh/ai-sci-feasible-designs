@@ -13,7 +13,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 ### Phase 1: The Foundation (Data & Math)
 *Focus: Establishing the "Engineer" (Analytic Math) and the "Map" (Clean Data).*
 
-- [ ] **1.1 Implement Differentiable Geometry (The Engineer)**
+- [x] **1.1 Implement Differentiable Geometry (The Engineer)**
     - *Source:* `HYBRID_ARCHITECTURE_PLAN` (Phase 1)
     - *Action:* Create `ai_scientist/optim/geometry.py`.
     - *Specs:* Implement `elongation`, `curvature`, `aspect_ratio` using **pure PyTorch** tensor operations.
@@ -75,7 +75,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 
 | Milestone | Goal | Dependency | Status |
 | :--- | :--- | :--- | :--- |
-| **M1** | Perfect Geometric Gradients | Phase 1.1 | ⬜ Pending |
+| **M1** | Perfect Geometric Gradients | Phase 1.1 | ✅ Completed |
 | **M2** | Data Pipeline & Seeds | Phase 1.2 | ⬜ Pending |
 | **M3** | Trained Physics Model | Phase 2.2 | ⬜ Pending |
 | **M4** | Hybrid Loop Running | Phase 3.1 | ⬜ Pending |
