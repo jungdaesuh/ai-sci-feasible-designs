@@ -1,14 +1,11 @@
 import unittest
 from unittest.mock import MagicMock
 import numpy as np
-import torch
 import torch.nn as nn
 
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist import config as ai_config
-from ai_scientist import tools
-from constellaration.geometry import surface_rz_fourier
 
 class TestDifferentiableOptim(unittest.TestCase):
 
@@ -134,6 +131,7 @@ class TestDifferentiableOptim(unittest.TestCase):
             scale=scale,
             surrogate=self.surrogate,
             alm_state=alm_state,
+            n_field_periods_val=1,
             steps=5,
             lr=0.1
         )

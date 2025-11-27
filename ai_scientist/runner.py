@@ -16,14 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence, Set, Tuple, Callable
 import random
-import multiprocessing # Import multiprocessing
+
 
 import numpy as np
 import jax.numpy as jnp
 import yaml
 import nevergrad
 import tempfile
-from concurrent import futures
 
 from ai_scientist import adapter
 from ai_scientist import config as ai_config
@@ -37,7 +36,6 @@ from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogateBundle, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
-from ai_scientist import pytree_guard
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
@@ -46,9 +44,7 @@ from constellaration.optimization.augmented_lagrangian import (
     augmented_lagrangian_function,
     update_augmented_lagrangian_state,
 )
-from constellaration.optimization import augmented_lagrangian_runner # To register PyTree
 from constellaration.utils import pytree
-from constellaration import problems
 from constellaration import forward_model
 from orchestration import adaptation as adaptation_helpers
 
@@ -224,10 +220,16 @@ def _objective_constraints(
         
         if metrics is None:
             objective = jnp.array(NAN_TO_HIGH_VALUE)
-            constraints = jnp.ones(6) * NAN_TO_HIGH_VALUE
+            # Determine constraint size based on problem type
+            p_key = (problem_type or "").lower()
+            if p_key.startswith("p1"):
+                c_size = 3
+            else:
+                c_size = 5
+            constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
         else:
             objective = jnp.array(metrics.aspect_ratio)
-            margins = tools.compute_constraint_margins(metrics, "p3")
+            margins = tools.compute_constraint_margins(metrics, problem_type)
             constraints = jnp.array(list(margins.values()))
 
         return ((objective, constraints), metrics)
@@ -1788,12 +1790,13 @@ def _run_cycle(
             # Fallback to standard P3 candidates
             candidate_pool, _, _, _ = _propose_p3_candidates_for_cycle(
                 cfg=active_cfg,
-                cycle_index=cycle_number,
+                cycle_index=cycle_index,
                 world_model=world_model,
                 experiment_id=experiment_id,
                 screen_budget=active_budgets.screen_evals_per_cycle,
                 total_candidates=pool_size,
-                generative_model=generative_model
+                generative_model=generative_model,
+                suggested_params=suggested_params,
             )
         
         # Note: Coordinator handles strategy (Explore/Exploit). 
@@ -1905,12 +1908,23 @@ def _run_cycle(
                 qi = predicted.predicted_qi if predicted.predicted_qi is not None else 1.0 # Assume always positive
                 elongation = predicted.predicted_elongation if predicted.predicted_elongation is not None else 1.0
                 
-                # Simplified prediction of constraint values (positive for violation)
-                predicted_alm_constraints = [
-                    max(0.0, -mhd), # MHD violation: if vacuum_well < 0
-                    max(0.0, qi - FEASIBILITY_CUTOFF), # QI violation: if qi > FEASIBILITY_CUTOFF (needs to be low)
-                    max(0.0, elongation - 5.0), # Elongation violation: if > 5.0 (arbitrary threshold for now)
-                ]
+                p_key = (cfg.problem or "").lower()
+                
+                if p_key.startswith("p1"):
+                     # P1 (size 3)
+                     predicted_alm_constraints = [0.0, 0.0, 0.0]
+                elif p_key.startswith("p2"):
+                     # P2 (size 5): aspect, iota, mirror, elongation, qi
+                     c_elo = max(0.0, elongation - 5.0)
+                     qi_log = math.log10(qi) if qi > 0 else 10.0
+                     c_qi = max(0.0, qi_log - (-4.0))
+                     predicted_alm_constraints = [0.0, 0.0, 0.0, c_elo, c_qi]
+                else:
+                     # P3 (size 5): iota, mirror, mhd, flux, qi
+                     c_mhd = max(0.0, -mhd) # -vacuum_well
+                     qi_log = math.log10(qi) if qi > 0 else 10.0
+                     c_qi = max(0.0, qi_log - (-3.5))
+                     predicted_alm_constraints = [0.0, 0.0, c_mhd, 0.0, c_qi]
                 
                 return float(predicted.predicted_objective), predicted_alm_constraints
 
@@ -1933,9 +1947,15 @@ def _run_cycle(
         budget_per_step = 8 # Inner evaluations per ALM step
         num_alm_steps = max(1, active_budgets.screen_evals_per_cycle // budget_per_step)
         
-        mp_context = multiprocessing.get_context("spawn") # Safer default for JAX/CUDA
+
         
-        constraint_names = ["mhd", "qi", "elongation"]
+        p_key = (cfg.problem or "").lower()
+        if p_key.startswith("p1"):
+            constraint_names = ["aspect_ratio", "average_triangularity", "edge_rotational_transform"]
+        elif p_key.startswith("p2"):
+            constraint_names = ["aspect_ratio", "edge_rotational_transform", "edge_magnetic_mirror_ratio", "max_elongation", "qi_log10"]
+        else:
+            constraint_names = ["edge_rotational_transform", "edge_magnetic_mirror_ratio", "vacuum_well", "flux_compression", "qi_log10"]
         
         for k in range(num_alm_steps):
             # V2: Differentiable Optimization
@@ -2843,7 +2863,7 @@ def run(
             )
             last_p3_summary = p3_summary
             if p3_summary:
-                total = max(1, p3_summary.feasible_count + (p3_summary.archive_size or 0)) # approximate total if not tracked directly
+
                 # Actually p3_summary doesn't store total candidates, but _run_cycle logs feasibility_rate to JSON.
                 # We can infer it from the feasible_count if we knew the total. 
                 # Better: _run_cycle *returns* p3_summary, but feasibility_rate was local. 
