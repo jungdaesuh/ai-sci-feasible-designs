@@ -19,7 +19,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
     - *Specs:* Implement `elongation`, `curvature`, `aspect_ratio` using **pure PyTorch** tensor operations.
     - *Why:* We need perfect gradients for Problem 1 immediately.
 
-- [ ] **1.2 Build Offline Data Pipeline**
+- [x] **1.2 Build Offline Data Pipeline**
     - *Source:* `DATASET_INTEGRATION_PLAN` (Phase 0)
     - *Action:* Create `scripts/train_offline.py` and `ai_scientist/optim/data_loader.py`.
     - *Specs:*

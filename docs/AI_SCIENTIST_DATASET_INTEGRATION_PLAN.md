@@ -57,15 +57,15 @@ To maximize efficiency and gradient quality, we split the optimization feedback 
 ### Phase 0: Offline Data Pipeline (The Foundation)
 *Goal: Build a robust, standalone pipeline to clean, normalize, and pre-train models once.*
 
-*   [ ] **Task 0.1:** Create `ai_scientist/optim/data_loader.py`.
-    *   [ ] Wrap `constellaration` loader.
-    *   [ ] **Geometric QA:** Implement filters to reject geometrically invalid shapes (e.g., self-intersection heuristics, spectral decay checks) to prevent "garbage in, garbage out."
-    *   [ ] **Strict Schema:** Define required columns per benchmark (P1, P2, P3) and drop rows with missing critical metrics.
-*   [ ] **Task 0.2:** Implement **Robust Normalization**.
-    *   [ ] Use `LogRobustScaler` (log1p + RobustScaler) for heavy-tailed physics metrics (e.g., $W_{MHD}$).
-    *   [ ] Save the fitted scaler as `scaler.pkl`.
+*   [x] **Task 0.1:** Create `ai_scientist/optim/data_loader.py`.
+    *   [x] Wrap `constellaration` loader.
+    *   [x] **Geometric QA:** Implement filters to reject geometrically invalid shapes (e.g., self-intersection heuristics, spectral decay checks) to prevent "garbage in, garbage out."
+    *   [x] **Strict Schema:** Define required columns per benchmark (P1, P2, P3) and drop rows with missing critical metrics.
+*   [x] **Task 0.2:** Implement **Robust Normalization**.
+    *   [x] Use `LogRobustScaler` (log1p + RobustScaler) for heavy-tailed physics metrics (e.g., $W_{MHD}$).
+    *   [x] Save the fitted scaler as `scaler.pkl`.
 *   [ ] **Task 0.3:** Create `scripts/train_offline.py`.
-    *   [ ] Load cleaned data.
+    *   [x] Load cleaned data.
     *   [ ] Train `NeuralOperatorSurrogate` (Physics targets only) and save weights to `checkpoints/surrogate_v2.pt`.
     *   [ ] Train `DiffusionDesignModel` and save weights to `checkpoints/diffusion_v2.pt`.
     *   [ ] Generate problem-specific seed files: `seeds_p1.json`, `seeds_p2.json`, `seeds_p3.json`.
