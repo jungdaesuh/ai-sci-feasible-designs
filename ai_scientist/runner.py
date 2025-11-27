@@ -1177,35 +1177,40 @@ def _latest_evaluations_by_design(
     return latest
 
 
-def _extract_objectives(entry: Mapping[str, Any]) -> tuple[float, float]:
+def _extract_objectives(entry: Mapping[str, Any], problem_type: str = "p3") -> tuple[float, float]:
     metrics = entry["evaluation"]["metrics"]
+    
+    if problem_type == "p1":
+        # P1: minimize max_elongation.
+        # We treat "gradient" slot as -max_elongation (higher is better)
+        elong = float(metrics.get("max_elongation", 0.0))
+        return -elong, 0.0
+
     # P3/P2 Check
     if "minimum_normalized_magnetic_gradient_scale_length" in metrics:
         gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
         aspect = float(metrics.get("aspect_ratio", 0.0))
         return gradient, aspect
     
-    # P1 Fallback (optimize elongation)
-    # We map this to (primary, secondary) for crowding/proxy
-    # P1: minimize max_elongation.
-    # We treat "gradient" slot as -max_elongation (higher is better)
+    # Fallback if metrics missing for non-P1 (or legacy behavior)
     elong = float(metrics.get("max_elongation", 0.0))
     return -elong, 0.0
 
 
-def _objective_proxy(entry: Mapping[str, Any]) -> float:
-    gradient, aspect = _extract_objectives(entry)
+def _objective_proxy(entry: Mapping[str, Any], problem_type: str = "p3") -> float:
+    gradient, aspect = _extract_objectives(entry, problem_type=problem_type)
     return gradient - aspect
 
 
 def _crowding_distance(
     entries_by_design: Mapping[str, Mapping[str, Any]],
+    problem_type: str = "p3",
 ) -> dict[str, float]:
     if not entries_by_design:
         return {}
     values: list[tuple[str, float, float]] = []
     for design_hash, entry in entries_by_design.items():
-        gradient, aspect = _extract_objectives(entry)
+        gradient, aspect = _extract_objectives(entry, problem_type=problem_type)
         values.append((design_hash, float(gradient), float(aspect)))
     distances = {design_hash: 0.0 for design_hash in entries_by_design}
     if len(values) <= 2:
@@ -1238,6 +1243,7 @@ def _rank_candidates_for_promotion(
     entries_by_design: Mapping[str, Mapping[str, Any]],
     promote_limit: int,
     reference_point: Tuple[float, float],
+    problem_type: str = "p3",
 ) -> list[Mapping[str, Any]]:
     if not entries_by_design:
         return []
@@ -1256,7 +1262,7 @@ def _rank_candidates_for_promotion(
         key=lambda entry: (
             0.0 if _feasibility_value(entry) <= FEASIBILITY_CUTOFF else 1.0,
             _feasibility_value(entry),
-            -_objective_proxy(entry),
+            -_objective_proxy(entry, problem_type=problem_type),
         ),
     )
     if len(ranked) >= promote_limit:
@@ -1266,9 +1272,9 @@ def _rank_candidates_for_promotion(
         for design_hash, entry in entries_by_design.items()
         if design_hash not in {entry.design_hash for entry in summary.pareto_entries}
     }
-    crowding = _crowding_distance(remaining)
+    crowding = _crowding_distance(remaining, problem_type=problem_type)
 
-    def _sort_key(design_hash: str) -> tuple[float, float, float]:
+    def _sort_key(design_hash: str) -> tuple[float, float, float, float]:
         entry = remaining[design_hash]
         feas = _feasibility_value(entry)
         feasible_flag = 0.0 if feas <= FEASIBILITY_CUTOFF else 1.0
@@ -1276,7 +1282,7 @@ def _rank_candidates_for_promotion(
             feasible_flag,
             -crowding.get(design_hash, 0.0),
             feas,
-            -_objective_proxy(entry),
+            -_objective_proxy(entry, problem_type=problem_type),
         )
 
     for design_hash in sorted(remaining, key=_sort_key):
@@ -2235,7 +2241,10 @@ def _run_cycle(
         if sufficient_feasible:
             # Standard Pareto/Feasibility ranking
             prioritized_screen = _rank_candidates_for_promotion(
-                screen_design_map, active_budgets.promote_top_k, P3_REFERENCE_POINT
+                screen_design_map,
+                active_budgets.promote_top_k,
+                P3_REFERENCE_POINT,
+                problem_type=cfg.problem,
             )
             to_promote = prioritized_screen[:promote_limit]
         else:
