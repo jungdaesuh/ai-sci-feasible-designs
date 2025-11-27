@@ -422,6 +422,8 @@ def export_metrics_to_prometheus_textfile(metrics: Mapping[str, Any], file_path:
         _LOGGER.warning("prometheus_client not installed, skipping metrics export")
         return
 
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
     registry = CollectorRegistry()
     for key, value in metrics.items():
         if isinstance(value, (int, float)):
