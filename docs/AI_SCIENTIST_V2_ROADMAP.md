@@ -48,13 +48,13 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 ### Phase 3: The Engine (Optimization Loop)
 *Focus: assembling the Hybrid Loss function.*
 
-- [ ] **3.1 Implement Hybrid Loss**
+- [x] **3.1 Implement Hybrid Loss**
     - *Source:* `HYBRID_ARCHITECTURE_PLAN` (Phase 4)
     - *Action:* Update `ai_scientist/optim/differentiable.py`.
     - *Formula:* `Loss = w_p * NN(x) + w_e * Math(x)`.
     - *Detail:* Inject `geometry.elongation(x)` (from 1.1) directly into the loss graph.
 
-- [ ] **3.2 Update Runner for Offline Artifacts**
+- [x] **3.2 Update Runner for Offline Artifacts**
     - *Source:* `DATASET_INTEGRATION_PLAN` (Phase 2)
     - *Action:* Update `ai_scientist/runner.py`.
     - *Logic:* If `use_offline_dataset=True`, load `checkpoints/surrogate_physics_v2.pt` and bypass online bootstrap training.
@@ -78,4 +78,4 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 | **M1** | Perfect Geometric Gradients | Phase 1.1 | ✅ Completed |
 | **M2** | Data Pipeline & Seeds | Phase 1.2 | ⬜ Pending |
 | **M3** | Trained Physics Model | Phase 2.2 | ⬜ Pending |
-| **M4** | Hybrid Loop Running | Phase 3.1 | ⬜ Pending |
+| **M4** | Hybrid Loop Running | Phase 3.1 | ✅ Completed |

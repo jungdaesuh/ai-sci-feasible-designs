@@ -27,6 +27,8 @@ pytree.register_pydantic_data(
     meta_fields=["n_field_periods", "is_stellarator_symmetric"]
 )
 
+MAX_ELONGATION = 5.0
+
 
 def _compute_index_mapping(
     boundary_template: Any,
@@ -196,20 +198,12 @@ def gradient_descent_on_inputs(
             # MHD: Good if > 0. Pessimistic: mean - beta*std
             viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
             
-            # QI: Good if < cutoff. Pessimistic: mean + beta*std
-            # Assuming cutoff is implicit or we minimize it. Here we use raw value as penalty?
-            # Original code: viol_qi = torch.relu(pred_qi.squeeze())
-            # This implies we want QI <= 0? Or QI is a violation metric?
-            # Usually QI is a value, closer to 0 is better.
-            # Let's assume we want to minimize QI.
+            # QI: Good if < 0 (if centered) or just minimize it. 
+            # Using raw value as penalty (assuming minimizing QI).
             viol_qi = torch.relu(pred_qi.squeeze() + beta * std_qi.squeeze())
             
-            # Elongation: Good if < 5.0?
-            # Original code: viol_elo = torch.relu(pred_elo.squeeze())
-            # Wait, original code was: viol_elo = torch.relu(pred_elo.squeeze())
-            # But in alm loop it was: c3 = torch.relu(elo - 5.0)
-            # Let's stick to the previous logic but add uncertainty.
-            viol_elo = torch.relu(pred_elo.squeeze() + beta * std_elo.squeeze()) 
+            # Elongation: Good if < MAX_ELONGATION
+            viol_elo = torch.relu((pred_elo.squeeze() + beta * std_elo.squeeze()) - MAX_ELONGATION) 
             
             loss_penalty = (
                 weights.mhd * viol_mhd + 
@@ -334,7 +328,7 @@ def optimize_alm_inner_loop(
         # Constraints (Pessimistic)
         c1 = torch.relu(-(mhd - beta * s_mhd))
         c2 = torch.relu((qi + beta * s_qi) - FEASIBILITY_CUTOFF)
-        c3 = torch.relu((elo + beta * s_elo) - 5.0)
+        c3 = torch.relu((elo + beta * s_elo) - MAX_ELONGATION)
         
         constraints = torch.stack([c1, c2, c3])
         

@@ -73,17 +73,17 @@ To maximize efficiency and gradient quality, we split the optimization feedback 
 ### Phase 1: Differentiable Geometry (The Engineer)
 *Goal: Implement the analytic expert.*
 
-*   [ ] **Task 1.1:** Create `ai_scientist/optim/geometry.py`.
-    *   [ ] Implement differentiable PyTorch versions of surface generation ($R(\theta, \phi), Z(\theta, \phi)$) from coefficients.
-    *   [ ] Implement differentiable metrics: Aspect Ratio, Elongation, Mean Curvature.
-    *   [ ] **Constraint:** Must use pure `torch` operations to maintain the autograd graph (no NumPy).
+*   [x] **Task 1.1:** Create `ai_scientist/optim/geometry.py`.
+    *   [x] Implement differentiable PyTorch versions of surface generation ($R(\theta, \phi), Z(\theta, \phi)$) from coefficients.
+    *   [x] Implement differentiable metrics: Aspect Ratio, Elongation, Mean Curvature.
+    *   [x] **Constraint:** Must use pure `torch` operations to maintain the autograd graph (no NumPy).
 
 ### Phase 2: Runtime Integration (The Consumer)
 *Goal: Update `runner.py` to load artifacts and combine gradients.*
 
-*   [ ] **Task 2.1:** Modify `ai_scientist/runner.py` to accept `checkpoint_dir` in config.
-*   [ ] **Task 2.2:** Load the pre-trained `surrogate_v2.pt` and `scaler.pkl`.
-*   [ ] **Task 2.3:** Update `differentiable.py` (Optimizer) to use the Hybrid Loss:
+*   [x] **Task 2.1:** Modify `ai_scientist/runner.py` to accept `checkpoint_dir` in config.
+*   [x] **Task 2.2:** Load the pre-trained `surrogate_v2.pt` and `scaler.pkl`.
+*   [x] **Task 2.3:** Update `differentiable.py` (Optimizer) to use the Hybrid Loss:
     $$ \mathcal{L} = w_p \cdot \text{Neural}(x) + w_e \cdot \text{Analytic}(x) $$
 *   [ ] **Task 2.4:** Update `SmartSeeder` to load problem-specific seeds.
 

@@ -202,6 +202,7 @@ class SurrogateConfig:
     learning_rate: float = 1e-3
     epochs: int = 100
     hidden_dim: int = 64
+    use_offline_dataset: bool = False
 
 
 @dataclass(frozen=True)
@@ -428,6 +429,7 @@ def _surrogate_config_from_dict(
         learning_rate=float(config.get("learning_rate", 1e-3)),
         epochs=int(config.get("epochs", 100)),
         hidden_dim=int(config.get("hidden_dim", 64)),
+        use_offline_dataset=bool(config.get("use_offline_dataset", False)),
     )
 
 

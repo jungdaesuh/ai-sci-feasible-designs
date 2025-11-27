@@ -85,7 +85,7 @@ $$ \mathcal{L} = w_p \cdot \text{NeuralNet}(x)_{[\text{MHD}, \text{QI}]} + w_e \
     *   Add logic: `if not geometer.check(candidate): continue`.
 
 ### Phase 4: The "Brain" Integration
-*   **Task 4.1:** Update `ai_scientist/optim/differentiable.py`.
+*   [x] **Task 4.1:** Update `ai_scientist/optim/differentiable.py`.
     *   Modify `gradient_descent_on_inputs` to use the new Hybrid Loss formula.
     *   Inject `geometry.elongation(x)` directly into the loss calculation.
 

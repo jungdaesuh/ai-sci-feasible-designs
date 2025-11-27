@@ -19,6 +19,7 @@ Implementation Details:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -179,7 +180,11 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._min_samples = min_samples
         self._points_cadence = points_cadence
         self._cycle_cadence = cycle_cadence
-        self._device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
+        self._device = "cpu"
+        if device == "cuda" and torch.cuda.is_available():
+            self._device = "cuda"
+        elif device == "mps" and torch.backends.mps.is_available():
+            self._device = "mps"
         self._lr = learning_rate
         self._epochs = epochs
         self._batch_size = batch_size
@@ -193,6 +198,49 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._models: list[StellaratorNeuralOp] = []
         self._optimizers: list[optim.Optimizer] = []
         self._schema: tools.FlattenSchema | None = None
+
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load model state from a checkpoint file (Task 3.2)."""
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+            
+        logging.info(f"[surrogate_v2] Loading checkpoint from {path}...")
+        checkpoint = torch.load(path, map_location=self._device)
+        
+        # Load Schema
+        self._schema = checkpoint.get("schema")
+        
+        # Re-init models
+        state_dicts = checkpoint.get("models")
+        if not state_dicts:
+            raise ValueError("Checkpoint does not contain 'models' state dicts")
+            
+        self._models = []
+        self._n_ensembles = len(state_dicts)
+        
+        mpol = checkpoint.get("mpol")
+        ntor = checkpoint.get("ntor")
+        hidden_dim = checkpoint.get("hidden_dim", self._hidden_dim)
+        
+        if mpol is None or ntor is None:
+             # Try to infer from schema
+             if self._schema:
+                 mpol = self._schema.mpol
+                 ntor = self._schema.ntor
+             else:
+                 raise ValueError("Checkpoint missing mpol/ntor and schema")
+                 
+        logging.info(f"[surrogate_v2] Rehydrating {self._n_ensembles} models (mpol={mpol}, ntor={ntor}).")
+        
+        for i in range(self._n_ensembles):
+            model = StellaratorNeuralOp(mpol=mpol, ntor=ntor, hidden_dim=hidden_dim).to(self._device)
+            model.load_state_dict(state_dicts[i])
+            model.eval()
+            self._models.append(model)
+            # No need to init optimizers for inference-only mode
+            
+        self._trained = True
 
     def fit(
         self,
