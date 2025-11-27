@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -215,9 +215,19 @@ class SurrogateBundle(BaseSurrogate):
         self._last_fit_cycle = 0
 
     def _with_timeout(self, func):
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(func)
-            return future.result(timeout=self._timeout_seconds)
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(func)
+            result = future.result(timeout=self._timeout_seconds)
+            executor.shutdown(wait=True)
+            return result
+        except TimeoutError:
+            future.cancel()
+            executor.shutdown(wait=False)
+            raise
+        except:
+            executor.shutdown(wait=True)
+            raise
 
     def _vectorize(self, params: Mapping[str, Any]) -> np.ndarray:
         vector, schema = tools.structured_flatten(
@@ -349,7 +359,11 @@ class SurrogateBundle(BaseSurrogate):
             self._regressors = regressors
             self._trained = True
 
-        self._with_timeout(_train_bundle)
+        try:
+            self._with_timeout(_train_bundle)
+        except TimeoutError:
+            logging.warning("[surrogate] fit timed out; downgrading to untrained status.")
+            self._trained = False
 
     def should_retrain(self, sample_count: int, cycle: int | None = None) -> bool:
         if not self._trained:
@@ -382,6 +396,27 @@ class SurrogateBundle(BaseSurrogate):
         oriented = -float(predicted_objective) if minimize_objective else float(predicted_objective)
         return float(prob_feasible) * oriented
 
+    def _heuristic_rank(
+        self, candidates: Sequence[Mapping[str, Any]], minimize_objective: bool
+    ) -> list[SurrogatePrediction]:
+        logging.info("[surrogate] using heuristic ranking (fallback/cold start)")
+        cold_ranks: list[SurrogatePrediction] = []
+        for candidate in candidates:
+            params = candidate.get("candidate_params") or candidate.get("params", {})
+            features = _params_feature_vector(params)
+            base_score = float(features[0]) if features.size else 0.0
+            score = -base_score if minimize_objective else base_score
+            cold_ranks.append(
+                SurrogatePrediction(
+                    expected_value=score,
+                    prob_feasible=0.0,
+                    predicted_objective=base_score,
+                    minimize_objective=minimize_objective,
+                    metadata=candidate,
+                )
+            )
+        return sorted(cold_ranks, key=lambda item: item.expected_value, reverse=True)
+
     def rank_candidates(
         self,
         candidates: Sequence[Mapping[str, Any]],
@@ -395,23 +430,7 @@ class SurrogateBundle(BaseSurrogate):
         exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
 
         if not self._trained:
-            logging.info("[surrogate] cold start ranking; using heuristic features")
-            cold_ranks: list[SurrogatePrediction] = []
-            for candidate in candidates:
-                params = candidate.get("candidate_params") or candidate.get("params", {})
-                features = _params_feature_vector(params)
-                base_score = float(features[0]) if features.size else 0.0
-                score = -base_score if minimize_objective else base_score
-                cold_ranks.append(
-                    SurrogatePrediction(
-                        expected_value=score,
-                        prob_feasible=0.0,
-                        predicted_objective=base_score,
-                        minimize_objective=minimize_objective,
-                        metadata=candidate,
-                    )
-                )
-            return sorted(cold_ranks, key=lambda item: item.expected_value, reverse=True)
+            return self._heuristic_rank(candidates, minimize_objective)
 
         metrics_list: list[Mapping[str, Any]] = []
         for candidate in candidates:
@@ -420,7 +439,12 @@ class SurrogateBundle(BaseSurrogate):
                 params = candidate.get("params", {})
             metrics_list.append({"candidate_params": params})
         feature_matrix = self._feature_matrix(metrics_list)
-        prob, preds_dict = self._predict_batch(feature_matrix)
+        
+        try:
+            prob, preds_dict = self._predict_batch(feature_matrix)
+        except TimeoutError:
+            logging.warning("[surrogate] prediction timed out; using heuristic fallback")
+            return self._heuristic_rank(candidates, minimize_objective)
         
         # Default to objective predictions
         objs = preds_dict.get("objective", np.zeros(len(candidates)))
