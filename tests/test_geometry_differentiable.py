@@ -150,10 +150,49 @@ def test_geometry_metrics_batched_nfp():
     
     # Calc area
     ar_val = geometry.aspect_ratio(rc, zs, n_field_periods=1)
-    # Area = pi * 2 * 1 = 2pi ~ 6.28.
-    # r_minor = sqrt(2).
-    # R0 = 5.
-    # AR = 5 / sqrt(2) = 3.535.
-    
-    # We just assert it runs and gives finite value
     assert ar_val > 0
+
+
+def test_nfp_dependence():
+    """
+    Regression test for [P1]: Ensure that different nfp values produce 
+    different geometries when nfp is passed as a batch tensor.
+    
+    Previous bug: normalizing zeta grid by nfp canceled out nfp in the phase argument,
+    making the surface independent of nfp.
+    """
+    mpol = 2
+    ntor = 2
+    nt = ntor
+    
+    # Construct a surface where N matters.
+    # Base torus (m=1, n=0) + Rotating perturbation (m=2, n=1).
+    # R ~ R0 + r cos(t) + delta cos(2t - Nz)
+    # Z ~      r sin(t) + delta sin(2t - Nz)
+    # This creates a spiraling ridge. Higher N = more spirals = higher area/curvature.
+    
+    rc = torch.zeros(2, mpol+1, 2*ntor+1)
+    zs = torch.zeros(2, mpol+1, 2*ntor+1)
+    
+    # Identical coefficients for both batch items
+    rc[:, 0, nt] = 5.0 # R0
+    rc[:, 1, nt] = 1.0 # m=1, n=0 (Base circle)
+    zs[:, 1, nt] = 1.0 
+    
+    rc[:, 2, nt+1] = 0.3 # m=2, n=1 (Perturbation)
+    zs[:, 2, nt+1] = 0.3 
+    
+    # Different Nfp
+    nfp = torch.tensor([1.0, 5.0])
+    
+    # Calculate Mean Curvature
+    curv = geometry.mean_curvature(rc, zs, n_field_periods=nfp)
+    
+    # Check that the two curvatures are DIFFERENT.
+    assert not torch.isclose(curv[0], curv[1], rtol=1e-3), \
+        f"Curvatures should differ for different Nfp. Got {curv[0]} and {curv[1]}"
+        
+    # Also check Surface Area
+    area = geometry.surface_area(rc, zs, n_field_periods=nfp)
+    assert not torch.isclose(area[0], area[1], rtol=1e-3), \
+         f"Areas should differ for different Nfp. Got {area[0]} and {area[1]}"
