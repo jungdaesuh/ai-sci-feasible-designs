@@ -348,26 +348,12 @@ def _compute_derivatives(
             # d/dt -> m, d/dz -> -n*nfp
             # d(cos)/dx = -sin, d(sin)/dx = cos
             
-            dn = -n_val * nfp # d(angle)/dzeta
-            dm = m_val        # d(angle)/dtheta
-            
-            R_t = R_t + rc * (-dm * s)
-            R_z = R_z + rc * (dn * s)   # d(cos) = -sin * dn -> -dn*sin. Wait. d/dz(cos(u)) = -sin(u) * u_z. u_z = -n*nfp. So -sin * -n*nfp = n*nfp*sin.
-                                        # My code: rc * (dn * s). If dn = -n*nfp, then rc * (-n*nfp * s).
-                                        # Correct is: -sin(angle) * (-n*nfp) = n*nfp*sin(angle).
-                                        # Here dn is defined as -n*nfp. So -dn * sin is correct. 
-                                        # Let's check: rc * ((-n*nfp)*s) is incorrect sign.
-                                        # d/dz (cos(mt - nNz)) = -sin(...) * (-nN) = +nN sin(...).
-                                        # dn = -nN. So -dn * sin.
-                                        # In code: `rc * (dn * s)` -> `rc * (-nN * s)`. This is -nN sin. WRONG.
-                                        
-            # Correction:
-            # u = m*t - n*N*z
-            # du/dz = -n*N
-            # d(cos u)/dz = -sin u * du/dz = -sin u * (-nN) = +nN sin u.
-            # d(sin u)/dz = cos u * du/dz = -nN cos u.
-            
             factor_z = -n_val * nfp
+            
+            # 1st Derivatives
+            # R = sum(rc * cos(u)), u = m*t - n*N*z
+            # dR/dt = sum(-rc * m * sin(u))
+            # dR/dz = sum(-rc * (-n*N) * sin(u)) = sum(rc * n*N * sin(u))
             
             R_t = R_t - rc * m_val * s
             R_z = R_z - rc * factor_z * s # -rc * (-nN) * s = +rc nN s. Correct.
