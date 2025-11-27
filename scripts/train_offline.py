@@ -76,10 +76,23 @@ def select_best_seeds(df):
             (df["edge_rotational_transform_over_n_field_periods"] >= 0.25)
         )
         p1_candidates = df[p1_mask].sort_values("max_elongation").head(20)
+        
         if len(p1_candidates) > 0:
             save_seeds(p1_candidates, "p1_seeds.json")
         else:
-            print("No valid P1 candidates found. Skipping p1_seeds.json.")
+            print("No strict P1 candidates found. Using 'Best-of-Failure' (closest to geometry targets).")
+            # Fallback: Minimize distance to target A=4.0, delta=-0.5, iota=0.3
+            # Distance = |A - 4| + |delta - (-0.5)| + |iota - 0.3|
+            
+            dist = (
+                (df["aspect_ratio"] - 4.0).abs() + 
+                (df["average_triangularity"] - (-0.5)).abs() +
+                (df["edge_rotational_transform_over_n_field_periods"] - 0.3).abs()
+            )
+            
+            # Take top 20 closest
+            p1_fallback = df.iloc[dist.argsort()].head(20)
+            save_seeds(p1_fallback, "p1_seeds.json")
     
     # P2: Simple QI
     # Constraints: A <= 10, iota >= 0.25, M <= 0.2, E <= 5. Minimize QI.
