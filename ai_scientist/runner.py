@@ -105,6 +105,13 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
     cached = _BOUNDARY_SEED_CACHE.get(resolved)
     if cached is None:
         raw = json.loads(resolved.read_text(encoding="utf-8"))
+        
+        # Handle list of seeds (Best-of-Failure format) by taking the first one as a template
+        if isinstance(raw, list):
+            if not raw:
+                raise ValueError(f"Seed file {path} is an empty list.")
+            raw = raw[0]
+            
         payload: dict[str, Any] = {
             "r_cos": np.asarray(raw["r_cos"], dtype=float),
             "z_sin": np.asarray(raw["z_sin"], dtype=float),
