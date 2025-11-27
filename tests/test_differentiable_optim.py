@@ -33,7 +33,7 @@ class TestDifferentiableOptim(unittest.TestCase):
                 self.mpol = mpol
                 self.ntor = ntor
                 # Just some learnable params to allow gradients
-                self.layer = nn.Linear(1, 4) 
+                self.layer = nn.Linear(1, 3) 
                 
             def forward(self, x):
                 # x is (Batch, DenseSize)
@@ -41,10 +41,10 @@ class TestDifferentiableOptim(unittest.TestCase):
                 # Collapse x to 1 dim to feed linear
                 val = x.mean(dim=1, keepdim=True)
                 out = self.layer(val)
-                # return obj, mhd, qi, elo
-                return out[:, 0], out[:, 1], out[:, 2], out[:, 3]
+                # return obj, mhd, qi
+                return out[:, 0], out[:, 1], out[:, 2]
 
-        self.surrogate._models = [DummyModel()]
+        self.surrogate._models = [DummyModel(), DummyModel()]
         
         # Mock Config
         self.cfg = MagicMock(spec=ai_config.ExperimentConfig)

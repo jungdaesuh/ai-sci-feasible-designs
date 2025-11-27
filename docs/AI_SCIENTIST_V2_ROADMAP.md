@@ -30,7 +30,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 ### Phase 2: The Brain (Surrogate Training)
 *Focus: Training the "Physicist" (Neural Network) on the cleaned data.*
 
-- [ ] **2.1 Refactor Surrogate Architecture**
+- [x] **2.1 Refactor Surrogate Architecture**
     - *Source:* `V2_UPGRADE_PLAN` (Phase 2) + `HYBRID_ARCHITECTURE_PLAN` (Phase 2)
     - *Action:* Update `NeuralOperatorSurrogate` in `ai_scientist/optim/surrogate.py`.
     - *Change:* **REMOVE** geometric output heads (Elongation, etc.). Keep only Physics heads ($W_{MHD}$, $QI$).

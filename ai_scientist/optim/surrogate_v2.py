@@ -87,9 +87,8 @@ class StellaratorNeuralOp(nn.Module):
         self.head_objective = nn.Linear(hidden_dim, 1)
         self.head_mhd = nn.Linear(hidden_dim, 1)
         self.head_qi = nn.Linear(hidden_dim, 1)
-        self.head_elongation = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1) + 1)
@@ -153,9 +152,8 @@ class StellaratorNeuralOp(nn.Module):
         pred_obj = self.head_objective(base).squeeze(-1)
         pred_mhd = self.head_mhd(base).squeeze(-1)
         pred_qi = self.head_qi(base).squeeze(-1)
-        pred_elong = self.head_elongation(base).squeeze(-1)
 
-        return pred_obj, pred_mhd, pred_qi, pred_elong
+        return pred_obj, pred_mhd, pred_qi
 
 
 class NeuralOperatorSurrogate(BaseSurrogate):
@@ -247,18 +245,16 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_obj = torch.tensor(target_values, dtype=torch.float32).to(self._device)
         
         # Auxiliary targets
-        y_mhd_list, y_qi_list, y_elong_list = [], [], []
+        y_mhd_list, y_qi_list = [], []
         for metrics in metrics_list:
             m_payload = metrics.get("metrics", metrics)
             y_mhd_list.append(float(m_payload.get("vacuum_well", -1.0)))
             y_qi_list.append(float(m_payload.get("qi", 1.0)))
-            y_elong_list.append(float(m_payload.get("max_elongation", 10.0)))
             
         y_mhd = torch.tensor(y_mhd_list, dtype=torch.float32).to(self._device)
         y_qi = torch.tensor(y_qi_list, dtype=torch.float32).to(self._device)
-        y_elong = torch.tensor(y_elong_list, dtype=torch.float32).to(self._device)
 
-        dataset = TensorDataset(X, y_obj, y_mhd, y_qi, y_elong)
+        dataset = TensorDataset(X, y_obj, y_mhd, y_qi)
         # Use a larger batch size for efficiency if possible, but keep it stochastic
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
@@ -299,15 +295,14 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             # For now, we use the full dataset with shuffling, which is standard for Deep Ensembles.
             
             for epoch in range(self._epochs):
-                for xb, yb_obj, yb_mhd, yb_qi, yb_elong in loader:
+                for xb, yb_obj, yb_mhd, yb_qi in loader:
                     optimizer.zero_grad()
-                    pred_obj, pred_mhd, pred_qi, pred_elong = model(xb)
+                    pred_obj, pred_mhd, pred_qi = model(xb)
                     
                     loss = (
                         criterion(pred_obj, yb_obj) + 
                         0.5 * criterion(pred_mhd, yb_mhd) + 
-                        0.5 * criterion(pred_qi, yb_qi) + 
-                        0.5 * criterion(pred_elong, yb_elong)
+                        0.5 * criterion(pred_qi, yb_qi)
                     )
                     
                     loss.backward()
@@ -331,11 +326,11 @@ class NeuralOperatorSurrogate(BaseSurrogate):
     def predict_torch(
         self, 
         x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Differentiable prediction for optimization loop (Mean + Std).
         
         Returns:
-            (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std, elong_mean, elong_std)
+            (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std)
         """
         if not self._models:
             raise RuntimeError("NeuralOperatorSurrogate not initialized/trained")
@@ -344,27 +339,24 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             x = x.to(self._device)
             
         # Collect predictions from all models
-        preds_obj, preds_mhd, preds_qi, preds_elong = [], [], [], []
+        preds_obj, preds_mhd, preds_qi = [], [], []
         
         for model in self._models:
-            o, m, q, e = model(x)
+            o, m, q = model(x)
             preds_obj.append(o)
             preds_mhd.append(m)
             preds_qi.append(q)
-            preds_elong.append(e)
             
         # Stack (Ensemble, Batch)
         stack_obj = torch.stack(preds_obj)
         stack_mhd = torch.stack(preds_mhd)
         stack_qi = torch.stack(preds_qi)
-        stack_elong = torch.stack(preds_elong)
         
         # Compute Mean and Std
         return (
             torch.mean(stack_obj, dim=0), torch.std(stack_obj, dim=0),
             torch.mean(stack_mhd, dim=0), torch.std(stack_mhd, dim=0),
             torch.mean(stack_qi, dim=0), torch.std(stack_qi, dim=0),
-            torch.mean(stack_elong, dim=0), torch.std(stack_elong, dim=0),
         )
 
     def rank_candidates(
@@ -399,22 +391,20 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
         
         # Evaluation
-        preds_obj, preds_mhd, preds_qi, preds_elong = [], [], [], []
+        preds_obj, preds_mhd, preds_qi = [], [], []
         
         for model in self._models:
             model.eval()
             with torch.no_grad():
-                o, m, q, e = model(X)
+                o, m, q = model(X)
                 preds_obj.append(o)
                 preds_mhd.append(m)
                 preds_qi.append(q)
-                preds_elong.append(e)
         
         # Convert to numpy (Ensemble, Batch)
         obj_stack = torch.stack(preds_obj).cpu().numpy()
         mhd_stack = torch.stack(preds_mhd).cpu().numpy()
         qi_stack = torch.stack(preds_qi).cpu().numpy()
-        elong_stack = torch.stack(preds_elong).cpu().numpy()
         
         # Statistics
         obj_mean = np.mean(obj_stack, axis=0)
@@ -422,7 +412,6 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         
         mhd_mean = np.mean(mhd_stack, axis=0)
         qi_mean = np.mean(qi_stack, axis=0)
-        elong_mean = np.mean(elong_stack, axis=0)
         
         predictions: list[SurrogatePrediction] = []
         for i, candidate in enumerate(candidates):
@@ -460,7 +449,6 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     metadata=candidate,
                     predicted_mhd=float(mhd_mean[i]),
                     predicted_qi=float(qi_mean[i]),
-                    predicted_elongation=float(elong_mean[i]),
                 )
             )
             

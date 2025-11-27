@@ -14,6 +14,7 @@ import jax.numpy as jnp
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
+from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.utils import pytree
@@ -171,7 +172,21 @@ def gradient_descent_on_inputs(
             x_input = torch.cat([x_dense, nfp_tensor], dim=0)
             
             # Predict
-            pred_obj, std_obj, pred_mhd, std_mhd, pred_qi, std_qi, pred_elo, std_elo = surrogate.predict_torch(x_input.unsqueeze(0))
+            pred_obj, std_obj, pred_mhd, std_mhd, pred_qi, std_qi = surrogate.predict_torch(x_input.unsqueeze(0))
+            
+            # Compute Elongation directly (Exact, so std=0)
+            mpol = surrogate._schema.mpol
+            ntor = surrogate._schema.ntor
+            grid_h = mpol + 1
+            grid_w = 2 * ntor + 1
+            half_size = grid_h * grid_w
+
+            x_spectral = x_input[:-1].unsqueeze(0)  # (1, dense_size)
+            r_cos = x_spectral[:, :half_size].view(1, grid_h, grid_w)
+            z_sin = x_spectral[:, half_size:].view(1, grid_h, grid_w)
+            
+            pred_elo = geometry.elongation(r_cos, z_sin, x_input[-1])
+            std_elo = torch.zeros_like(pred_elo)
             
             # Loss Formulation (Risk-Averse: Penalize Uncertainty)
             beta = 0.1
@@ -292,8 +307,19 @@ def optimize_alm_inner_loop(
         # Predict
         (pred_obj, std_obj, 
          pred_mhd, std_mhd, 
-         pred_qi, std_qi, 
-         pred_elo, std_elo) = surrogate.predict_torch(x_input.unsqueeze(0))
+         pred_qi, std_qi) = surrogate.predict_torch(x_input.unsqueeze(0))
+        
+        # Compute Elongation directly
+        grid_h = mpol + 1
+        grid_w = 2 * ntor + 1
+        half_size = grid_h * grid_w
+        
+        x_spectral = x_input[:-1].unsqueeze(0)
+        r_cos = x_spectral[:, :half_size].view(1, grid_h, grid_w)
+        z_sin = x_spectral[:, half_size:].view(1, grid_h, grid_w)
+        
+        pred_elo = geometry.elongation(r_cos, z_sin, x_input[-1])
+        std_elo = torch.zeros_like(pred_elo)
         
         obj = pred_obj.squeeze() + beta * std_obj.squeeze()
         mhd = pred_mhd.squeeze()

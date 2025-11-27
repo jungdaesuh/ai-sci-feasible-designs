@@ -997,7 +997,27 @@ def _surrogate_rank_screen_candidates(
             qi_viol = max(0.0, qi_val) * weights.qi # Assume QI always > 0
             
             # Elongation: lower is better.
-            elo_val = pred.predicted_elongation if pred.predicted_elongation is not None else 1.0
+            if pred.predicted_elongation is not None:
+                elo_val = pred.predicted_elongation
+            else:
+                idx = int(pred.metadata.get("__surrogate_candidate_index", -1))
+                elo_val = 1.0
+                if idx >= 0:
+                    try:
+                        import torch
+                        from ai_scientist.optim import geometry
+                        cand_params = candidates[idx]["params"]
+                        r_cos_list = cand_params.get("r_cos")
+                        z_sin_list = cand_params.get("z_sin")
+                        nfp = cand_params.get("n_field_periods", 1)
+                        
+                        if r_cos_list is not None and z_sin_list is not None:
+                             r_cos_t = torch.tensor(r_cos_list, dtype=torch.float32).unsqueeze(0)
+                             z_sin_t = torch.tensor(z_sin_list, dtype=torch.float32).unsqueeze(0)
+                             elo_val = float(geometry.elongation(r_cos_t, z_sin_t, nfp).item())
+                    except Exception:
+                        pass
+            
             elo_viol = max(0.0, elo_val) * weights.elongation
             
             # Composite violation (lower is better)
@@ -1927,7 +1947,26 @@ def _run_cycle(
                 # Default values for constraints if not predicted
                 mhd = predicted.predicted_mhd if predicted.predicted_mhd is not None else 0.0
                 qi = predicted.predicted_qi if predicted.predicted_qi is not None else 1.0 # Assume always positive
-                elongation = predicted.predicted_elongation if predicted.predicted_elongation is not None else 1.0
+                
+                if predicted.predicted_elongation is not None:
+                    elongation = predicted.predicted_elongation
+                else:
+                    try:
+                        import torch
+                        from ai_scientist.optim import geometry
+                        
+                        r_cos_list = params.get("r_cos")
+                        z_sin_list = params.get("z_sin")
+                        nfp = params.get("n_field_periods", 1)
+                        
+                        if r_cos_list is not None and z_sin_list is not None:
+                            r_cos_t = torch.tensor(r_cos_list, dtype=torch.float32).unsqueeze(0)
+                            z_sin_t = torch.tensor(z_sin_list, dtype=torch.float32).unsqueeze(0)
+                            elongation = float(geometry.elongation(r_cos_t, z_sin_t, nfp).item())
+                        else:
+                            elongation = 1.0
+                    except Exception:
+                        elongation = 1.0
                 
                 p_key = (cfg.problem or "").lower()
                 

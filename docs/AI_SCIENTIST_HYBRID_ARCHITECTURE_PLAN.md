@@ -72,7 +72,7 @@ $$ \mathcal{L} = w_p \cdot \text{NeuralNet}(x)_{[\text{MHD}, \text{QI}]} + w_e \
     *   *Crucial:* Must use `torch.sin`, `torch.cos`, `torch.matmul` to maintain the autograd graph.
 
 ### Phase 2: The "Physicist" (Surrogate Refactoring)
-*   **Task 2.1:** Refactor `ai_scientist/optim/surrogate_v2.py`.
+*   [x] **Task 2.1:** Refactor `ai_scientist/optim/surrogate_v2.py`.
     *   Remove `head_elongation` and `head_curvature` from `StellaratorNeuralOp`.
     *   Retain only `head_mhd`, `head_qi`, and `head_objective` (if objective is physics-based).
     *   Retrain the model on the 182k dataset focusing *only* on physics targets.
