@@ -643,7 +643,7 @@ class WorldModel:
         commit: bool = True,
     ) -> None:
         timestamp = created_at or datetime.now(timezone.utc).isoformat()
-        hv_exists = 0 if hv_score is None else 1
+        hv_exists = 1 if feasible_count > 0 else 0
 
         def _write() -> None:
             self._conn.execute(
