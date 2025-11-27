@@ -64,11 +64,11 @@ To maximize efficiency and gradient quality, we split the optimization feedback 
 *   [x] **Task 0.2:** Implement **Robust Normalization**.
     *   [x] Use `LogRobustScaler` (log1p + RobustScaler) for heavy-tailed physics metrics (e.g., $W_{MHD}$).
     *   [x] Save the fitted scaler as `scaler.pkl`.
-*   [ ] **Task 0.3:** Create `scripts/train_offline.py`.
+*   [x] **Task 0.3:** Create `scripts/train_offline.py`.
     *   [x] Load cleaned data.
-    *   [ ] Train `NeuralOperatorSurrogate` (Physics targets only) and save weights to `checkpoints/surrogate_v2.pt`.
+    *   [x] Train `NeuralOperatorSurrogate` (Physics targets only) and save weights to `checkpoints/surrogate_v2.pt`.
     *   [ ] Train `DiffusionDesignModel` and save weights to `checkpoints/diffusion_v2.pt`.
-    *   [ ] Generate problem-specific seed files: `seeds_p1.json`, `seeds_p2.json`, `seeds_p3.json`.
+    *   [x] Generate problem-specific seed files: `seeds_p1.json`, `seeds_p2.json`, `seeds_p3.json`.
 
 ### Phase 1: Differentiable Geometry (The Engineer)
 *Goal: Implement the analytic expert.*
