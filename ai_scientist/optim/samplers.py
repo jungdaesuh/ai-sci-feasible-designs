@@ -41,40 +41,46 @@ class NearAxisSampler:
             # Sample NAE parameters around reasonable defaults or template values
             # We assume template provides n_field_periods and mode limits.
             
-            # Aspect ratio: Sample around 4.0 to 8.0 (typical for stellarators)
-            aspect_ratio = rng.uniform(4.0, 8.0)
-            
-            # Elongation: Sample around 1.5 to 2.5
-            max_elongation = rng.uniform(1.5, 2.5)
-            
-            # Rotational transform (iota): Sample around 0.4 to 1.2
-            rotational_transform = rng.uniform(0.4, 1.2)
-            
-            # Mirror ratio: Sample around 1.05 to 1.2
-            mirror_ratio = rng.uniform(1.05, 1.2)
+            # Retry loop to handle "strictly increasing sequence" errors or geometry failures
+            max_retries = 10
+            for attempt in range(max_retries):
+                # Harden ranges: Narrower bounds to improve stability (Phase 5.3 fix)
+                # Aspect ratio: 4.0-8.0 -> 5.0-7.0
+                aspect_ratio = rng.uniform(5.0, 7.0)
+                
+                # Elongation: 1.5-2.5 -> 1.5-2.0
+                max_elongation = rng.uniform(1.5, 2.0)
+                
+                # Rotational transform (iota): 0.4-1.2 -> 0.4-0.8
+                rotational_transform = rng.uniform(0.4, 0.8)
+                
+                # Mirror ratio: 1.05-1.2 -> 1.05-1.15
+                mirror_ratio = rng.uniform(1.05, 1.15)
 
-            try:
-                surface = generate_nae(
-                    aspect_ratio=aspect_ratio,
-                    max_elongation=max_elongation,
-                    rotational_transform=rotational_transform,
-                    mirror_ratio=mirror_ratio,
-                    n_field_periods=self._template.n_field_periods,
-                    max_poloidal_mode=self._template.n_poloidal_modes,
-                    max_toroidal_mode=self._template.n_toroidal_modes,
-                )
-                params = _surface_to_params(surface)
-                candidates.append(
-                    {
-                        "seed": seed,
-                        "params": params,
-                        "source": "near_axis_sampler",
-                        "design_hash": tools.design_hash(params),
-                        "constraint_distance": 0.0, # NAE designs are "theoretically" near feasible
-                    }
-                )
-            except Exception as exc:
-                _LOGGER.warning(f"Near-axis generation failed for seed {seed}: {exc}")
-                continue
+                try:
+                    surface = generate_nae(
+                        aspect_ratio=aspect_ratio,
+                        max_elongation=max_elongation,
+                        rotational_transform=rotational_transform,
+                        mirror_ratio=mirror_ratio,
+                        n_field_periods=self._template.n_field_periods,
+                        max_poloidal_mode=self._template.n_poloidal_modes,
+                        max_toroidal_mode=self._template.n_toroidal_modes,
+                    )
+                    params = _surface_to_params(surface)
+                    candidates.append(
+                        {
+                            "seed": seed, # Keep original seed for traceability
+                            "params": params,
+                            "source": "near_axis_sampler",
+                            "design_hash": tools.design_hash(params),
+                            "constraint_distance": 0.0, # NAE designs are "theoretically" near feasible
+                        }
+                    )
+                    break # Success
+                except Exception as exc:
+                    if attempt == max_retries - 1:
+                        _LOGGER.warning(f"Near-axis generation failed for seed {seed} after {max_retries} attempts: {exc}")
+                    continue
         
         return candidates

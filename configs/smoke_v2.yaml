@@ -1,0 +1,48 @@
+problem: p1
+cycles: 2
+random_seed: 42
+budgets:
+  screen_evals_per_cycle: 8
+  promote_top_k: 2
+  max_high_fidelity_evals_per_cycle: 1
+  wall_clock_minutes: 5
+  n_workers: 1
+  pool_type: process
+adaptive_budgets:
+  enabled: false
+stage_gates:
+  s1_to_s2_feasibility_margin: 100.0
+  s1_to_s2_objective_improvement: -100.0
+  s1_to_s2_lookback_cycles: 1
+  s2_to_s3_hv_delta: 0.01
+  s2_to_s3_lookback_cycles: 3
+governance:
+  min_feasible_for_promotion: 0
+  hv_lookback: 3
+proposal_mix:
+  constraint_ratio: 0.5
+  exploration_ratio: 0.5
+  sampler_type: near_axis
+fidelity_ladder:
+  screen: screen
+  promote: promote
+boundary_template:
+  n_poloidal_modes: 3
+  n_toroidal_modes: 5
+  n_field_periods: 3
+  base_major_radius: 1.5
+  base_minor_radius: 0.5
+  perturbation_scale: 0.0005
+  seed_path: artifacts/p1/demo_smoke_boundary.json
+reporting_dir: reports
+memory_db: reports/ai_scientist_v2_smoke.sqlite
+surrogate:
+  backend: neural_operator
+  n_ensembles: 2
+  epochs: 10
+  learning_rate: 0.001
+  hidden_dim: 32
+generative:
+  enabled: false
+optimizer_backend: sa-alm
+initialization_strategy: template

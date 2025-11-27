@@ -228,7 +228,13 @@ def _objective_constraints(
                 c_size = 5
             constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
         else:
-            objective = jnp.array(metrics.aspect_ratio)
+            if problem_type.lower().startswith("p1"):
+                 # P1 target: minimize max_elongation
+                 objective = jnp.array(metrics.max_elongation)
+            else:
+                 # P3 target: minimize aspect_ratio (max gradient is usually a constraint or secondary)
+                 objective = jnp.array(metrics.aspect_ratio)
+            
             margins = tools.compute_constraint_margins(metrics, problem_type)
             constraints = jnp.array(list(margins.values()))
 
@@ -1173,9 +1179,18 @@ def _latest_evaluations_by_design(
 
 def _extract_objectives(entry: Mapping[str, Any]) -> tuple[float, float]:
     metrics = entry["evaluation"]["metrics"]
-    gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
-    aspect = float(metrics["aspect_ratio"])
-    return gradient, aspect
+    # P3/P2 Check
+    if "minimum_normalized_magnetic_gradient_scale_length" in metrics:
+        gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
+        aspect = float(metrics.get("aspect_ratio", 0.0))
+        return gradient, aspect
+    
+    # P1 Fallback (optimize elongation)
+    # We map this to (primary, secondary) for crowding/proxy
+    # P1: minimize max_elongation.
+    # We treat "gradient" slot as -max_elongation (higher is better)
+    elong = float(metrics.get("max_elongation", 0.0))
+    return -elong, 0.0
 
 
 def _objective_proxy(entry: Mapping[str, Any]) -> float:
@@ -1812,10 +1827,10 @@ def _run_cycle(
             verbose=bool(runtime and runtime.verbose),
         )
 
-    elif optimizer_mode == "alm" or optimizer_mode == "sa-alm":
+    elif (optimizer_mode == "alm" or optimizer_mode == "sa-alm") or (cfg.optimizer_backend in ["alm", "sa-alm"]):
         # ALM Execution Branch
         if runtime and runtime.verbose:
-            print(f"[runner][cycle={cycle_number}] {optimizer_mode} optimizer mode active.")
+            print(f"[runner][cycle={cycle_number}] {optimizer_mode if optimizer_mode != 'default' else cfg.optimizer_backend} optimizer mode active.")
         
         initial_params_map: Mapping[str, Any]
         if suggested_params and suggested_params[0]:
@@ -1867,7 +1882,7 @@ def _run_cycle(
 
         # For SA-ALM, we need a predictor function for the inner loop
         sa_alm_predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]] | None = None
-        if optimizer_mode == "sa-alm":
+        if optimizer_mode == "sa-alm" or cfg.optimizer_backend == "sa-alm":
             # Retrain surrogate if needed
             problem = (cfg.problem or "").lower()
             target_column = "hv" if problem == "p3" else "objective"
@@ -1894,7 +1909,7 @@ def _run_cycle(
                             training_samples=len(history),
                             model_hash=f"ensemble_n{surrogate_model._n_ensembles}_c{cycle_number}",
                             weights_path="memory_only", # TODO: Save to disk
-                            commit=False
+                            commit=True
                         )
             
             def surrogate_predictor(params: Mapping[str, Any]) -> Tuple[float, Sequence[float]]:
@@ -2072,7 +2087,7 @@ def _run_cycle(
                 x_new = jnp.array(recommendation.value)
             
             # Periodically verify with true forward model if SA-ALM
-            if optimizer_mode == "sa-alm" and k % 2 == 0: # Verify every N steps
+            if (optimizer_mode == "sa-alm" or cfg.optimizer_backend == "sa-alm") and k % 2 == 0: # Verify every N steps
                 if runtime and runtime.verbose:
                     print(f"[runner] SA-ALM: Verifying best candidate with true forward model (step {k}).")
                 (obj_new, constr_new), true_metrics = _objective_constraints( # Capture true_metrics
@@ -2106,7 +2121,7 @@ def _run_cycle(
                             "metrics": true_metrics.model_dump(), # Use actual metrics
                         },
                         design_hash=tools.design_hash(verified_params),
-                        commit=False,
+                        commit=True,
                     )
                 # Now use true obj/constr for ALM state update
                 state = update_augmented_lagrangian_state(
@@ -2139,7 +2154,7 @@ def _run_cycle(
                     multiplier_value=float(state.multipliers[i]),
                     penalty_parameter=float(state.penalty_parameters[i]),
                     violation_magnitude=float(state.constraints[i]),
-                    commit=False
+                    commit=True
                 )
 
         candidate_pool = alm_candidates
