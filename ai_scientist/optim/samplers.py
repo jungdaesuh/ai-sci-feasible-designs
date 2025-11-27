@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -82,5 +84,65 @@ class NearAxisSampler:
                     if attempt == max_retries - 1:
                         _LOGGER.warning(f"Near-axis generation failed for seed {seed} after {max_retries} attempts: {exc}")
                     continue
+        
+        return candidates
+
+
+class OfflineSeedSampler:
+    """Samples candidates from a pre-generated JSON file of seeds (Best-of-Failure)."""
+
+    def __init__(
+        self,
+        problem: str,
+        seed_file: Path | None = None,
+    ) -> None:
+        self._problem = problem.lower()
+        if seed_file:
+            self._seed_path = seed_file
+        else:
+            self._seed_path = Path(f"configs/seeds/{self._problem}_seeds.json")
+        
+        self._seeds: list[dict[str, Any]] = []
+        self._load_seeds()
+
+    def _load_seeds(self) -> None:
+        if not self._seed_path.exists():
+            _LOGGER.warning(f"Offline seed file {self._seed_path} not found. Sampler will be empty.")
+            return
+
+        try:
+            with self._seed_path.open("r") as f:
+                self._seeds = json.load(f)
+            _LOGGER.info(f"Loaded {len(self._seeds)} seeds from {self._seed_path}")
+        except Exception as exc:
+            _LOGGER.error(f"Failed to load seeds from {self._seed_path}: {exc}")
+
+    def generate(self, seeds: Sequence[int]) -> list[Mapping[str, Any]]:
+        if not self._seeds:
+            return []
+
+        candidates: list[Mapping[str, Any]] = []
+        rng = np.random.default_rng(seeds[0] if seeds else 0)
+
+        for seed in seeds:
+            # Pick a random seed from the loaded list
+            base_params = rng.choice(self._seeds)
+            
+            # Perturb it slightly to avoid duplicates and explore vicinity
+            perturbed_params = tools.propose_boundary(
+                base_params,
+                perturbation_scale=0.02, # Small perturbation for stability
+                seed=seed
+            )
+            
+            candidates.append(
+                {
+                    "seed": seed,
+                    "params": perturbed_params,
+                    "source": "offline_seed_sampler",
+                    "design_hash": tools.design_hash(perturbed_params),
+                    "constraint_distance": 0.0, # Assumed good
+                }
+            )
         
         return candidates

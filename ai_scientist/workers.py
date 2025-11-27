@@ -9,7 +9,7 @@ from ai_scientist import config as ai_config
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
-from ai_scientist.optim.samplers import NearAxisSampler
+from ai_scientist.optim.samplers import NearAxisSampler, OfflineSeedSampler
 
 class Worker(ABC):
     """Abstract base class for specialized workers."""
@@ -62,18 +62,29 @@ class ExplorationWorker(Worker):
         self, 
         cfg: ai_config.ExperimentConfig, 
         generative_model: GenerativeDesignModel | None,
-        sampler: NearAxisSampler | None = None
+        sampler: NearAxisSampler | OfflineSeedSampler | None = None
     ):
         self.cfg = cfg
         self.generative_model = generative_model
-        if sampler is None and cfg.proposal_mix.sampler_type == "near_axis":
-            try:
-                self.sampler = NearAxisSampler(cfg.boundary_template)
-            except Exception as exc:
-                print(f"[ExplorationWorker] Failed to init NearAxisSampler: {exc}")
-                self.sampler = None
-        else:
+        
+        if sampler is not None:
             self.sampler = sampler
+        else:
+            # Initialize sampler based on config
+            if cfg.proposal_mix.sampler_type == "near_axis":
+                try:
+                    self.sampler = NearAxisSampler(cfg.boundary_template)
+                except Exception as exc:
+                    print(f"[ExplorationWorker] Failed to init NearAxisSampler: {exc}")
+                    self.sampler = None
+            elif cfg.proposal_mix.sampler_type == "offline_seeds":
+                try:
+                    self.sampler = OfflineSeedSampler(cfg.problem)
+                except Exception as exc:
+                    print(f"[ExplorationWorker] Failed to init OfflineSeedSampler: {exc}")
+                    self.sampler = None
+            else:
+                self.sampler = None
         
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -113,11 +124,11 @@ class ExplorationWorker(Worker):
                 except Exception as exc:
                      print(f"[ExplorationWorker] Generative sampling failed: {exc}")
 
-        # Near Axis Sampling (Fallback or mix)
+        # Near Axis / Offline Seed Sampling (Fallback or mix)
         remaining = n_samples - len(candidates)
         if remaining > 0:
             if self.sampler:
-                print(f"[ExplorationWorker] Sampling {remaining} from NearAxisSampler...")
+                print(f"[ExplorationWorker] Sampling {remaining} from {self.sampler.__class__.__name__}...")
                 # Generate seeds
                 seeds = [self.cfg.random_seed + i for i in range(remaining)] # Simple seeding for now
                 try:

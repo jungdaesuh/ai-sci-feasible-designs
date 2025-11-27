@@ -40,7 +40,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
     - *Action:* Run `scripts/train_offline.py`.
     - *Output:* `checkpoints/surrogate_physics_v2.pt` and `checkpoints/scaler.pkl`.
 
-- [ ] **2.3 Generate "Best-of-Failure" Seeds**
+- [x] **2.3 Generate "Best-of-Failure" Seeds**
     - *Source:* `DATASET_INTEGRATION_PLAN` (Phase 0.3)
     - *Action:* Filter dataset for samples closest to Problem 1/2/3 targets.
     - *Output:* `seeds/p1_seeds.json`, `seeds/p2_seeds.json`.
@@ -76,6 +76,6 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 | Milestone | Goal | Dependency | Status |
 | :--- | :--- | :--- | :--- |
 | **M1** | Perfect Geometric Gradients | Phase 1.1 | ✅ Completed |
-| **M2** | Data Pipeline & Seeds | Phase 1.2 | ⬜ Pending |
+| **M2** | Data Pipeline & Seeds | Phase 1.2 | ✅ Completed |
 | **M3** | Trained Physics Model | Phase 2.2 | ✅ Completed |
 | **M4** | Hybrid Loop Running | Phase 3.1 | ✅ Completed |
