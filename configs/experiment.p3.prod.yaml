@@ -6,7 +6,7 @@ problem: p3 # Explicitly define the problem key as per typical config usage.
 
 boundary_template:
   n_field_periods: 3
-  seed_path: configs/seeds/rotating_ellipse_p3.json
+  seed_path: configs/seeds/p3_seeds.json
   perturbation_scale: 0.01
 
 proposal_mix:
@@ -14,6 +14,12 @@ proposal_mix:
   exploration_ratio: 0.3
   jitter_scale: 0.01
   surrogate_pool_multiplier: 3.0
+  sampler_type: offline_seeds
+
+surrogate:
+  backend: neural_operator
+  use_offline_dataset: true
+  n_ensembles: 3
 
 budgets:
   screen_evals_per_cycle: 24
