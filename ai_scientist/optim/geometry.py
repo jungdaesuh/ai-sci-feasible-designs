@@ -247,7 +247,6 @@ def surface_to_point_cloud(
     
     is_torch = isinstance(X, torch.Tensor)
     
-    
     if is_torch:
         # Flatten and stack
         points = torch.stack([X.flatten(), Y.flatten(), Z_cart.flatten()], dim=1)
@@ -273,10 +272,15 @@ def _compute_derivatives(
     """
     Compute surface derivatives R_theta, R_zeta, Z_theta, Z_zeta, etc.
     
+    If n_field_periods is a Tensor (batched), we evaluate over the FULL torus (0 to 2pi)
+    to preserve the correct winding and dependence on N_fp.
+    If n_field_periods is an int (scalar), we evaluate over ONE field period (0 to 2pi/Nfp)
+    and rely on symmetry.
+    
     Args:
         r_cos, z_sin: Fourier coefficients (Batch, mpol+1, 2*ntor+1).
         n_field_periods: Number of field periods (scalar or batch).
-        n_theta, n_zeta: Grid resolution (one field period).
+        n_theta, n_zeta: Grid resolution.
         
     Returns:
         Dict containing R, Z, R_t, R_z, Z_t, Z_z, R_tt, R_tz, R_zz, Z_tt, Z_tz, Z_zz.
@@ -290,16 +294,13 @@ def _compute_derivatives(
     # Handle Nfp
     if isinstance(n_field_periods, torch.Tensor):
         nfp = n_field_periods.view(batch_size, 1, 1)
-        # Evaluate on one field period [0, 2pi/nfp]
-        # For variable nfp, we normalize zeta to [0, 2pi] and divide by nfp in the angle
-        # to keep grid consistent? No, standard is zeta in [0, 2pi].
-        # Let's assume zeta grid is [0, 2pi/nfp].
-        # If nfp varies, the physical range varies.
-        # To keep tensor shapes consistent, we define zeta_hat in [0, 2pi] and zeta = zeta_hat / nfp.
-        zeta_hat = torch.linspace(0, 2 * torch.pi, n_zeta + 1, device=device)[:-1]
-        zeta_grid = zeta_hat.view(1, 1, -1) / nfp # (B, 1, Z)
+        # Batched N_fp: Evaluate over FULL TORUS [0, 2pi] to capture winding explicitly.
+        # zeta_grid corresponds to physical toroidal angle zeta.
+        zeta = torch.linspace(0, 2 * torch.pi, n_zeta + 1, device=device)[:-1]
+        zeta_grid = zeta.view(1, 1, -1) # (1, 1, Z)
     else:
         nfp = float(n_field_periods)
+        # Fixed N_fp: Evaluate over ONE FIELD PERIOD [0, 2pi/nfp].
         zeta = torch.linspace(0, 2 * torch.pi / nfp, n_zeta + 1, device=device)[:-1]
         zeta_grid = zeta.view(1, 1, -1) # (1, 1, Z)
     
@@ -330,7 +331,8 @@ def _compute_derivatives(
             n_val = float(n)
             
             # angle = m*theta - n*nfp*zeta
-            # If nfp is tensor (B,1,1), nfp*zeta_grid is (B,1,Z).
+            # If nfp is tensor (B,1,1), nfp*zeta_grid is (B,1,Z) scaled by nfp correctly.
+            # Since zeta_grid is [0, 2pi], nfp*zeta_grid wraps nfp times.
             angle = m_theta - n_val * nfp * zeta_grid
             
             c = torch.cos(angle)
@@ -344,10 +346,6 @@ def _compute_derivatives(
             R = R + rc * c
             Z = Z + zs * s
             
-            # 1st Derivatives
-            # d/dt -> m, d/dz -> -n*nfp
-            # d(cos)/dx = -sin, d(sin)/dx = cos
-            
             factor_z = -n_val * nfp
             
             # 1st Derivatives
@@ -356,7 +354,7 @@ def _compute_derivatives(
             # dR/dz = sum(-rc * (-n*N) * sin(u)) = sum(rc * n*N * sin(u))
             
             R_t = R_t - rc * m_val * s
-            R_z = R_z - rc * factor_z * s # -rc * (-nN) * s = +rc nN s. Correct.
+            R_z = R_z - rc * factor_z * s 
             
             Z_t = Z_t + zs * m_val * c
             Z_z = Z_z + zs * factor_z * c
@@ -449,21 +447,26 @@ def aspect_ratio(
     
     R_major: R(0,0) component (approximate).
     r_minor_eff: Average effective radius sqrt(Area/pi).
+    
+    Corrected to use Green's theorem symmetric form for Area:
+    Area = 0.5 * int (R * Z_theta - Z * R_theta) dtheta
     """
     ntor = (r_cos.shape[2] - 1) // 2
     # Major radius approx (m=0, n=0)
     R00 = r_cos[:, 0, ntor]
     
     d = _compute_derivatives(r_cos, z_sin, n_field_periods, n_theta, n_zeta)
-    R = d["R"]
-    Z_t = d["Z_t"] # dZ/dtheta
+    R, Z = d["R"], d["Z"]
+    R_t, Z_t = d["R_t"], d["Z_t"] # d/dtheta
     
-    # Area(zeta) = int R dZ = int_0^2pi R * (dZ/dtheta) dtheta
-    # Discrete integral: sum(R * Z_t) * dtheta. dtheta = 2pi/n_theta
-    # Or just mean(R * Z_t) * 2pi
+    # Area = 0.5 * integral (R dZ - Z dR)
+    #      = 0.5 * integral (R Z_t - Z R_t) dtheta
+    # Discrete integral: mean(...) * 2pi
     
-    cross_section_area = torch.mean(R * Z_t, dim=1) * 2 * torch.pi
+    integrand = R * Z_t - Z * R_t
+    cross_section_area = 0.5 * torch.mean(integrand, dim=1) * 2 * torch.pi
     
+    # Ensure positive area
     r_minor = torch.sqrt(torch.abs(cross_section_area) / torch.pi)
     mean_r_minor = torch.mean(r_minor, dim=1)
     
@@ -492,11 +495,6 @@ def mean_curvature(
     Z_tt, Z_zz, Z_tz = d["Z_tt"], d["Z_zz"], d["Z_tz"]
     
     # First Fundamental Form
-    # r_theta = (R_t, 0, Z_t) (in Cylindrical R,Phi,Z basis? No, vector calculus)
-    # Position r = R e_R + Z e_Z
-    # r_t = R_t e_R + Z_t e_Z
-    # r_z = R_z e_R + R e_phi + Z_z e_Z
-    
     E = R_t**2 + Z_t**2
     F = R_t * R_z + Z_t * Z_z
     G = R_z**2 + R**2 + Z_z**2
@@ -504,11 +502,6 @@ def mean_curvature(
     EG_F2 = E * G - F**2
     
     # Normal vector n (unnormalized)
-    # n = r_t x r_z
-    # n_R = -R * Z_t
-    # n_phi = Z_t * R_z - R_t * Z_z
-    # n_Z = R * R_t
-    
     n_R = -R * Z_t
     n_phi = Z_t * R_z - R_t * Z_z
     n_Z = R * R_t
@@ -517,31 +510,12 @@ def mean_curvature(
     
     # Second Fundamental Form coefficients L, M, N
     # L = r_tt . n / |n|
-    # M = r_tz . n / |n|
-    # N = r_zz . n / |n|
-    
-    # r_tt = R_tt e_R + Z_tt e_Z
-    # r_tz = R_tz e_R + R_t e_phi + Z_tz e_Z (Note: partial_z of e_R is e_phi? No, partial_phi of e_R is e_phi)
-    # Wait, my derivatives assume z (zeta) is the toroidal angle phi.
-    # d/dzeta (vector) = partial_zeta + omega x vector? No.
-    # d/dphi ( e_R ) = e_phi
-    # d/dphi ( e_phi ) = -e_R
-    # r = R e_R + Z e_Z
-    # r_phi = R_phi e_R + R e_phi + Z_phi e_Z
-    # r_phiphi = R_phiphi e_R + R_phi e_phi + R_phi e_phi + R (-e_R) + Z_phiphi e_Z
-    #          = (R_phiphi - R) e_R + 2 R_phi e_phi + Z_phiphi e_Z
-    # r_thetaphi = R_thetaphi e_R + R_theta e_phi + Z_thetaphi e_Z
-    
-    # Dot products with n = n_R e_R + n_phi e_phi + n_Z e_Z
-    
-    # L = r_tt . n
-    L_dot = R_tt * n_R + Z_tt * n_Z # (e_phi comp is 0)
+    L_dot = R_tt * n_R + Z_tt * n_Z 
     
     # M = r_tz . n
     M_dot = R_tz * n_R + R_t * n_phi + Z_tz * n_Z
     
     # N = r_zz . n
-    # r_zz_vec = (R_zz - R) e_R + 2 R_z e_phi + Z_zz e_Z
     N_dot = (R_zz - R) * n_R + (2 * R_z) * n_phi + Z_zz * n_Z
     
     L = L_dot / norm_n
@@ -574,37 +548,23 @@ def surface_area(
     R_t, R_z = d["R_t"], d["R_z"]
     Z_t, Z_z = d["Z_t"], d["Z_z"]
     
-    # Area element dA = |r_t x r_z| dtheta dzeta = sqrt(EG - F^2) dtheta dzeta
-    # We already computed norm_n = |r_t x r_z| in curvature, let's recompute efficiently
-    
-    # n_R = -R * Z_t
-    # n_phi = Z_t * R_z - R_t * Z_z
-    # n_Z = R * R_t
-    # norm_n = sqrt(...)
-    
     n_R = -R * Z_t
     n_phi = Z_t * R_z - R_t * Z_z
     n_Z = R * R_t
     
     norm_n = torch.sqrt(n_R**2 + n_phi**2 + n_Z**2 + 1e-8)
     
-    # Integral over [0, 2pi] x [0, 2pi/nfp]
-    # If nfp is tensor, our grid is normalized to [0, 2pi/nfp]?
-    # In _compute_derivatives, zeta covers one period.
-    # So we integrate over one period and multiply by nfp to get total area.
-    
-    # Grid spacing
-    # theta: 0..2pi, n_theta steps -> dt = 2pi / n_theta
-    # zeta: 0..2pi/nfp, n_zeta steps -> dz = (2pi/nfp) / n_zeta
-    
     nfp = d["nfp"]
     dt = (2 * torch.pi) / n_theta
-    dz = (2 * torch.pi / nfp) / n_zeta
     
-    # Area per period
-    area_per_period = torch.sum(norm_n * dt * dz, dim=(1, 2))
-    
-    # Total area
+    # Handle integration range
     if isinstance(nfp, torch.Tensor):
-        return area_per_period * nfp.view(-1)
-    return area_per_period * nfp
+        # We integrated over [0, 2pi] (Full Torus)
+        dz = (2 * torch.pi) / n_zeta
+        area_total = torch.sum(norm_n * dt * dz, dim=(1, 2))
+        return area_total
+    else:
+        # We integrated over [0, 2pi/nfp] (One Period)
+        dz = (2 * torch.pi / nfp) / n_zeta
+        area_per_period = torch.sum(norm_n * dt * dz, dim=(1, 2))
+        return area_per_period * nfp
