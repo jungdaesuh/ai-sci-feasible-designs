@@ -175,7 +175,10 @@ def random_rotation_matrix(batch_size: int, device: torch.device = torch.device(
     z = sqrt_u1 * torch.cos(theta2)
 
     # Stack to form quaternions (B, 4)
-    quaternions = torch.stack([w, x, y, z], dim=1)
+    # Shoemake's convention uses z (sqrt(u1)*cos(theta2)) as the scalar part.
+    # Our quaternion_to_matrix expects [real, i, j, k].
+    # So we order it: [z, w, x, y]
+    quaternions = torch.stack([z, w, x, y], dim=1)
     
     # 3. Convert Quaternion to Rotation Matrix
     return quaternion_to_matrix(quaternions)
