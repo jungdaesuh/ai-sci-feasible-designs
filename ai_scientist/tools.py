@@ -568,6 +568,9 @@ def propose_boundary(
     
     for key, value in params_map.items():
         if key in ("r_cos", "z_sin", "r_sin", "z_cos"):
+            if value is None:
+                new_params[key] = None
+                continue
             arr = np.asarray(value, dtype=float)
             noise = rng.normal(scale=perturbation_scale, size=arr.shape)
             new_params[key] = (arr + noise).tolist()
@@ -576,14 +579,14 @@ def propose_boundary(
             
     # Ensure symmetry constraints if flag is present
     if new_params.get("is_stellarator_symmetric"):
-        if "r_cos" in new_params:
+        if "r_cos" in new_params and new_params["r_cos"] is not None:
             r_cos = np.asarray(new_params["r_cos"])
             if r_cos.ndim > 1:
                 center_idx = r_cos.shape[1] // 2
                 if center_idx > 0:
                     r_cos[0, :center_idx] = 0.0
                 new_params["r_cos"] = r_cos.tolist()
-        if "z_sin" in new_params:
+        if "z_sin" in new_params and new_params["z_sin"] is not None:
             z_sin = np.asarray(new_params["z_sin"])
             z_sin[0, :] = 0.0
             new_params["z_sin"] = z_sin.tolist()
