@@ -43,7 +43,15 @@ def save_seeds(seeds_df, filename):
         for col in row.index:
             if col.startswith("boundary."):
                 key = col.replace("boundary.", "")
-                cleaned[key] = clean_matrix(row[col])
+                val = clean_matrix(row[col])
+
+                # Skip null/NaN values to avoid writing "null" in JSON
+                if val is None:
+                    continue
+                if isinstance(val, float) and np.isnan(val):
+                    continue
+
+                cleaned[key] = val
             elif col in ["vacuum_well", "qi", "aspect_ratio"]: # Optional: Keep some metrics for reference
                 cleaned[f"meta_{col}"] = float(row[col])
         
