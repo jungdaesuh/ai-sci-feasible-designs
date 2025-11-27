@@ -36,7 +36,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
     - *Change:* **REMOVE** geometric output heads (Elongation, etc.). Keep only Physics heads ($W_{MHD}$, $QI$).
     - *Why:* The NN should not waste capacity learning math we implemented in 1.1.
 
-- [ ] **2.2 Pre-train Physics Surrogate**
+- [x] **2.2 Pre-train Physics Surrogate**
     - *Action:* Run `scripts/train_offline.py`.
     - *Output:* `checkpoints/surrogate_physics_v2.pt` and `checkpoints/scaler.pkl`.
 
@@ -77,5 +77,5 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
 | :--- | :--- | :--- | :--- |
 | **M1** | Perfect Geometric Gradients | Phase 1.1 | ✅ Completed |
 | **M2** | Data Pipeline & Seeds | Phase 1.2 | ⬜ Pending |
-| **M3** | Trained Physics Model | Phase 2.2 | ⬜ Pending |
+| **M3** | Trained Physics Model | Phase 2.2 | ✅ Completed |
 | **M4** | Hybrid Loop Running | Phase 3.1 | ✅ Completed |
