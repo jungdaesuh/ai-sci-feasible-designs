@@ -128,6 +128,8 @@ else:
 ## 6. Immediate Next Steps & Outstanding Tasks
 
 ### Completed (V2.1 Refinement)
+- [x] **Equivariance Optimization:** Replaced CPU-based QR decomposition with pure GPU Quaternion generation for $SO(3)$ sampling.
+    - *Impact:* Eliminated CPU-GPU synchronization overhead and `linalg_qr` fallback on MPS, significantly speeding up the Geometric Encoder.
 - [x] **Uncertainty Quantification (Phase 2.4):** Implemented **Deep Ensembles** ($K=5$) in `NeuralOperatorSurrogate`.
     - *Goal:* Provide $\mu(x)$ and $\sigma(x)$ to the optimizer to prevent "hallucinated" high scores in unseen regions.
 - [x] **World Model Schema Upgrade (Phase 1.3):** Implement **Relational State Tracking** in `memory.py`.

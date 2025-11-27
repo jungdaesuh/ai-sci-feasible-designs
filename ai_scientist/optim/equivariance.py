@@ -116,33 +116,67 @@ class PointNetEncoder(nn.Module):
         return x
 
 
-def random_rotation_matrix(batch_size: int, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-    """Generate random 3x3 rotation matrices (SO(3)).
-    
-    Uses QR decomposition of random Gaussian matrices to ensure uniform distribution.
+def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
+    """Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: quaternions with real part first,
+            as tensor of shape (..., 4).
+
+    Returns:
+        Rotation matrices as tensor of shape (..., 3, 3).
     """
-    # Random matrix (B, 3, 3)
-    rand_mat = torch.randn(batch_size, 3, 3, device=device)
+    r, i, j, k = torch.unbind(quaternions, -1)
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+
+def random_rotation_matrix(batch_size: int, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+    """Generate random 3x3 rotation matrices (SO(3)) using Quaternions.
     
-    # QR decomposition
-    q, r = torch.linalg.qr(rand_mat)
+    Replaces QR-based generation to avoid MPS fallback issues.
+    Algorithm: Uniformly sample unit quaternions from S^3, then convert to rotation matrices
+    (Shoemake, 1992). This allows the entire generation to happen on-device (GPU/MPS)
+    without CPU fallback or synchronization.
+    """
+    # 1. Sample 3 uniform random variables on the device
+    # u1, u2, u3 ~ U[0, 1]
+    u = torch.rand(batch_size, 3, device=device)
+    u1, u2, u3 = u[:, 0], u[:, 1], u[:, 2]
+
+    # 2. Construct Unit Quaternion
+    # q = [w, x, y, z]
+    # theta1 = 2*pi*u2, theta2 = 2*pi*u3
+    # R1 = sqrt(1-u1), R2 = sqrt(u1)
     
-    # Ensure orthogonal part has determinant +1 (Rotation, not reflection)
-    # The QR decomposition can return a Q with det=-1. We correct this by
-    # checking the determinant and flipping the last column if it's negative.
-    det_q = torch.det(q) # (batch_size,)
+    sqrt_1_minus_u1 = torch.sqrt(1 - u1)
+    sqrt_u1 = torch.sqrt(u1)
+    theta1 = 2 * torch.pi * u2
+    theta2 = 2 * torch.pi * u3
+
+    w = sqrt_1_minus_u1 * torch.sin(theta1)
+    x = sqrt_1_minus_u1 * torch.cos(theta1)
+    y = sqrt_u1 * torch.sin(theta2)
+    z = sqrt_u1 * torch.cos(theta2)
+
+    # Stack to form quaternions (B, 4)
+    quaternions = torch.stack([w, x, y, z], dim=1)
     
-    # Create a batch of 3x3 identity matrices
-    diag_correction = torch.eye(3, device=device).repeat(batch_size, 1, 1)
-    
-    # For each matrix in the batch, set the last diagonal element to its determinant.
-    # If det_q is -1, this will make the last diagonal element -1.
-    diag_correction[:, 2, 2] = det_q
-    
-    # Apply the correction: q_new = q_old @ diag_correction.
-    # If det_q was -1, this multiplies the last column of q_old by -1,
-    # effectively changing det(q_old) from -1 to 1.
-    q = torch.bmm(q, diag_correction)
-    
-    return q
+    # 3. Convert Quaternion to Rotation Matrix
+    return quaternion_to_matrix(quaternions)
 
