@@ -100,12 +100,11 @@ def test_model_forward_shape():
     # Set nfp (last column) to valid positive integers
     x[:, -1] = torch.randint(1, 5, (batch_size,)).float()
     
-    obj, mhd, qi, elong = model(x)
+    obj, mhd, qi = model(x)
     
     assert obj.shape == (batch_size,)
     assert mhd.shape == (batch_size,)
     assert qi.shape == (batch_size,)
-    assert elong.shape == (batch_size,)
 
 if __name__ == "__main__":
     # Manual run

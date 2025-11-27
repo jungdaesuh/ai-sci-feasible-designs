@@ -376,7 +376,8 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             for candidate in candidates:
                 cold_ranks.append(SurrogatePrediction(
                     expected_value=0.0, prob_feasible=0.0, predicted_objective=0.0,
-                    minimize_objective=minimize_objective, metadata=candidate
+                    minimize_objective=minimize_objective, metadata=candidate,
+                    predicted_elongation=0.0,
                 ))
             return cold_ranks
 
@@ -412,6 +413,22 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         
         mhd_mean = np.mean(mhd_stack, axis=0)
         qi_mean = np.mean(qi_stack, axis=0)
+        
+        # Analytically compute elongation to keep downstream tests working
+        with torch.no_grad():
+            mpol = self._schema.mpol
+            ntor = self._schema.ntor
+            grid_h = mpol + 1
+            grid_w = 2 * ntor + 1
+            half_size = grid_h * grid_w
+            
+            nfp_batch = X[:, -1]
+            x_spectral = X[:, :-1]
+            
+            r_cos_grid = x_spectral[:, :half_size].view(-1, grid_h, grid_w)
+            z_sin_grid = x_spectral[:, half_size:].view(-1, grid_h, grid_w)
+            
+            elongations = geometry.elongation(r_cos_grid, z_sin_grid, nfp_batch).cpu().numpy()
         
         predictions: list[SurrogatePrediction] = []
         for i, candidate in enumerate(candidates):
@@ -449,6 +466,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     metadata=candidate,
                     predicted_mhd=float(mhd_mean[i]),
                     predicted_qi=float(qi_mean[i]),
+                    predicted_elongation=float(elongations[i]),
                 )
             )
             
