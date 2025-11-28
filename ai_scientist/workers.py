@@ -183,9 +183,10 @@ class GeometerWorker(Worker):
             n_R = -R * Z_t
             n_phi = Z_t * R_z - R_t * Z_z
             n_Z = R * R_t
-            
-            norm_n = torch.sqrt(n_R**2 + n_phi**2 + n_Z**2 + 1e-8)
-            
+
+            norm_sq = n_R**2 + n_phi**2 + n_Z**2
+            norm_n = torch.sqrt(torch.clamp(norm_sq, min=0.0))
+
             # If normal is too small, surface is singular/pinched
             if torch.min(norm_n) < 1e-4:
                 return False
