@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from ai_scientist import config as ai_config
 from ai_scientist import memory
 from ai_scientist.planner import PlanningAgent
-from ai_scientist.workers import OptimizationWorker, ExplorationWorker
+from ai_scientist.workers import OptimizationWorker, ExplorationWorker, GeometerWorker
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel
 
@@ -38,6 +38,7 @@ class Coordinator:
         # Initialize Workers
         self.opt_worker = OptimizationWorker(cfg, self.surrogate)
         self.explore_worker = ExplorationWorker(cfg, self.generative_model)
+        self.geo_worker = GeometerWorker(cfg)
         
         # State
         self.current_strategy = "HYBRID" # Default to doing both
@@ -91,7 +92,11 @@ class Coordinator:
             explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
             seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
             
-            opt_ctx = {"initial_guesses": seeds}
+            # Filter seeds with Geometer
+            geo_ctx = {"candidates": seeds}
+            valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
+            
+            opt_ctx = {"initial_guesses": valid_seeds}
             res = self.opt_worker.run(opt_ctx)
             candidates = res.get("candidates", [])
             
@@ -101,7 +106,11 @@ class Coordinator:
             explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
             seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
             
-            opt_ctx = {"initial_guesses": seeds}
+            # Filter seeds with Geometer
+            geo_ctx = {"candidates": seeds}
+            valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
+            
+            opt_ctx = {"initial_guesses": valid_seeds}
             res = self.opt_worker.run(opt_ctx)
             candidates = res.get("candidates", [])
             

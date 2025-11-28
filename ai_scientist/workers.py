@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict
+import torch
 
 from ai_scientist import config as ai_config
 from ai_scientist.optim import differentiable
@@ -143,3 +144,84 @@ class ExplorationWorker(Worker):
                 print("[ExplorationWorker] No sampler available for remaining candidates.")
             
         return {"candidates": candidates, "status": "explored"}
+
+
+class GeometerWorker(Worker):
+    """Worker responsible for validating geometric constraints (The Gatekeeper)."""
+    
+    def __init__(self, cfg: ai_config.ExperimentConfig):
+        self.cfg = cfg
+        
+    def check_validity(self, candidate: Dict[str, Any]) -> bool:
+        """
+        Check if a candidate has valid geometry.
+        
+        Checks:
+        1. Jacobian (Area Element) > 0 everywhere (no singularities).
+        2. Reasonable Elongation (< 10).
+        3. Positive Aspect Ratio.
+        """
+        params = candidate.get("params")
+        if not params:
+            return False
+            
+        try:
+            # Convert to torch tensors for geometry utils
+            r_cos = torch.tensor(params["r_cos"], dtype=torch.float32).unsqueeze(0) # (1, m, n)
+            z_sin = torch.tensor(params["z_sin"], dtype=torch.float32).unsqueeze(0)
+            nfp = params.get("n_field_periods", 1)
+            
+            # 1. Check Jacobian (Normal Vector Magnitude)
+            # We use a coarse grid for speed
+            from ai_scientist.optim import geometry
+            d = geometry._compute_derivatives(r_cos, z_sin, nfp, n_theta=32, n_zeta=32)
+            
+            R = d["R"]
+            R_t, R_z = d["R_t"], d["R_z"]
+            Z_t, Z_z = d["Z_t"], d["Z_z"]
+            
+            n_R = -R * Z_t
+            n_phi = Z_t * R_z - R_t * Z_z
+            n_Z = R * R_t
+            
+            norm_n = torch.sqrt(n_R**2 + n_phi**2 + n_Z**2 + 1e-8)
+            
+            # If normal is too small, surface is singular/pinched
+            if torch.min(norm_n) < 1e-4:
+                return False
+                
+            # 2. Check Elongation
+            elo = geometry.elongation(r_cos, z_sin, nfp, n_theta=32, n_zeta=32)
+            if elo.item() > 10.0:
+                return False
+                
+            # 3. Check Aspect Ratio
+            ar = geometry.aspect_ratio(r_cos, z_sin, nfp, n_theta=32, n_zeta=32)
+            if ar.item() <= 0: # Should be positive
+                return False
+                
+            return True
+            
+        except Exception as e:
+            print(f"[GeometerWorker] Validation failed: {e}")
+            return False
+
+    def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Filter a list of candidates.
+        
+        Context keys:
+            candidates: List[Dict[str, Any]]
+        """
+        candidates = context.get("candidates", [])
+        valid_candidates = []
+        
+        for cand in candidates:
+            if self.check_validity(cand):
+                valid_candidates.append(cand)
+            else:
+                # Optionally log rejection
+                pass
+                
+        print(f"[GeometerWorker] Retained {len(valid_candidates)}/{len(candidates)} candidates.")
+        return {"candidates": valid_candidates, "status": "filtered"}

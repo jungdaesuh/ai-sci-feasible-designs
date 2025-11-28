@@ -13,6 +13,7 @@ sys.path.append(os.getcwd())
 
 from ai_scientist.optim.data_loader import load_constellaration_dataset, LogRobustScaler, save_scaler
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+from ai_scientist.optim.generative import DiffusionDesignModel
 
 # Define Physics Columns to Scale
 PHYSICS_COLS = [
@@ -280,6 +281,50 @@ def main():
         model_path = checkpoints_dir / "surrogate_physics_v2.pt"
         torch.save(surrogate, model_path)
         print(f"Surrogate model saved to {model_path}")
+
+        print("4. Training Diffusion Design Model...")
+        # Prepare candidates for diffusion (needs 'params' key)
+        diffusion_candidates = []
+        for _, row in df_train.iterrows():
+            try:
+                r_cos = clean_matrix(row["boundary.r_cos"])
+                z_sin = clean_matrix(row["boundary.z_sin"])
+                params = {
+                    "r_cos": r_cos,
+                    "z_sin": z_sin,
+                    "n_field_periods": row.get("boundary.n_field_periods", 1),
+                }
+                # Metrics for conditioning
+                metrics = {
+                    "aspect_ratio": row.get("aspect_ratio", 0.0),
+                    "minimum_normalized_magnetic_gradient_scale_length": row.get("minimum_normalized_magnetic_gradient_scale_length", 0.0),
+                    "max_elongation": row.get("max_elongation", 0.0),
+                    "edge_rotational_transform_over_n_field_periods": row.get("edge_rotational_transform_over_n_field_periods", 0.0),
+                }
+                diffusion_candidates.append({"params": params, "metrics": metrics})
+            except:
+                continue
+        
+        if diffusion_candidates:
+            diffusion_model = DiffusionDesignModel(
+                epochs=args.epochs,
+                batch_size=32,
+                learning_rate=1e-4,
+                device=device
+            )
+            diffusion_model.fit(diffusion_candidates)
+            
+            diff_path = checkpoints_dir / "diffusion_v2.pt"
+            # DiffusionDesignModel wraps the torch model in ._model
+            # We save the whole wrapper or just the state dict? 
+            # The class doesn't have a save method, so let's save the internal model state dict
+            if diffusion_model._model:
+                torch.save(diffusion_model._model.state_dict(), diff_path)
+                print(f"Diffusion model saved to {diff_path}")
+            else:
+                print("Diffusion model failed to initialize.")
+        else:
+            print("No valid candidates for diffusion training.")
     else:
         print("Skipping training (--only-seeds provided).")
             
