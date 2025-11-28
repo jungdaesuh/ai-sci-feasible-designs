@@ -9,6 +9,7 @@ phase of the AI Scientist V2 upgrade. It enables:
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import logging
 import math
 from typing import Any, Mapping, Sequence
@@ -134,23 +135,48 @@ class DiffusionDesignModel:
         batch_size: int = 32,
         device: str = "cpu",
         timesteps: int = 300,
-    ) -> None:
+        ) -> None:
         self._min_samples = min_samples
         self._lr = learning_rate
         self._epochs = epochs
         self._batch_size = batch_size
         self._device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
         self._timesteps = timesteps
-        
+
         self._model: StellaratorDiffusion | None = None
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
         self._trained = False
-        
-        # Noise schedule
-        self.beta = torch.linspace(1e-4, 0.02, timesteps).to(self._device)
-        self.alpha = 1. - self.beta
+        self.m_mean: torch.Tensor | None = None
+        self.m_std: torch.Tensor | None = None
+
+        self._build_noise_schedule()
+
+    def _build_noise_schedule(self) -> None:
+        self.beta = torch.linspace(1e-4, 0.02, self._timesteps, device=self._device)
+        self.alpha = 1.0 - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+
+    def _ensure_model(self) -> None:
+        if self._schema is None or self._model is not None:
+            return
+        self._model = StellaratorDiffusion(
+            mpol=self._schema.mpol,
+            ntor=self._schema.ntor,
+            metric_dim=len(self.METRIC_KEYS),
+        ).to(self._device)
+        self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
+
+    @staticmethod
+    def _tensor_to_list(value: torch.Tensor | None) -> list[float] | None:
+        if value is None:
+            return None
+        return value.detach().cpu().tolist()
+
+    def _tensor_from_list(self, data: Sequence[float] | None) -> torch.Tensor | None:
+        if data is None:
+            return None
+        return torch.tensor(data, dtype=torch.float32, device=self._device)
 
     def _extract_metrics(self, cand: Mapping[str, Any]) -> np.ndarray | None:
         """Extract normalized metrics vector."""
@@ -218,15 +244,12 @@ class DiffusionDesignModel:
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
         
         # Init Model
+        if self._schema is None:
+            return
+
+        self._ensure_model()
         if self._model is None:
-            self._model = StellaratorDiffusion(
-                mpol=self._schema.mpol,
-                ntor=self._schema.ntor,
-                metric_dim=len(self.METRIC_KEYS)
-            ).to(self._device)
-            self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
-            self.beta = self.beta.to(self._device)
-            self.alpha_hat = self.alpha_hat.to(self._device)
+            return
 
         self._model.train()
         
@@ -269,9 +292,53 @@ class DiffusionDesignModel:
         self._trained = True
         _LOGGER.info("[diffusion] Training complete.")
 
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "schema": asdict(self._schema) if self._schema else None,
+            "model_state": self._model.state_dict() if self._model else None,
+            "trained": self._trained,
+            "m_mean": self._tensor_to_list(self.m_mean),
+            "m_std": self._tensor_to_list(self.m_std),
+            "beta": self._tensor_to_list(self.beta),
+            "alpha": self._tensor_to_list(self.alpha),
+            "alpha_hat": self._tensor_to_list(self.alpha_hat),
+            "timesteps": int(self._timesteps),
+        }
+
+    def load_state_dict(self, checkpoint: Mapping[str, Any]) -> None:
+        saved_schema = checkpoint.get("schema")
+        if saved_schema:
+            self._schema = tools.FlattenSchema(**saved_schema)
+
+        saved_timesteps = checkpoint.get("timesteps")
+        if isinstance(saved_timesteps, int):
+            self._timesteps = saved_timesteps
+        self._build_noise_schedule()
+
+        beta_data = checkpoint.get("beta")
+        if beta_data:
+            self.beta = self._tensor_from_list(beta_data)
+        alpha_data = checkpoint.get("alpha")
+        if alpha_data:
+            self.alpha = self._tensor_from_list(alpha_data)
+        alpha_hat_data = checkpoint.get("alpha_hat")
+        if alpha_hat_data:
+            self.alpha_hat = self._tensor_from_list(alpha_hat_data)
+
+        if self._schema:
+            self._ensure_model()
+            if self._model is not None:
+                model_state = checkpoint.get("model_state")
+                if model_state:
+                    self._model.load_state_dict(model_state)
+
+        self.m_mean = self._tensor_from_list(checkpoint.get("m_mean"))
+        self.m_std = self._tensor_from_list(checkpoint.get("m_std"))
+        self._trained = bool(checkpoint.get("trained", self._trained))
+
     def sample(
-        self, 
-        n_samples: int, 
+        self,
+        n_samples: int,
         target_metrics: Mapping[str, float],
         seed: int
     ) -> list[Mapping[str, Any]]:

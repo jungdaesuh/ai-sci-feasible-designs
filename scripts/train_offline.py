@@ -315,14 +315,13 @@ def main():
             diffusion_model.fit(diffusion_candidates)
             
             diff_path = checkpoints_dir / "diffusion_v2.pt"
-            # DiffusionDesignModel wraps the torch model in ._model
-            # We save the whole wrapper or just the state dict? 
-            # The class doesn't have a save method, so let's save the internal model state dict
-            if diffusion_model._model:
-                torch.save(diffusion_model._model.state_dict(), diff_path)
+            # DiffusionDesignModel exposes state_dict() that includes schema, normalizers, and weights
+            if diffusion_model._trained:
+                checkpoint = diffusion_model.state_dict()
+                torch.save(checkpoint, diff_path)
                 print(f"Diffusion model saved to {diff_path}")
             else:
-                print("Diffusion model failed to initialize.")
+                print("Diffusion model training did not complete; skipping checkpoint.")
         else:
             print("No valid candidates for diffusion training.")
     else:
