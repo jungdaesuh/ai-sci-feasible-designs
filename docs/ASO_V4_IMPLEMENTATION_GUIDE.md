@@ -1495,8 +1495,8 @@ if args.aso:
 - [x] 0.3 Implement `create_alm_context()` - wraps constellaration setup
 - [x] 0.4 Implement `step_alm()` - single outer ALM iteration
 - [x] 0.5 Implement `state_to_boundary_params()` - convert back to dict
-- [ ] 0.6 Unit test: `create_alm_context()` returns valid state
-- [ ] 0.7 Unit test: `step_alm()` reduces violation over iterations
+- [x] 0.6 Unit test: `create_alm_context()` returns valid state
+- [x] 0.7 Unit test: `step_alm()` reduces violation over iterations
 
 ### Phase 1: Data Structures (Priority 0)
 
@@ -1554,19 +1554,19 @@ if args.aso:
 - [x] 5.3 Test penalty override is applied correctly
 
 **File: `tests/test_planner.py`**
-- [ ] 5.4 Test `HeuristicSupervisor` STOP on FEASIBLE_FOUND
-- [ ] 5.5 Test `HeuristicSupervisor` ADJUST on STAGNATION
-- [ ] 5.6 Test `HeuristicSupervisor` penalty boost calculation
+- [x] 5.4 Test `HeuristicSupervisor` STOP on FEASIBLE_FOUND
+- [x] 5.5 Test `HeuristicSupervisor` ADJUST on STAGNATION
+- [x] 5.6 Test `HeuristicSupervisor` penalty boost calculation
 
 **File: `tests/test_coordinator.py`**
-- [ ] 5.7 Test `_generate_diagnostics()` extracts all ALM fields
-- [ ] 5.8 Integration test: 3-step ASO loop with mock problem
+- [x] 5.7 Test `_generate_diagnostics()` extracts all ALM fields
+- [x] 5.8 Integration test: 3-step ASO loop with mock problem
 
 ### Phase 6: Documentation (Priority 2)
 
-- [ ] 6.1 Update `docs/run_protocol.md` with ASO instructions
-- [ ] 6.2 Add example config YAML with ASO/ALM settings
-- [ ] 6.3 Move superseded docs to `docs/archive/`
+- [x] 6.1 Update `docs/run_protocol.md` with ASO instructions
+- [x] 6.2 Add example config YAML with ASO/ALM settings
+- [x] 6.3 Move superseded docs to `docs/archive/`
 
 ---
 
