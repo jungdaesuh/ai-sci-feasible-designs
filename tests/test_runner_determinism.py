@@ -8,7 +8,7 @@ from typing import Mapping
 from unittest.mock import patch
 
 from ai_scientist import config as ai_config, memory, runner, tools
-from ai_scientist.runner import BudgetController, CycleBudgetFeedback
+from ai_scientist.budget_manager import BudgetController, CycleBudgetFeedback
 
 
 class _DummyWorldModel:
@@ -197,9 +197,7 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
                     return_value="stub_tool",
                 ),
             ):
-                budget_controller = runner.BudgetController(
-                    cfg.budgets, cfg.adaptive_budgets
-                )
+                budget_controller = runner.BudgetController(cfg)
                 runner._run_cycle(
                     cfg,
                     cycle_index=0,
@@ -245,7 +243,12 @@ def test_budget_controller_serialization_roundtrip():
         promote_top_k_bounds=ai_config.BudgetRangeConfig(min=1, max=4),
         high_fidelity_bounds=ai_config.BudgetRangeConfig(min=1, max=2),
     )
-    bc = BudgetController(base, adaptive)
+    dummy_cfg = replace(
+        ai_config.load_experiment_config(),
+        budgets=base,
+        adaptive_budgets=adaptive,
+    )
+    bc = BudgetController(dummy_cfg)
     bc.capture_cache_hit_rate("screen", stats={"hits": 5, "misses": 3})
     bc.record_feedback(
         CycleBudgetFeedback(hv_delta=0.2, feasibility_rate=0.7, cache_hit_rate=0.6)
@@ -253,7 +256,7 @@ def test_budget_controller_serialization_roundtrip():
     data = bc.to_dict()
     assert data["state_version"] == BudgetController.STATE_VERSION
     assert data["adaptive_cfg"]["enabled"] is True
-    clone = BudgetController(base, adaptive)
+    clone = BudgetController(dummy_cfg)
     clone.restore(data)
     assert clone._last_feedback.hv_delta == 0.2
     assert clone._last_feedback.feasibility_rate == 0.7

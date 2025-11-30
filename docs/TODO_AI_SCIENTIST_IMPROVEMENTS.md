@@ -32,7 +32,7 @@ This document consolidates all improvement opportunities for the `ai_scientist` 
 | `tools.py` (36KB) | ~1000 LOC | `tools/evaluation.py`, `tools/design_manipulation.py`, `tools/hypervolume.py` |
 | `planner.py` (35KB) | ~900 LOC | Already well-structured; consider extracting `heuristic_supervisor.py` |
 
-- [ ] **1.1 Extract `budget_manager.py` from `runner.py`**
+- [x] **1.1 Extract `budget_manager.py` from `runner.py`**
   - Move `BudgetConfig`, `AdaptiveBudgetConfig`, budget calculation logic
   - File: `ai_scientist/budget_manager.py`
   - Classes: `BudgetController`, `BudgetSnapshot`

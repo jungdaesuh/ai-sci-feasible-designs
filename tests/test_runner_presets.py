@@ -61,9 +61,7 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     "ai_scientist.runner._problem_tool_name", return_value="evaluate_p3"
                 ),
             ):
-                budget_controller = runner.BudgetController(
-                    cfg.budgets, cfg.adaptive_budgets
-                )
+                budget_controller = runner.BudgetController(cfg)
                 runner._run_cycle(
                     cfg,
                     cycle_index=0,

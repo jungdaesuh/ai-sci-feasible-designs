@@ -22,10 +22,14 @@ from constellaration.utils import pytree
 # Register SurfaceRZFourier as a Pytree to ensure JAX compatibility
 # (In case the installed constellaration library hasn't registered it yet)
 # We treat scalar metadata as meta_fields so they aren't traversed by mask_and_ravel
-pytree.register_pydantic_data(
-    surface_module.SurfaceRZFourier, 
-    meta_fields=["n_field_periods", "is_stellarator_symmetric"]
-)
+try:
+    pytree.register_pydantic_data(
+        surface_module.SurfaceRZFourier, 
+        meta_fields=["n_field_periods", "is_stellarator_symmetric"]
+    )
+except ValueError:
+    # Already registered
+    pass
 
 MAX_ELONGATION = 5.0
 
