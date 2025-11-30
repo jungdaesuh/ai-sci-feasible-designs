@@ -11,7 +11,7 @@ import numpy as np
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
-from constellaration.initial_guess import generate_nae
+from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.geometry import surface_rz_fourier
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,6 +24,78 @@ def _surface_to_params(surface: surface_rz_fourier.SurfaceRZFourier) -> dict[str
         "n_field_periods": int(surface.n_field_periods),
         "is_stellarator_symmetric": bool(surface.is_stellarator_symmetric),
     }
+
+
+class RotatingEllipseSampler:
+    """Generates candidates using simple Rotating Ellipse via Constellaration."""
+
+    def __init__(
+        self,
+        template: ai_config.BoundaryTemplateConfig,
+    ) -> None:
+        self._template = template
+
+    def generate(self, seeds: Sequence[int]) -> list[Mapping[str, Any]]:
+        candidates: list[Mapping[str, Any]] = []
+        for seed in seeds:
+            rng = np.random.default_rng(seed)
+            
+            # Defaults from runner.py
+            base_surface = generate_rotating_ellipse(
+                aspect_ratio=4.0,
+                elongation=1.5,
+                rotational_transform=1.2,
+                n_field_periods=self._template.n_field_periods,
+            )
+            
+            # Expand to template modes
+            max_poloidal = max(1, self._template.n_poloidal_modes - 1)
+            max_toroidal = max(1, (self._template.n_toroidal_modes - 1) // 2)
+            
+            expanded = surface_rz_fourier.set_max_mode_numbers(
+                base_surface,
+                max_poloidal_mode=max_poloidal,
+                max_toroidal_mode=max_toroidal,
+            )
+            
+            r_cos = np.asarray(expanded.r_cos, dtype=float)
+            z_sin = np.asarray(expanded.z_sin, dtype=float)
+            
+            # Enforce template radii
+            center_idx = r_cos.shape[1] // 2
+            r_cos[0, center_idx] = self._template.base_major_radius
+            if r_cos.shape[0] > 1:
+                z_sin[1, center_idx] = self._template.base_minor_radius
+
+            # Add perturbation
+            r_cos += rng.normal(scale=self._template.perturbation_scale, size=r_cos.shape)
+            z_sin += rng.normal(scale=self._template.perturbation_scale / 2, size=z_sin.shape)
+            
+            # Enforce symmetry (Runner logic)
+            n_cols = r_cos.shape[1]
+            center_idx = n_cols // 2
+            if center_idx > 0:
+                r_cos[0, :center_idx] = 0.0
+            z_sin[0, :] = 0.0
+
+            params = {
+                "r_cos": r_cos.tolist(),
+                "z_sin": z_sin.tolist(),
+                "n_field_periods": self._template.n_field_periods,
+                "is_stellarator_symmetric": True,
+            }
+            
+            candidates.append(
+                {
+                    "seed": seed,
+                    "params": params,
+                    "source": "rotating_ellipse_sampler",
+                    "design_hash": tools.design_hash(params),
+                    "constraint_distance": 1.0, # Higher distance as these are random
+                }
+            )
+        
+        return candidates
 
 
 class NearAxisSampler:

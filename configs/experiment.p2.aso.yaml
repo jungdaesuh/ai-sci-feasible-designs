@@ -1,0 +1,80 @@
+# configs/experiment.p2.aso.yaml
+# Research-Production Configuration for P2 (Simple-To-Build Stellarator)
+#
+# Problem Description:
+# P2 balances physics (Rotational Transform, QA/QI) with engineering constraints 
+# (Coil Complexity, magnetic mirror ratio).
+#
+# Strategy:
+# - Balanced approach between P1 (speed) and P3 (stability).
+# - ALM needs to handle competing constraints (Physics vs. Engineering).
+
+problem: p2
+cycles: 15
+random_seed: 2002
+experiment_tag: "aso_p2_prod"
+
+boundary_template:
+  n_poloidal_modes: 4
+  n_toroidal_modes: 4
+  n_field_periods: 4    # P2 often targets 4-5 field periods
+  base_major_radius: 1.0
+  base_minor_radius: 0.2
+  perturbation_scale: 0.05
+
+budgets:
+  screen_evals_per_cycle: 150
+  promote_top_k: 15
+  max_high_fidelity_evals_per_cycle: 150
+  wall_clock_minutes: 45
+  n_workers: 6
+  pool_type: process
+
+adaptive_budgets:
+  enabled: true
+
+fidelity_ladder:
+  screen: p2
+  promote: p2
+
+stage_gates:
+  s1_to_s2_feasibility_margin: 0.01
+  s1_to_s2_objective_improvement: 0.02
+  s1_to_s2_lookback_cycles: 3
+  s2_to_s3_hv_delta: 0.01
+  s2_to_s3_lookback_cycles: 3
+
+governance:
+  min_feasible_for_promotion: 2
+  hv_lookback: 3
+
+proposal_mix:
+  constraint_ratio: 0.6
+  exploration_ratio: 0.4
+  jitter_scale: 0.02
+  surrogate_pool_multiplier: 3.0
+
+# ALM Configuration
+alm:
+  maxit: 30
+  penalty_parameters_initial: 2.0
+  bounds_initial: 1.0
+  oracle_budget_initial: 80
+  oracle_budget_increment: 20
+  oracle_budget_max: 150
+  oracle_num_workers: 6
+
+# ASO Supervision
+aso:
+  enabled: true
+  supervision_mode: event_triggered
+  supervision_interval: 5
+  use_heuristic_fallback: true
+  steps_per_supervision: 1
+  stagnation_violation_threshold: 0.05
+  max_penalty_boost: 5.0
+  feasibility_threshold: 1e-3
+
+reporting:
+  prometheus_export_enabled: false
+  reporting_dir: reports

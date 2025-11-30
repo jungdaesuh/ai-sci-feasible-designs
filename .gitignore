@@ -2,6 +2,9 @@
 artifacts/
 reports/
 .cache/
+logs/
+*.h5
+consolidated_code.txt
 
 # Logs
 constellaration/runs/*.jsonl

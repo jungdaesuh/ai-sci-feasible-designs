@@ -51,7 +51,7 @@ This document consolidates all improvement opportunities for the `ai_scientist` 
   - Keep only `run_experiment()` entry point that composes the above
   - File: `ai_scientist/experiment_runner.py`
 
-- [ ] **1.5 Split `memory.py` into submodule**
+- [x] **1.5 Split `memory.py` into submodule**
   - Create `ai_scientist/memory/` directory
   - `schema.py` - Table definitions, migrations
   - `repository.py` - CRUD operations

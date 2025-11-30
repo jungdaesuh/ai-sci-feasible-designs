@@ -10,7 +10,7 @@ from ai_scientist import config as ai_config
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
-from ai_scientist.optim.samplers import NearAxisSampler, OfflineSeedSampler
+from ai_scientist.optim.samplers import NearAxisSampler, OfflineSeedSampler, RotatingEllipseSampler
 
 class Worker(ABC):
     """Abstract base class for specialized workers."""
@@ -83,6 +83,12 @@ class ExplorationWorker(Worker):
                     self.sampler = OfflineSeedSampler(cfg.problem)
                 except Exception as exc:
                     print(f"[ExplorationWorker] Failed to init OfflineSeedSampler: {exc}")
+                    self.sampler = None
+            elif cfg.proposal_mix.sampler_type == "rotating_ellipse":
+                try:
+                    self.sampler = RotatingEllipseSampler(cfg.boundary_template)
+                except Exception as exc:
+                    print(f"[ExplorationWorker] Failed to init RotatingEllipseSampler: {exc}")
                     self.sampler = None
             else:
                 self.sampler = None

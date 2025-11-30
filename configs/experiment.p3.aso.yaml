@@ -1,0 +1,71 @@
+# configs/experiment.p3.aso.yaml
+# Agent-Supervised Optimization (ASO) configuration for P3.
+# Leverages real ALM state supervision.
+
+problem: p3
+cycles: 10
+random_seed: 42
+experiment_tag: "aso_v4_demo"
+
+boundary_template:
+  n_poloidal_modes: 4
+  n_toroidal_modes: 4
+  n_field_periods: 3
+  base_major_radius: 1.0
+  base_minor_radius: 0.2
+  perturbation_scale: 0.05
+
+budgets:
+  screen_evals_per_cycle: 100   # High budget for ASO loop (oracle calls)
+  promote_top_k: 10
+  max_high_fidelity_evals_per_cycle: 100
+  wall_clock_minutes: 60
+  n_workers: 4
+  pool_type: process
+
+adaptive_budgets:
+  enabled: true
+
+fidelity_ladder:
+  screen: p3
+  promote: p3
+
+stage_gates:
+  s1_to_s2_feasibility_margin: 0.01
+  s1_to_s2_objective_improvement: 0.02
+  s1_to_s2_lookback_cycles: 3
+  s2_to_s3_hv_delta: 0.01
+  s2_to_s3_lookback_cycles: 3
+
+governance:
+  min_feasible_for_promotion: 1
+  hv_lookback: 3
+
+proposal_mix:
+  constraint_ratio: 0.7
+  exploration_ratio: 0.3
+  jitter_scale: 0.01
+  surrogate_pool_multiplier: 2.0
+
+# ASO Specific Configuration
+alm:
+  maxit: 25
+  penalty_parameters_initial: 1.0
+  bounds_initial: 2.0
+  oracle_budget_initial: 100
+  oracle_budget_increment: 26
+  oracle_budget_max: 200
+  oracle_num_workers: 4
+
+aso:
+  enabled: true
+  supervision_mode: event_triggered
+  supervision_interval: 5
+  use_heuristic_fallback: true
+  steps_per_supervision: 1
+  stagnation_violation_threshold: 0.05
+  max_penalty_boost: 4.0
+
+reporting:
+  prometheus_export_enabled: false
+  reporting_dir: reports

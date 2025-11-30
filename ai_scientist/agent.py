@@ -15,7 +15,7 @@ _ROLE_ALIAS_MAP = {
     "screen": lambda cfg: cfg.instruct_model,
     "short_loop": lambda cfg: cfg.instruct_model,
     "prompt": lambda cfg: cfg.instruct_model,
-    "planning": lambda cfg: cfg.thinking_model,
+    "planning": lambda cfg: cfg.role_map.get("planning", cfg.thinking_model),
     "report": lambda cfg: cfg.thinking_model,
     "verification": lambda cfg: cfg.thinking_model,
     "literature": lambda cfg: cfg.role_map.get("literature", cfg.thinking_model),

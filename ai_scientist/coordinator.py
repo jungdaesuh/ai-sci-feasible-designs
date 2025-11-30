@@ -265,6 +265,7 @@ class Coordinator:
                     "objective": result.objective,
                     "max_violation": result.max_violation,
                     "source": "aso",
+                    "seed": traj.seed.get("seed", 0),
                 })
                 break
 
@@ -278,6 +279,7 @@ class Coordinator:
                         "objective": result.objective,
                         "max_violation": result.max_violation,
                         "source": "aso_pre_restart",
+                        "seed": traj.seed.get("seed", 0),
                     })
 
                     traj.seed = new_seeds[0]
@@ -318,6 +320,7 @@ class Coordinator:
                     "objective": result.objective,
                     "max_violation": result.max_violation,
                     "source": "aso_stagnation",
+                    "seed": traj.seed.get("seed", 0),
                 })
                 break
 

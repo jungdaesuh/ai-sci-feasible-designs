@@ -1,13 +1,11 @@
 model:
   base_url: http://127.0.0.1
-  # instruct_model: kimi-k2-instruct
-  instruct_model: "kwaipilot/kat-coder-pro:free-short-loop"
-  # thinking_model: kimi-k2-thinking
-  thinking_model: "kwaipilot/kat-coder-pro:free"
+  instruct_model: "x-ai/grok-4.1-fast:free"
+  thinking_model: "x-ai/grok-4.1-fast:free"
   request_timeout_seconds: 120
   rate_limit_per_minute: 240
-  context_length: 256000 # kwaipilot/kat-coder-pro:free context window
-  dtype: bf16 # Stats expected by Phase 1 detection
+  context_length: 256000 # Use a generic large context window, specific model limits can vary
+  dtype: bf16
   tensor_parallel: 1
   provider: openrouter
   providers:
@@ -15,11 +13,10 @@ model:
       base_url: https://openrouter.ai/api/v1
       chat_path: /chat/completions
       auth_env: OPENROUTER_API_KEY
-      # default_model: kimi-k2-instruct
-      default_model: "kwaipilot/kat-coder-pro:free"
+      default_model: "x-ai/grok-4.1-fast:free"
       extra_headers:
         HTTP-Referer: https://openrouter.ai/docs
-        X-Title: "ConStellaration K2"
+        X-Title: "ConStellaration Grok"
     moonshot:
       base_url: https://api.moonshot.ai/v1
       chat_path: /chat/completions
@@ -30,7 +27,7 @@ model:
       chat_path: /chat/completions
       auth_env: WQ_API_KEY
   agent_gates:
-    "kwaipilot/kat-coder-pro:free-short-loop":
+    "kwaipilot-planning-short-loop":
       provider_model: "kwaipilot/kat-coder-pro:free"
       allowed_tools:
         - make_boundary
@@ -42,7 +39,8 @@ model:
         - log_citation
         - write_report
       system_prompt: "Focus on short-loop tool usage and cite docs/MASTER_PLAN_AI_SCIENTIST.md when writing the report."
-    "kwaipilot/kat-coder-pro:free":
+    "kwaipilot-planning-full":
+      provider_model: "kwaipilot/kat-coder-pro:free"
       allowed_tools:
         - make_boundary
         - propose_boundary
@@ -53,19 +51,45 @@ model:
         - retrieve_rag
         - write_report
       system_prompt: "Synthesize cycle-level summaries, reference docs/TASKS_CODEX_MINI.md:157-190, and plan the next wave."
+    "grok-planning-short-loop":
+      provider_model: "x-ai/grok-4.1-fast:free"
+      allowed_tools:
+        - make_boundary
+        - propose_boundary
+        - recombine_designs
+        - evaluate_p1
+        - evaluate_p2
+        - evaluate_p3
+        - log_citation
+        - write_report
+      system_prompt: "Focus on short-loop tool usage for stellarator design. Use the provided tools efficiently."
+    "grok-planning-full":
+      provider_model: "x-ai/grok-4.1-fast:free"
+      allowed_tools:
+        - make_boundary
+        - propose_boundary
+        - recombine_designs
+        - evaluate_p1
+        - evaluate_p2
+        - evaluate_p3
+        - retrieve_rag
+        - write_report
+        - write_note
+      system_prompt: "You are an expert AI Scientist. Synthesize complex information, plan next steps, and utilize all available tools for stellarator optimization. Leverage RAG for context and write notes to document progress."
     "literature_agent":
-      provider_model: "kwaipilot/kat-coder-pro:free"
+      provider_model: "x-ai/grok-4.1-fast:free" # Also switch literature agent to Grok
       allowed_tools:
         - retrieve_rag
         - write_note
       system_prompt: "You are a literature researcher. Retrieve papers, synthesize insights, and write notes to the world model."
     "analysis_agent":
-      provider_model: "kwaipilot/kat-coder-pro:free"
+      provider_model: "x-ai/grok-4.1-fast:free" # Also switch analysis agent to Grok
       allowed_tools:
         - evaluate_p3
         - make_boundary
         - write_note
       system_prompt: "You are a physics analyst. Evaluate designs and document findings."
   role_map:
+    planning: "grok-planning-full"
     literature: "literature_agent"
     analysis: "analysis_agent"

@@ -1,0 +1,82 @@
+# configs/experiment.p1.aso.yaml
+# Research-Production Configuration for P1 (Geometrical Optimization)
+#
+# Problem Description:
+# P1 focuses on geometric properties (Aspect Ratio, Triangularity, Rotational Transform).
+# It is computationally cheaper than P2/P3 as it avoids complex MHD equilibrium solves.
+#
+# Strategy:
+# - Higher budgets/throughput due to lower per-eval cost.
+# - Stricter feasibility thresholds as geometry is easier to satisfy.
+# - Larger initial bounds to encourage broader exploration of the geometry space.
+
+problem: p1
+cycles: 20  # P1 is fast, so we run more cycles to explore diverse geometries
+random_seed: 1001
+experiment_tag: "aso_p1_prod"
+
+boundary_template:
+  n_poloidal_modes: 6  # Increased resolution for NAE stability
+  n_toroidal_modes: 6
+  n_field_periods: 1   # Simplified to 1 to avoid NAE generation errors
+  base_major_radius: 1.0
+  base_minor_radius: 0.2
+  perturbation_scale: 0.05 # Reduced perturbation for stability
+
+budgets:
+  screen_evals_per_cycle: 200   # High throughput for geometry
+  promote_top_k: 20
+  max_high_fidelity_evals_per_cycle: 200
+  wall_clock_minutes: 30        # Short cycles
+  n_workers: 8                  # Parallelize geometry checks aggressively
+  pool_type: process
+
+adaptive_budgets:
+  enabled: true
+
+fidelity_ladder:
+  screen: p1
+  promote: p1
+
+stage_gates:
+  s1_to_s2_feasibility_margin: 0.001       # Stricter for P1
+  s1_to_s2_objective_improvement: 0.01
+  s1_to_s2_lookback_cycles: 5
+  s2_to_s3_hv_delta: 0.005
+  s2_to_s3_lookback_cycles: 5
+
+governance:
+  min_feasible_for_promotion: 5
+  hv_lookback: 5
+
+proposal_mix:
+  constraint_ratio: 0.5      # Balance exploration more for P1
+  exploration_ratio: 0.5
+  jitter_scale: 0.05         # Aggressive jitter
+  surrogate_pool_multiplier: 4.0
+  sampler_type: rotating_ellipse    # Use simpler sampler to ensure valid seeds
+
+# ALM Configuration for Geometry
+alm:
+  maxit: 40                  # More iterations to refine geometry precisely
+  penalty_parameters_initial: 10.0 # Start stricter
+  bounds_initial: 0.5        # Smaller trust region for precision
+  oracle_budget_initial: 50  # Faster inner loops
+  oracle_budget_increment: 10
+  oracle_budget_max: 100
+  oracle_num_workers: 8
+
+# ASO Supervision
+aso:
+  enabled: true
+  supervision_mode: event_triggered
+  supervision_interval: 10
+  use_heuristic_fallback: true
+  steps_per_supervision: 2   # Check less frequently as P1 is stable
+  stagnation_violation_threshold: 0.01 # Stricter stagnation detection
+  max_penalty_boost: 10.0    # Aggressive penalty boosting for geometry constraints
+  feasibility_threshold: 1e-4 # High precision required
+
+reporting:
+  prometheus_export_enabled: false
+  reporting_dir: reports

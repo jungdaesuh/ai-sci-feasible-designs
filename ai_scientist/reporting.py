@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from ai_scientist import rag
 from ai_scientist.rag import DEFAULT_INDEX_SOURCES
-from ai_scientist.memory import StageHistoryEntry
+from ai_scientist.memory.schema import StageHistoryEntry
 
 _LOGGER = logging.getLogger(__name__)
 _ALLOWED_REFERENCE_PREFIXES = (
