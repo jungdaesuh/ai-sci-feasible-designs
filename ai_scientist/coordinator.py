@@ -524,7 +524,7 @@ class Coordinator:
         if problem_key.startswith("p1"):
             return problems.GeometricalProblem()
         elif problem_key.startswith("p2"):
-            return problems.SimpleToBuildStellarator()
+            return problems.SimpleToBuildQIStellarator()
         else:
             # P3 defaults (MHD Stable QI)
             return problems.MHDStableQIStellarator()
