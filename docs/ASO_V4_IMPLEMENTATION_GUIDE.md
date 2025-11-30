@@ -1,39 +1,65 @@
 # Agent-Supervised Optimization (ASO) V4 Implementation Guide
 
 **Status:** Ready for Implementation
-**Date:** 2025-11-30
-**Supersedes:** `UNIFIED_PLAN.md`, `ASO_V3_PLAN.md`
+**Date:** 2025-11-30 (Revised)
+**Supersedes:** `UNIFIED_PLAN.md`, `UNIFIED_RAW.md`, `ASO_V3_PLAN.md`, `AI_SCIENTIST_ASO_MIGRATION_PLAN.md`
 **Prerequisites:** V2 Roadmap Complete (Phases 1-4)
 
 ---
 
 ## Executive Summary
 
-This document provides a **verified implementation guide** for the Agent-Supervised Optimization (ASO) loop. Unlike previous planning documents, this guide is grounded in a thorough codebase audit and addresses critical gaps discovered in earlier plans.
+This document provides a **verified implementation guide** for the Agent-Supervised Optimization (ASO) loop. Unlike previous planning documents, this guide is grounded in a thorough codebase audit of both `ai_scientist/` and `constellaration/`.
 
 ### Key Findings from Codebase Audit
 
-1. **ALM State is Already Accessible** - `AugmentedLagrangianState` in `constellaration` is a Pydantic model, directly importable without upstream modification
-2. **Planner Has Multi-Turn Loop** - `planner.py:384-468` already implements a 5-turn agentic loop with tool calling
-3. **Coordinator Strategy is Minimal** - EXPLOIT and HYBRID paths are nearly identical; distinction is superficial
-4. **Missing Config** - `alm_settings` mentioned in plans but doesn't exist in `ExperimentConfig`
-5. **Worker Contract Incomplete** - `OptimizationWorker` doesn't return ALM state for continuation
+1. **Complete ALM Infrastructure Exists in constellaration** - The `augmented_lagrangian_runner.py` contains a full iterative ALM loop with Nevergrad oracle. We need to **wrap it**, not rebuild it.
+2. **AugmentedLagrangianState is Pydantic** - Directly importable, JSON-serializable, contains `x`, `multipliers`, `penalty_parameters`, `objective`, `constraints`, `bounds`
+3. **update_augmented_lagrangian_state() Exists** - Handles multiplier/penalty updates automatically
+4. **Planner Has Multi-Turn Loop** - `planner.py:384-468` already implements a 5-turn agentic loop with tool calling
+5. **Gap is the Bridge** - What's missing is a **steppable wrapper** that allows supervision injection between ALM outer iterations
 
-### Architecture Improvements in V4
+### Architecture: Wrap, Don't Rebuild
 
-| Feature | V3 Plan | V4 Implementation |
-|---------|---------|-------------------|
-| LLM Supervision | Event-triggered | Same + **Surrogate-based proxy diagnostics** |
-| ALM State Access | Assumed | **Verified: Direct import from constellaration** |
-| Multi-Trajectory | Proposed | **Simplified: Sequential with early termination** |
-| Heuristic Fallback | Proposed | **Implemented with configurable thresholds** |
-| Telemetry | SQL table | **Append-only JSONL + SQL summary** |
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ASO Architecture                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ai_scientist/                           constellaration/                    │
+│  ┌─────────────┐    ┌──────────────┐    ┌─────────────────────────────────┐ │
+│  │   Planner   │◄──►│  Coordinator │◄──►│  ALM Bridge (NEW)               │ │
+│  │ (supervise) │    │  (ASO loop)  │    │  ┌───────────────────────────┐  │ │
+│  └─────────────┘    └──────────────┘    │  │ augmented_lagrangian.py   │  │ │
+│        ▲                   │            │  │ - AugmentedLagrangianState │  │ │
+│        │                   │            │  │ - update_...state()        │  │ │
+│        │            ┌──────▼──────┐     │  │ - augmented_lagrangian_fn  │  │ │
+│        │            │ Diagnostics │     │  └───────────────────────────┘  │ │
+│        └────────────┤  Translator │     │  ┌───────────────────────────┐  │ │
+│                     │ (real ALM   │     │  │ augmented_lagrangian_     │  │ │
+│                     │  state!)    │     │  │ runner.py                 │  │ │
+│                     └─────────────┘     │  │ - run() [full loop]       │  │ │
+│                                         │  │ - objective_constraints() │  │ │
+│                                         │  └───────────────────────────┘  │ │
+│                                         └─────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### What's Different from Previous Plans
+
+| Feature | Previous Plans | V4 Reality |
+|---------|----------------|------------|
+| ALM Infrastructure | "Needs to be built" | **Already exists in constellaration** |
+| Diagnostics Source | Proxy from surrogate | **Real ALM state** (objective, constraints, multipliers, penalties) |
+| Worker Contract | Returns candidates only | Wrap existing `augmented_lagrangian_runner` |
+| Key Implementation | Build ALM from scratch | **Create steppable bridge layer** |
+| Supervision Point | Between gradient steps | **Between ALM outer iterations** |
 
 ---
 
 ## Part 1: Current Architecture (Verified)
 
-### 1.1 What's Actually Implemented
+### 1.1 ai_scientist Module Structure
 
 ```
 ai_scientist/
@@ -46,98 +72,471 @@ ai_scientist/
 └── optim/
     ├── surrogate_v2.py    # NeuralOperatorSurrogate (543 lines)
     ├── generative.py      # VAE + Diffusion (666 lines)
-    ├── differentiable.py  # Gradient descent (344 lines)
+    ├── differentiable.py  # Gradient descent (344 lines) - has optimize_alm_inner_loop()
     └── geometry.py        # Fourier ↔ Real-space (569 lines)
-
-constellaration/src/constellaration/
-├── optimization/
-│   ├── augmented_lagrangian.py      # AugmentedLagrangianState (Pydantic!)
-│   └── augmented_lagrangian_runner.py
-├── forward_model.py                  # Physics evaluation
-└── problems.py                       # P1, P2, P3 definitions
-
-checkpoints/
-├── surrogate_physics_v2.pt   # 32MB Neural Operator ensemble
-└── v2_1/
-    ├── scaler.pkl            # LogRobustScaler
-    └── physics_cols.txt      # 5 physics columns
 ```
 
-### 1.2 The ALM State Contract (Verified)
+### 1.2 constellaration ALM Infrastructure (Critical Discovery)
 
-The `AugmentedLagrangianState` from constellaration is already a Pydantic BaseModel:
+```
+constellaration/src/constellaration/
+├── optimization/
+│   ├── __init__.py
+│   ├── augmented_lagrangian.py       # Core ALM: State, Settings, update functions
+│   ├── augmented_lagrangian_runner.py # Complete ALM loop with Nevergrad oracle
+│   ├── settings.py                    # AugmentedLagrangianMethodSettings, NevergradSettings
+│   └── scipy_minimize_runner.py       # Alternative optimizer
+├── forward_model.py                   # Physics evaluation (ConstellarationMetrics)
+├── problems.py                        # P1 (Geometrical), P2 (SimpleToBuild), P3 (MHDStable)
+└── geometry/
+    └── surface_rz_fourier.py          # SurfaceRZFourier, mask_and_ravel, build_mask
+```
+
+### 1.3 The ALM State Contract (Verified)
 
 ```python
 # constellaration/src/constellaration/optimization/augmented_lagrangian.py
-class AugmentedLagrangianState(pydantic.BaseModel):
-    x: jnp.ndarray                    # Current design point
-    multipliers: jnp.ndarray          # Lagrange multipliers
-    penalty_parameters: jnp.ndarray   # Penalty scaling factors
+
+class AugmentedLagrangianState(pydantic.BaseModel, arbitrary_types_allowed=True):
+    x: jnp.ndarray                    # Current design point (scaled)
+    multipliers: jnp.ndarray          # Lagrange multipliers per constraint
+    penalty_parameters: jnp.ndarray   # Penalty scaling factors per constraint
     objective: jnp.ndarray            # Current objective value
-    constraints: jnp.ndarray          # Current constraint violations
+    constraints: jnp.ndarray          # Current constraint values (positive = violated)
     bounds: jnp.ndarray               # Trust region bounds per dimension
 ```
 
-**This means:**
-- JSON serializable out of the box
-- No modification to upstream `constellaration` needed
-- Can be imported directly: `from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState`
+**Key Properties:**
+- Pydantic BaseModel → JSON serializable
+- Contains ALL information needed for diagnostics
+- `multipliers` indicate constraint importance learned during optimization
+- `penalty_parameters` show how aggressively constraints are being enforced
+- `bounds` represent the trust region (shrinks over iterations)
 
-### 1.3 ALM Settings (From constellaration)
+### 1.4 ALM Settings Hierarchy (Verified)
 
 ```python
+# constellaration/src/constellaration/optimization/augmented_lagrangian.py
+
+class AugmentedLagrangianSettings(pydantic.BaseModel):
+    constraint_violation_tolerance_reduction_factor: float = 0.5
+    penalty_parameters_increase_factor: float = 2.0      # Key lever for supervision
+    bounds_reduction_factor: float = 0.95                # Trust region shrinkage
+    penalty_parameters_max: float = 1e8                  # Safety cap
+    bounds_min: float = 0.05                             # Minimum trust region
+
 # constellaration/src/constellaration/optimization/settings.py
-class AugmentedLagrangianSettings:
-    constraint_violation_tolerance_reduction_factor = 0.5
-    penalty_parameters_increase_factor = 2.0
-    bounds_reduction_factor = 0.95
-    penalty_parameters_max = 1e8
-    bounds_min = 0.05
+
+class AugmentedLagrangianMethodSettings(pydantic.BaseModel):
+    maxit: int                                           # Max outer iterations
+    penalty_parameters_initial: float                    # Starting penalty
+    bounds_initial: float                                # Starting trust region
+    augmented_lagrangian_settings: AugmentedLagrangianSettings
+    oracle_settings: NevergradSettings                   # Inner optimizer config
+
+class NevergradSettings(pydantic.BaseModel):
+    budget_initial: int              # Initial function evaluations
+    budget_increment: int            # Added each outer iteration
+    budget_max: int                  # Cap on evaluations
+    max_time: float | None           # Wall-clock limit
+    num_workers: int                 # Parallel evaluations
+    batch_mode: bool                 # Wait for all workers
 ```
+
+### 1.5 The Existing ALM Loop (augmented_lagrangian_runner.py:186-293)
+
+This is the loop we need to make steppable:
+
+```python
+# EXISTING CODE in constellaration (simplified)
+for k in range(settings.optimizer_settings.maxit):
+    # 1. Setup trust region parametrization
+    parametrization = nevergrad.p.Array(
+        init=np.array(state.x),
+        lower=np.array(state.x - state.bounds),
+        upper=np.array(state.x + state.bounds),
+    )
+
+    # 2. Run Nevergrad oracle (inner optimization)
+    oracle = nevergrad.optimizers.NGOpt(parametrization, budget, num_workers)
+    with ProcessPoolExecutor() as executor:
+        # ... parallel evaluation of candidates ...
+        # Each candidate evaluated via objective_constraints()
+        # Results fed to oracle.tell()
+
+    # 3. Get recommendation and evaluate
+    x = oracle.provide_recommendation().value
+    (objective, constraints), metrics = objective_constraints(x, ...)
+
+    # 4. Update ALM state (THIS IS THE KEY FUNCTION)
+    state = al.update_augmented_lagrangian_state(
+        x=jnp.copy(x),
+        objective=objective,
+        constraints=constraints,
+        state=state,
+        settings=settings.optimizer_settings.augmented_lagrangian_settings,
+    )
+
+    # 5. Increase budget for next iteration
+    budget = min(budget_max, budget + budget_increment)
+
+    # 6. Log (THIS IS WHERE WE INJECT SUPERVISION)
+    _logging(k + 1, n_function_evals, state)
+```
+
+**Supervision Injection Point:** After step 4 (state update), before step 5 (next iteration).
+
+### 1.6 The update_augmented_lagrangian_state Function
+
+```python
+# constellaration/src/constellaration/optimization/augmented_lagrangian.py:67-121
+
+def update_augmented_lagrangian_state(
+    x: jnp.ndarray,
+    objective: jnp.ndarray,
+    constraints: jnp.ndarray,
+    state: AugmentedLagrangianState,
+    settings: AugmentedLagrangianSettings,
+    penalty_parameters: jnp.ndarray | None = None,  # Override if provided
+    bounds: jnp.ndarray | None = None,              # Override if provided
+) -> AugmentedLagrangianState:
+    """Updates multipliers, penalties, and bounds based on constraint progress."""
+
+    # Update Lagrange multipliers
+    multipliers = jnp.maximum(
+        0.0,
+        state.multipliers + state.penalty_parameters * constraints,
+    )
+
+    # Increase penalties for constraints that aren't improving
+    if penalty_parameters is None:
+        penalty_parameters = jnp.where(
+            jnp.maximum(0.0, constraints) >
+                settings.constraint_violation_tolerance_reduction_factor *
+                jnp.maximum(0.0, state.constraints),
+            jnp.minimum(
+                settings.penalty_parameters_max,
+                settings.penalty_parameters_increase_factor * state.penalty_parameters,
+            ),
+            state.penalty_parameters,
+        )
+
+    # Shrink trust region
+    if bounds is None:
+        bounds = jnp.maximum(settings.bounds_min, state.bounds)
+
+    return AugmentedLagrangianState(
+        x=x, multipliers=multipliers, penalty_parameters=penalty_parameters,
+        objective=objective, constraints=constraints, bounds=bounds,
+    )
+```
+
+**Key Insight:** The `penalty_parameters` and `bounds` can be **overridden** by passing them explicitly. This is how supervision directives can directly modify ALM behavior.
 
 ---
 
-## Part 2: Gap Analysis (Plan vs Reality)
+## Part 2: Gap Analysis (Corrected)
 
-### 2.1 Gaps in UNIFIED_PLAN.md
+### 2.1 What Previous Plans Got Wrong
 
-| Status | Planned | Reality | Resolution |
-|--------|---------|---------|------------|
-| [ ] | `OptimizationDirective` dataclass | Not implemented | Add to `planner.py` |
-| [ ] | `OptimizerDiagnostics` dataclass | Not implemented | Add to `planner.py` |
-| [ ] | `analyze_optimizer_diagnostics()` | Not implemented | Add to `PlanningAgent` |
-| [ ] | `generate_diagnostics()` | Not implemented | Add to `Coordinator` |
-| [ ] | `apply_directive()` | Not implemented | Add to `Coordinator` |
-| [ ] | `produce_candidates_aso()` | Not implemented | Add to `Coordinator` |
-| [ ] | `control_mode` CLI flag | Not implemented | Add to `config.py` |
-| [ ] | `alm_settings` in config | **Doesn't exist** | Add `ALMConfig` dataclass |
+| Previous Claim | Reality |
+|----------------|---------|
+| "ALM state not accessible" | ✅ `AugmentedLagrangianState` is Pydantic, fully accessible |
+| "Need to build ALM loop" | ✅ Complete loop exists in `augmented_lagrangian_runner.py` |
+| "Need proxy diagnostics" | ✅ Can use **real** ALM state for diagnostics |
+| "Worker contract incomplete" | ⚠️ True, but solution is wrapping, not rebuilding |
 
-### 2.2 Gaps in ASO_V3_PLAN.md
+### 2.2 Actual Gaps (What Needs Implementation)
 
-| Status | Planned | Reality | Resolution |
-|--------|---------|---------|------------|
-| [ ] | `ASOConfig` dataclass | Not implemented | Add to `config.py` |
-| [ ] | `HeuristicSupervisor` class | Not implemented | Add to `planner.py` |
-| [ ] | `TrajectoryState` dataclass | Not implemented | Add to `coordinator.py` |
-| [ ] | Worker returns `final_alm_state` | **Workers don't return ALM state** | Update worker contract |
-| [ ] | ASO telemetry table | Not implemented | Add to `memory.py` |
+| Gap | Description | Resolution |
+|-----|-------------|------------|
+| **ALM Bridge** | No steppable interface to existing ALM loop | Create `ai_scientist/optim/alm_bridge.py` |
+| **Supervision Injection** | No hook between ALM outer iterations | Add callback parameter to bridge |
+| **Data Structures** | `OptimizationDirective`, `OptimizerDiagnostics` not implemented | Add to `planner.py` |
+| **Tiered Supervision** | `HeuristicSupervisor` not implemented | Add to `planner.py` |
+| **Config** | `ASOConfig`, `ALMConfig` not in `ExperimentConfig` | Add to `config.py` |
+| **Coordinator ASO Path** | `produce_candidates_aso()` not implemented | Add to `coordinator.py` |
+| **CLI Flag** | `--aso` not available | Add to `runner.py` |
 
-### 2.3 Current Planner Capabilities (Underestimated)
+### 2.3 What Already Works (Leverage These)
 
-The existing `PlanningAgent.plan_cycle()` already has:
-- 5-turn multi-turn LLM loop (`planner.py:385-468`)
-- Tool calling with JSON parsing (`planner.py:401-461`)
-- RAG retrieval integration (`planner.py:276-279`)
-- `suggested_params` and `config_overrides` extraction (`planner.py:421-428`)
-- Failure case reflection (`planner.py:328-333`)
-
-**This is more capable than the plans suggested.** The gap is only the ASO-specific supervision method.
+| Component | Location | Capability |
+|-----------|----------|------------|
+| Multi-turn LLM loop | `planner.py:384-468` | Tool calling, JSON parsing, RAG |
+| Failure reflection | `planner.py:328-333` | Learns from recent failures |
+| World model | `memory.py` | HV tracking, candidate history |
+| Surrogate | `optim/surrogate_v2.py` | Fast objective/constraint prediction |
+| Problem definitions | `constellaration/problems.py` | P1/P2/P3 constraint specifications |
 
 ---
 
 ## Part 3: Implementation Specification
 
-### 3.1 New Config Structures
+### 3.0 Phase 0: ALM Bridge Layer (NEW - Critical)
+
+Create `ai_scientist/optim/alm_bridge.py`:
+
+```python
+"""Bridge between ai_scientist ASO loop and constellaration ALM infrastructure.
+
+This module provides a steppable interface to the ALM optimization loop,
+allowing supervision injection between outer iterations.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Tuple
+import multiprocessing
+from concurrent import futures
+import time
+
+import jax.numpy as jnp
+import numpy as np
+import nevergrad
+
+from constellaration.optimization.augmented_lagrangian import (
+    AugmentedLagrangianState,
+    AugmentedLagrangianSettings,
+    augmented_lagrangian_function,
+    update_augmented_lagrangian_state,
+)
+from constellaration.optimization.settings import (
+    AugmentedLagrangianMethodSettings,
+    NevergradSettings,
+)
+from constellaration.geometry import surface_rz_fourier as rz_fourier
+from constellaration.utils import pytree
+import constellaration.forward_model as forward_model
+import constellaration.problems as problems
+
+
+@dataclass
+class ALMStepResult:
+    """Result of a single ALM outer iteration."""
+    state: AugmentedLagrangianState
+    n_evals: int
+    objective: float
+    max_violation: float
+    metrics: Optional[forward_model.ConstellarationMetrics]
+
+
+@dataclass
+class ALMContext:
+    """Context for ALM optimization (created once, reused across steps)."""
+    scale: jnp.ndarray
+    unravel_fn: Callable[[jnp.ndarray], rz_fourier.SurfaceRZFourier]
+    problem: problems.SingleObjectiveProblem | problems.MHDStableQIStellarator
+    forward_settings: forward_model.ConstellarationSettings
+    alm_settings: AugmentedLagrangianMethodSettings
+    aspect_ratio_upper_bound: Optional[float]
+
+
+def create_alm_context(
+    boundary: rz_fourier.SurfaceRZFourier,
+    problem: problems.SingleObjectiveProblem | problems.MHDStableQIStellarator,
+    settings: "OptimizationSettings",  # from constellaration.optimization.settings
+    aspect_ratio_upper_bound: Optional[float] = None,
+) -> Tuple[ALMContext, AugmentedLagrangianState]:
+    """
+    Initialize ALM context and starting state from a boundary.
+
+    Returns:
+        Tuple of (context for reuse, initial ALM state)
+    """
+    # Apply mode limits
+    boundary = rz_fourier.set_max_mode_numbers(
+        surface=boundary,
+        max_poloidal_mode=settings.max_poloidal_mode,
+        max_toroidal_mode=settings.max_toroidal_mode,
+    )
+
+    # Build mask for optimization
+    mask = rz_fourier.build_mask(
+        boundary,
+        max_poloidal_mode=settings.max_poloidal_mode,
+        max_toroidal_mode=settings.max_toroidal_mode,
+    )
+
+    # Flatten to optimization vector
+    initial_guess, unravel_fn = pytree.mask_and_ravel(boundary, mask)
+
+    # Compute scaling
+    scale = rz_fourier.compute_infinity_norm_spectrum_scaling_fun(
+        poloidal_modes=boundary.poloidal_modes.flatten(),
+        toroidal_modes=boundary.toroidal_modes.flatten(),
+        alpha=settings.infinity_norm_spectrum_scaling,
+    ).reshape(boundary.poloidal_modes.shape)
+    scale = jnp.array(np.concatenate([scale[mask.r_cos], scale[mask.z_sin]]))
+
+    x0 = jnp.array(initial_guess) / scale
+
+    # Evaluate initial point
+    from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
+    (objective, constraints), _ = objective_constraints(
+        x0, scale, problem, unravel_fn,
+        settings.forward_model_settings, aspect_ratio_upper_bound,
+    )
+
+    # Create initial state
+    alm_settings = settings.optimizer_settings
+    state = AugmentedLagrangianState(
+        x=jnp.copy(x0),
+        multipliers=jnp.zeros_like(constraints),
+        penalty_parameters=alm_settings.penalty_parameters_initial * jnp.ones_like(constraints),
+        objective=objective,
+        constraints=constraints,
+        bounds=jnp.ones_like(x0) * alm_settings.bounds_initial,
+    )
+
+    context = ALMContext(
+        scale=scale,
+        unravel_fn=unravel_fn,
+        problem=problem,
+        forward_settings=settings.forward_model_settings,
+        alm_settings=alm_settings,
+        aspect_ratio_upper_bound=aspect_ratio_upper_bound,
+    )
+
+    return context, state
+
+
+def step_alm(
+    context: ALMContext,
+    state: AugmentedLagrangianState,
+    budget: int,
+    *,
+    penalty_override: Optional[jnp.ndarray] = None,
+    bounds_override: Optional[jnp.ndarray] = None,
+    num_workers: int = 4,
+) -> ALMStepResult:
+    """
+    Execute ONE outer ALM iteration.
+
+    This is the steppable interface that allows supervision between iterations.
+
+    Args:
+        context: ALM context (created once via create_alm_context)
+        state: Current ALM state
+        budget: Number of function evaluations for this step
+        penalty_override: Optional direct override of penalty parameters
+        bounds_override: Optional direct override of trust region bounds
+        num_workers: Parallel workers for evaluation
+
+    Returns:
+        ALMStepResult with updated state and metrics
+    """
+    from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
+
+    # Apply overrides to state before optimization
+    if penalty_override is not None:
+        state = state.copy(update={"penalty_parameters": penalty_override})
+    if bounds_override is not None:
+        state = state.copy(update={"bounds": bounds_override})
+
+    # Setup trust region parametrization
+    parametrization = nevergrad.p.Array(
+        init=np.array(state.x),
+        lower=np.array(state.x - state.bounds),
+        upper=np.array(state.x + state.bounds),
+    )
+
+    oracle = nevergrad.optimizers.NGOpt(
+        parametrization=parametrization,
+        budget=budget,
+        num_workers=num_workers,
+    )
+    oracle.suggest(np.array(state.x))
+
+    n_evals = 0
+    last_metrics = None
+
+    mp_context = multiprocessing.get_context("forkserver")
+
+    with futures.ProcessPoolExecutor(max_workers=num_workers, mp_context=mp_context) as executor:
+        running: list[Tuple[futures.Future, Any]] = []
+        rest_budget = budget
+
+        while rest_budget or running:
+            # Submit new evaluations
+            while len(running) < min(num_workers, rest_budget):
+                candidate = oracle.ask()
+                future = executor.submit(
+                    objective_constraints,
+                    jnp.array(candidate.value),
+                    context.scale,
+                    context.problem,
+                    context.unravel_fn,
+                    context.forward_settings,
+                    context.aspect_ratio_upper_bound,
+                )
+                running.append((future, candidate))
+                rest_budget -= 1
+
+            # Wait for completions
+            completed, _ = futures.wait(
+                [f for f, _ in running],
+                return_when=futures.FIRST_COMPLETED,
+            )
+
+            for future, candidate in running:
+                if future in completed:
+                    n_evals += 1
+                    (obj, cons), metrics = future.result()
+                    last_metrics = metrics
+
+                    oracle.tell(
+                        candidate,
+                        augmented_lagrangian_function(obj, cons, state).item(),
+                    )
+
+            running = [(f, c) for f, c in running if f not in completed]
+
+    # Get final recommendation
+    recommendation = oracle.provide_recommendation()
+    x = recommendation.value
+
+    # Evaluate final point
+    (objective, constraints), final_metrics = objective_constraints(
+        x, context.scale, context.problem, context.unravel_fn,
+        context.forward_settings, context.aspect_ratio_upper_bound,
+    )
+
+    # Update ALM state
+    new_state = update_augmented_lagrangian_state(
+        x=jnp.copy(x),
+        objective=objective,
+        constraints=constraints,
+        state=state,
+        settings=context.alm_settings.augmented_lagrangian_settings,
+    )
+
+    max_violation = float(jnp.max(jnp.maximum(0.0, constraints)))
+
+    return ALMStepResult(
+        state=new_state,
+        n_evals=n_evals,
+        objective=float(objective),
+        max_violation=max_violation,
+        metrics=final_metrics,
+    )
+
+
+def state_to_boundary_params(
+    context: ALMContext,
+    state: AugmentedLagrangianState,
+) -> Dict[str, Any]:
+    """Convert ALM state back to boundary parameter dict."""
+    boundary = context.unravel_fn(state.x * context.scale)
+    return {
+        "r_cos": np.asarray(boundary.r_cos).tolist(),
+        "z_sin": np.asarray(boundary.z_sin).tolist(),
+        "n_field_periods": boundary.n_field_periods,
+        "is_stellarator_symmetric": boundary.is_stellarator_symmetric,
+    }
+```
+
+### 3.1 Config Structures
 
 Add to `ai_scientist/config.py`:
 
@@ -148,11 +547,23 @@ from typing import Literal
 @dataclass(frozen=True)
 class ALMConfig:
     """ALM hyperparameters (mirrors constellaration settings)."""
+    # Per-iteration settings
     penalty_parameters_increase_factor: float = 2.0
     constraint_violation_tolerance_reduction_factor: float = 0.5
     bounds_reduction_factor: float = 0.95
     penalty_parameters_max: float = 1e8
     bounds_min: float = 0.05
+
+    # Method-level settings
+    maxit: int = 25
+    penalty_parameters_initial: float = 1.0
+    bounds_initial: float = 2.0
+
+    # Oracle (Nevergrad) settings
+    oracle_budget_initial: int = 100
+    oracle_budget_increment: int = 26
+    oracle_budget_max: int = 200
+    oracle_num_workers: int = 4
 
 
 @dataclass(frozen=True)
@@ -176,12 +587,12 @@ class ASOConfig:
     violation_increase_threshold: float = 0.05  # 5% increase = "increasing"
     violation_decrease_threshold: float = 0.05  # 5% decrease = "decreasing"
 
-    # Multi-trajectory (simplified)
-    n_trajectories: int = 1  # Start with 1, increase after validation
-    inner_budget: int = 10   # Evals per supervision check
+    # Budget allocation
+    steps_per_supervision: int = 1  # ALM outer iterations between supervision checks
 
     # Safety limits
     max_constraint_weight: float = 1000.0
+    max_penalty_boost: float = 4.0  # Max multiplier for penalty override
 
     # Fallback behavior
     llm_timeout_seconds: float = 10.0
@@ -205,6 +616,7 @@ Add to `ai_scientist/planner.py`:
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, List, Optional
+import json
 
 
 class DirectiveAction(Enum):
@@ -228,6 +640,7 @@ class OptimizationDirective:
     """Structured directive from Planner to Coordinator."""
     action: DirectiveAction
     config_overrides: Optional[Mapping[str, Any]] = None
+    alm_overrides: Optional[Mapping[str, Any]] = None  # Direct ALM state manipulation
     suggested_params: Optional[Mapping[str, Any]] = None
     reasoning: str = ""
     confidence: float = 1.0
@@ -237,7 +650,7 @@ class OptimizationDirective:
         return {
             "action": self.action.value,
             "config_overrides": dict(self.config_overrides) if self.config_overrides else None,
-            "suggested_params": dict(self.suggested_params) if self.suggested_params else None,
+            "alm_overrides": dict(self.alm_overrides) if self.alm_overrides else None,
             "reasoning": self.reasoning,
             "confidence": self.confidence,
             "source": self.source.value,
@@ -246,25 +659,33 @@ class OptimizationDirective:
 
 @dataclass
 class ConstraintDiagnostic:
-    """Diagnostic for a single constraint."""
+    """Diagnostic for a single constraint (from real ALM state)."""
     name: str
-    violation: float
-    penalty: float
-    trend: str  # "stable", "increasing_violation", "decreasing_violation"
-    delta: float = 0.0
+    violation: float           # max(0, constraint_value)
+    penalty: float             # Current penalty parameter
+    multiplier: float          # Lagrange multiplier (learned importance)
+    trend: str                 # "stable", "increasing_violation", "decreasing_violation"
+    delta: float = 0.0         # Change from previous step
 
 
 @dataclass
 class OptimizerDiagnostics:
-    """Rich diagnostic report from Coordinator to Planner."""
+    """Rich diagnostic report from real ALM state."""
     step: int
     trajectory_id: int
+
+    # From AugmentedLagrangianState
     objective: float
     objective_delta: float
     max_violation: float
+    constraints_raw: List[float]        # Raw constraint values
+    multipliers: List[float]            # Lagrange multipliers
+    penalty_parameters: List[float]     # Current penalties
+    bounds_norm: float                  # Trust region size
+
+    # Derived analysis
     status: str  # "IN_PROGRESS", "STAGNATION", "FEASIBLE_FOUND", "DIVERGING"
     constraint_diagnostics: List[ConstraintDiagnostic]
-    optimizer_health: Mapping[str, float]
     narrative: List[str]
     steps_since_improvement: int = 0
 
@@ -285,16 +706,21 @@ class OptimizerDiagnostics:
         ])
 
     def to_json(self) -> str:
-        import json
         return json.dumps({
             "step": self.step,
-            "trajectory_id": self.trajectory_id,
-            "objective": self.objective,
-            "objective_delta": self.objective_delta,
-            "max_violation": self.max_violation,
+            "objective": round(self.objective, 4),
+            "objective_delta": round(self.objective_delta, 6),
+            "max_violation": round(self.max_violation, 4),
             "status": self.status,
+            "bounds_norm": round(self.bounds_norm, 4),
             "constraints": [
-                {"name": c.name, "violation": c.violation, "trend": c.trend}
+                {
+                    "name": c.name,
+                    "violation": round(c.violation, 4),
+                    "penalty": round(c.penalty, 2),
+                    "multiplier": round(c.multiplier, 4),
+                    "trend": c.trend,
+                }
                 for c in self.constraint_diagnostics
             ],
             "narrative": self.narrative,
@@ -310,22 +736,25 @@ class HeuristicSupervisor:
     """
     Rule-based optimization supervisor.
     Handles 80%+ of cases without LLM latency.
+
+    Key insight: We can now use REAL ALM state (multipliers, penalties, bounds)
+    to make informed decisions.
     """
 
-    def __init__(self, aso_config: ASOConfig):
+    def __init__(self, aso_config: "ASOConfig"):
         self.config = aso_config
 
     def analyze(self, diagnostics: OptimizerDiagnostics) -> OptimizationDirective:
         """
-        Generate directive using heuristic rules.
+        Generate directive using heuristic rules based on real ALM state.
 
         Decision tree:
         1. FEASIBLE_FOUND + stable objective -> STOP (converged)
         2. FEASIBLE_FOUND + improving -> CONTINUE
-        3. STAGNATION + high violation -> ADJUST (increase penalties)
-        4. STAGNATION + low violation -> RESTART (try new seed)
+        3. STAGNATION + high violation -> ADJUST (boost penalties directly)
+        4. STAGNATION + low violation + small bounds -> STOP (local minimum)
         5. DIVERGING -> STOP (abandon trajectory)
-        6. Increasing violation on specific constraint -> ADJUST (boost weight)
+        6. Specific constraint worsening + low multiplier -> ADJUST (boost that penalty)
         7. Otherwise -> CONTINUE
         """
         cfg = self.config
@@ -335,37 +764,60 @@ class HeuristicSupervisor:
             if abs(diagnostics.objective_delta) < cfg.stagnation_objective_threshold:
                 return OptimizationDirective(
                     action=DirectiveAction.STOP,
-                    reasoning="Converged: feasible with stable objective",
+                    reasoning=f"Converged: feasible (violation={diagnostics.max_violation:.4f}) with stable objective",
                     source=DirectiveSource.CONVERGENCE,
                 )
             return OptimizationDirective(
                 action=DirectiveAction.CONTINUE,
-                reasoning="Feasible and still improving",
+                reasoning="Feasible and still improving objective",
                 source=DirectiveSource.HEURISTIC,
             )
 
         # Case 3 & 4: Stagnation
         if diagnostics.status == "STAGNATION":
             if diagnostics.max_violation > cfg.stagnation_violation_threshold:
+                # High violation stagnation: boost penalties
+                # Find constraints with highest violation relative to their penalty
+                worst_idx = max(
+                    range(len(diagnostics.constraint_diagnostics)),
+                    key=lambda i: diagnostics.constraint_diagnostics[i].violation /
+                                  (diagnostics.constraint_diagnostics[i].penalty + 1e-6)
+                )
+                worst = diagnostics.constraint_diagnostics[worst_idx]
+
+                # Create penalty override: boost worst constraint's penalty
+                new_penalties = diagnostics.penalty_parameters.copy()
+                new_penalties[worst_idx] = min(
+                    worst.penalty * cfg.max_penalty_boost,
+                    cfg.max_constraint_weight
+                )
+
                 return OptimizationDirective(
                     action=DirectiveAction.ADJUST,
-                    config_overrides={
-                        "alm": {"penalty_parameters_increase_factor": 4.0}
-                    },
-                    reasoning=f"Stagnation with violation={diagnostics.max_violation:.4f}, increasing penalties",
+                    alm_overrides={"penalty_parameters": new_penalties},
+                    reasoning=f"Stagnation with violation={diagnostics.max_violation:.4f}, "
+                              f"boosting penalty for '{worst.name}' from {worst.penalty:.1f} to {new_penalties[worst_idx]:.1f}",
                     source=DirectiveSource.HEURISTIC,
                 )
-            return OptimizationDirective(
-                action=DirectiveAction.RESTART,
-                reasoning="Stagnation near feasibility, trying new seed",
-                source=DirectiveSource.HEURISTIC,
-            )
+            else:
+                # Low violation stagnation: check if bounds are too small (stuck)
+                if diagnostics.bounds_norm < 0.1:
+                    return OptimizationDirective(
+                        action=DirectiveAction.STOP,
+                        reasoning="Stagnation with small trust region, likely local minimum",
+                        source=DirectiveSource.HEURISTIC,
+                    )
+                return OptimizationDirective(
+                    action=DirectiveAction.RESTART,
+                    reasoning="Stagnation near feasibility, trying new seed",
+                    source=DirectiveSource.HEURISTIC,
+                )
 
         # Case 5: Diverging
         if diagnostics.status == "DIVERGING":
             return OptimizationDirective(
                 action=DirectiveAction.STOP,
-                reasoning="Trajectory diverging, abandoning",
+                reasoning="Multiple constraints diverging, abandoning trajectory",
                 source=DirectiveSource.HEURISTIC,
             )
 
@@ -373,11 +825,16 @@ class HeuristicSupervisor:
         struggling = [c for c in diagnostics.constraint_diagnostics if c.trend == "increasing_violation"]
         if struggling:
             worst = max(struggling, key=lambda c: c.violation)
-            boost = min(worst.penalty * 2, cfg.max_constraint_weight)
+            worst_idx = next(i for i, c in enumerate(diagnostics.constraint_diagnostics) if c.name == worst.name)
+
+            new_penalties = diagnostics.penalty_parameters.copy()
+            new_penalties[worst_idx] = min(worst.penalty * 2, cfg.max_constraint_weight)
+
             return OptimizationDirective(
                 action=DirectiveAction.ADJUST,
-                config_overrides={"constraint_weights": {worst.name: boost}},
-                reasoning=f"Constraint '{worst.name}' worsening, boosting weight to {boost}",
+                alm_overrides={"penalty_parameters": new_penalties},
+                reasoning=f"Constraint '{worst.name}' worsening (violation={worst.violation:.4f}), "
+                          f"boosting penalty to {new_penalties[worst_idx]:.1f}",
                 source=DirectiveSource.HEURISTIC,
             )
 
@@ -391,7 +848,7 @@ class HeuristicSupervisor:
 
 ### 3.4 PlanningAgent Extension
 
-Add method to `PlanningAgent` class in `ai_scientist/planner.py`:
+Add methods to `PlanningAgent` class in `ai_scientist/planner.py`:
 
 ```python
 class PlanningAgent:
@@ -399,7 +856,7 @@ class PlanningAgent:
         # ... existing init ...
         self.heuristic: HeuristicSupervisor | None = None
 
-    def _ensure_heuristic(self, aso_config: ASOConfig) -> HeuristicSupervisor:
+    def _ensure_heuristic(self, aso_config: "ASOConfig") -> HeuristicSupervisor:
         if self.heuristic is None:
             self.heuristic = HeuristicSupervisor(aso_config)
         return self.heuristic
@@ -408,10 +865,13 @@ class PlanningAgent:
         self,
         diagnostics: OptimizerDiagnostics,
         cycle: int,
-        aso_config: ASOConfig,
+        aso_config: "ASOConfig",
     ) -> OptimizationDirective:
         """
         Tiered supervision: heuristic first, LLM on demand.
+
+        The key insight is that we now have REAL ALM state, so heuristics
+        can make much better decisions than with proxy diagnostics.
         """
         heuristic = self._ensure_heuristic(aso_config)
 
@@ -433,9 +893,9 @@ class PlanningAgent:
         self,
         diagnostics: OptimizerDiagnostics,
         cycle: int,
-        aso_config: ASOConfig,
+        aso_config: "ASOConfig",
     ) -> OptimizationDirective:
-        """LLM-based supervision with structured output."""
+        """LLM-based supervision with real ALM state context."""
         # Retrieve relevant context if stagnating
         rag_context = []
         if diagnostics.status == "STAGNATION":
@@ -444,13 +904,12 @@ class PlanningAgent:
                 k=2,
             )
 
-        system_prompt = self._build_supervision_prompt(cycle, rag_context)
+        system_prompt = self._build_supervision_prompt(cycle, rag_context, diagnostics)
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Current diagnostics:\n{diagnostics.to_json()}"},
+            {"role": "user", "content": f"Current ALM diagnostics:\n{diagnostics.to_json()}"},
         ]
 
-        # Use existing LLM invocation pattern from plan_cycle
         from ai_scientist import model_provider
         provider = self.config.get_provider()
 
@@ -467,7 +926,7 @@ class PlanningAgent:
                     raise RuntimeError(f"LLM returned {response.status_code}")
 
                 content = response.body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-                return self._parse_directive(content)
+                return self._parse_directive(content, diagnostics)
 
             except json.JSONDecodeError as e:
                 if attempt < aso_config.llm_max_retries - 1:
@@ -477,38 +936,47 @@ class PlanningAgent:
 
         raise RuntimeError("LLM supervision failed after retries")
 
-    def _build_supervision_prompt(self, cycle: int, rag_context: list) -> str:
+    def _build_supervision_prompt(self, cycle: int, rag_context: list, diagnostics: OptimizerDiagnostics) -> str:
         rag_section = ""
         if rag_context:
             rag_section = f"\n\nRelevant knowledge:\n{json.dumps(rag_context, indent=2)}"
 
+        constraint_names = [c.name for c in diagnostics.constraint_diagnostics]
+
         return f"""You are the ASO Supervisor for the AI Scientist (cycle {cycle}).
 
-Analyze the optimization diagnostics and decide the next action.
+You have access to REAL Augmented Lagrangian Method (ALM) state:
+- objective: Current objective function value
+- constraints: {constraint_names}
+- penalty_parameters: How strongly each constraint is being enforced
+- multipliers: Lagrange multipliers (learned constraint importance)
+- bounds_norm: Size of trust region (smaller = more focused search)
 
 ACTIONS:
 - CONTINUE: Proceed with current settings
-- ADJUST: Modify constraint weights or ALM parameters
-- STOP: Terminate trajectory (converged or hopeless)
+- ADJUST: Modify penalty_parameters to steer optimization
+- STOP: Terminate (converged or hopeless)
 - RESTART: Abandon trajectory, try new seed
 
 OUTPUT FORMAT (JSON):
 {{
   "action": "CONTINUE | ADJUST | STOP | RESTART",
-  "config_overrides": {{"constraint_weights": {{"name": value}}}},  // optional
+  "alm_overrides": {{
+    "penalty_parameters": [p1, p2, ...]  // Optional: new penalties per constraint
+  }},
   "reasoning": "brief explanation"
 }}
 
-ADJUSTMENT OPTIONS:
-- constraint_weights: Boost weight of struggling constraints (e.g., {{"qi": 100.0}})
-- alm.penalty_parameters_increase_factor: Increase ALM penalties (default 2.0, try 4.0)
+ADJUSTMENT STRATEGY:
+- If a constraint has high violation but low penalty: increase that penalty
+- If stuck (small bounds_norm) with violations: try RESTART
+- If multiplier is high but violation persists: constraint may be infeasible
 {rag_section}
 
 Respond with ONLY valid JSON."""
 
-    def _parse_directive(self, content: str) -> OptimizationDirective:
+    def _parse_directive(self, content: str, diagnostics: OptimizerDiagnostics) -> OptimizationDirective:
         """Parse LLM response into OptimizationDirective."""
-        # Extract JSON from potential markdown
         json_str = content
         if "```json" in content:
             json_str = content.split("```json")[1].split("```")[0].strip()
@@ -520,6 +988,7 @@ Respond with ONLY valid JSON."""
 
         return OptimizationDirective(
             action=action,
+            alm_overrides=data.get("alm_overrides"),
             config_overrides=data.get("config_overrides"),
             reasoning=data.get("reasoning", ""),
             source=DirectiveSource.LLM,
@@ -534,6 +1003,7 @@ Update `ai_scientist/coordinator.py`:
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import time
+import jax.numpy as jnp
 
 from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
 
@@ -546,9 +1016,13 @@ from ai_scientist.planner import (
     ConstraintDiagnostic,
     DirectiveAction,
 )
-from ai_scientist.workers import OptimizationWorker, ExplorationWorker, GeometerWorker
-from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from ai_scientist.optim.generative import GenerativeDesignModel
+from ai_scientist.optim.alm_bridge import (
+    ALMContext,
+    ALMStepResult,
+    create_alm_context,
+    step_alm,
+    state_to_boundary_params,
+)
 
 
 @dataclass
@@ -556,24 +1030,27 @@ class TrajectoryState:
     """State for a single optimization trajectory."""
     id: int
     seed: Dict[str, Any]
+    alm_context: Optional[ALMContext] = None
     alm_state: Optional[AugmentedLagrangianState] = None
     history: List[AugmentedLagrangianState] = field(default_factory=list)
     evals_used: int = 0
     steps: int = 0
-    status: str = "active"  # "active", "converged", "stagnated", "abandoned"
+    status: str = "active"
     best_objective: float = float("inf")
     best_violation: float = float("inf")
     stagnation_count: int = 0
+    budget_used: int = 0
 
 
 class Coordinator:
-    """Manages Agent-Supervised Optimization with tiered supervision."""
+    """Manages Agent-Supervised Optimization with real ALM state."""
 
-    # Constraint names by problem type
     CONSTRAINT_NAMES = {
         "p1": ["aspect_ratio", "average_triangularity", "edge_rotational_transform"],
-        "p2": ["aspect_ratio", "edge_rotational_transform", "edge_magnetic_mirror_ratio", "max_elongation", "qi"],
-        "p3": ["edge_rotational_transform", "edge_magnetic_mirror_ratio", "vacuum_well", "flux_compression", "qi"],
+        "p2": ["aspect_ratio", "edge_rotational_transform", "edge_magnetic_mirror_ratio",
+               "max_elongation", "qi"],
+        "p3": ["edge_rotational_transform", "edge_magnetic_mirror_ratio",
+               "vacuum_well", "flux_compression", "qi"],
     }
 
     def __init__(
@@ -581,25 +1058,14 @@ class Coordinator:
         cfg: ai_config.ExperimentConfig,
         world_model: memory.WorldModel,
         planner: PlanningAgent,
-        surrogate: Optional[NeuralOperatorSurrogate] = None,
-        generative_model: Optional[GenerativeDesignModel] = None,
+        # ... other params ...
     ):
         self.cfg = cfg
         self.world_model = world_model
         self.planner = planner
-        self.surrogate = surrogate
-        self.generative_model = generative_model
 
-        # Workers
-        self.opt_worker = OptimizationWorker(cfg, surrogate)
-        self.explore_worker = ExplorationWorker(cfg, generative_model)
-        self.geo_worker = GeometerWorker(cfg)
-
-        # Constraint names for this problem
         problem_key = (cfg.problem or "p3").lower()[:2]
         self.constraint_names = self.CONSTRAINT_NAMES.get(problem_key, self.CONSTRAINT_NAMES["p3"])
-
-        # Telemetry buffer
         self.telemetry: List[Dict[str, Any]] = []
 
     def produce_candidates_aso(
@@ -612,25 +1078,23 @@ class Coordinator:
         initial_config: Optional[ai_config.ExperimentConfig] = None,
     ) -> List[Dict[str, Any]]:
         """
-        ASO loop with tiered supervision.
-
-        Returns list of candidate boundary parameter dicts.
+        ASO loop with real ALM state supervision.
         """
         config = initial_config or self.cfg
         aso = config.aso
+        alm = config.alm
 
         # 1. Prepare seeds
-        seeds = self._prepare_seeds(initial_seeds, cycle, aso.n_trajectories)
+        seeds = self._prepare_seeds(initial_seeds, cycle, 1)
         if not seeds:
             print("[Coordinator] No valid seeds, returning empty")
             return []
 
-        # 2. Run trajectory (single for now, extensible to multi)
+        # 2. Run trajectory with real ALM
         traj = TrajectoryState(id=0, seed=seeds[0])
         candidates = self._run_trajectory_aso(
             traj=traj,
-            budget=eval_budget,
-            inner_budget=aso.inner_budget,
+            eval_budget=eval_budget,
             cycle=cycle,
             experiment_id=experiment_id,
             config=config,
@@ -641,64 +1105,50 @@ class Coordinator:
 
         return candidates
 
-    def _prepare_seeds(
-        self,
-        initial_seeds: Optional[List[Dict]],
-        cycle: int,
-        n_needed: int,
-    ) -> List[Dict]:
-        """Prepare and validate seeds."""
-        if initial_seeds:
-            seeds = initial_seeds
-        else:
-            explore_ctx = {"n_samples": n_needed * 2, "cycle": cycle}
-            seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
-
-        if not seeds:
-            return []
-
-        # Validate geometry
-        geo_ctx = {"candidates": seeds}
-        return self.geo_worker.run(geo_ctx).get("candidates", [])[:n_needed]
-
     def _run_trajectory_aso(
         self,
         traj: TrajectoryState,
-        budget: int,
-        inner_budget: int,
+        eval_budget: int,
         cycle: int,
         experiment_id: int,
         config: ai_config.ExperimentConfig,
     ) -> List[Dict[str, Any]]:
-        """Run single trajectory with ASO supervision."""
+        """Run trajectory with real ALM state and supervision."""
         aso = config.aso
+        alm = config.alm
         candidates = []
 
-        opt_ctx = {
-            "initial_guesses": [traj.seed],
-            "budget": inner_budget,
-            "alm_settings_overrides": {},
-            "return_alm_state": True,  # Request ALM state
-        }
+        # Initialize ALM context and state
+        boundary = self._seed_to_boundary(traj.seed)
+        problem = self._get_problem(config)
+        settings = self._build_optimization_settings(config)
 
-        while traj.evals_used < budget and traj.status == "active":
+        traj.alm_context, traj.alm_state = create_alm_context(
+            boundary=boundary,
+            problem=problem,
+            settings=settings,
+        )
+
+        oracle_budget = alm.oracle_budget_initial
+
+        while traj.budget_used < eval_budget and traj.status == "active":
             traj.steps += 1
             step_start = time.perf_counter()
 
-            # 1. Execute optimization chunk
-            res = self.opt_worker.run(opt_ctx)
-            traj.evals_used += res.get("evals_used", inner_budget)
-            chunk_candidates = res.get("candidates", [])
-            candidates.extend(chunk_candidates)
+            # 1. Execute ALM step
+            result = step_alm(
+                context=traj.alm_context,
+                state=traj.alm_state,
+                budget=min(oracle_budget, eval_budget - traj.budget_used),
+                num_workers=alm.oracle_num_workers,
+            )
 
-            # 2. Get ALM state (or use surrogate proxy)
-            alm_state = res.get("alm_state")
-            if alm_state is None:
-                # Fallback: use surrogate predictions as proxy
-                diagnostics = self._generate_proxy_diagnostics(chunk_candidates, traj)
-            else:
-                diagnostics = self._generate_diagnostics(alm_state, traj)
-                traj.history.append(alm_state)
+            traj.alm_state = result.state
+            traj.budget_used += result.n_evals
+            traj.history.append(result.state)
+
+            # 2. Generate diagnostics from REAL ALM state
+            diagnostics = self._generate_diagnostics(result.state, traj)
 
             # 3. Update trajectory tracking
             self._update_trajectory_best(traj, diagnostics)
@@ -717,16 +1167,37 @@ class Coordinator:
             if directive.action == DirectiveAction.STOP:
                 traj.status = "converged" if diagnostics.status == "FEASIBLE_FOUND" else "stagnated"
                 print(f"[Coordinator] STOP: {directive.reasoning}")
+                # Extract final candidate
+                candidates.append({
+                    "params": state_to_boundary_params(traj.alm_context, traj.alm_state),
+                    "objective": result.objective,
+                    "max_violation": result.max_violation,
+                    "source": "aso",
+                })
                 break
 
             if directive.action == DirectiveAction.RESTART:
+                # Try new seed
                 new_seeds = self._prepare_seeds(None, cycle, 1)
                 if new_seeds:
+                    # Save current best before restart
+                    candidates.append({
+                        "params": state_to_boundary_params(traj.alm_context, traj.alm_state),
+                        "objective": result.objective,
+                        "max_violation": result.max_violation,
+                        "source": "aso_pre_restart",
+                    })
+
                     traj.seed = new_seeds[0]
                     traj.history = []
                     traj.stagnation_count = 0
-                    opt_ctx["initial_guesses"] = [traj.seed]
-                    opt_ctx["continue_from_state"] = None
+                    boundary = self._seed_to_boundary(traj.seed)
+                    traj.alm_context, traj.alm_state = create_alm_context(
+                        boundary=boundary,
+                        problem=problem,
+                        settings=settings,
+                    )
+                    oracle_budget = alm.oracle_budget_initial
                     print(f"[Coordinator] RESTART with new seed")
                 else:
                     traj.status = "abandoned"
@@ -734,19 +1205,32 @@ class Coordinator:
                     break
                 continue
 
-            # Apply config adjustments
-            config, worker_overrides = self._apply_directive(directive, config)
-            opt_ctx["alm_settings_overrides"] = worker_overrides.get("alm", {})
-            opt_ctx["budget"] = min(inner_budget, budget - traj.evals_used)
+            if directive.action == DirectiveAction.ADJUST:
+                # Apply ALM overrides directly to state
+                if directive.alm_overrides and "penalty_parameters" in directive.alm_overrides:
+                    new_penalties = jnp.array(directive.alm_overrides["penalty_parameters"])
+                    traj.alm_state = traj.alm_state.copy(
+                        update={"penalty_parameters": new_penalties}
+                    )
+                    print(f"[Coordinator] ADJUST penalties: {directive.reasoning}")
+
+            # Increase oracle budget for next iteration
+            oracle_budget = min(alm.oracle_budget_max, oracle_budget + alm.oracle_budget_increment)
 
             # Auto-stop on excessive stagnation
             if traj.stagnation_count >= aso.max_stagnation_steps:
                 traj.status = "stagnated"
                 print(f"[Coordinator] Auto-STOP (stagnation limit)")
+                candidates.append({
+                    "params": state_to_boundary_params(traj.alm_context, traj.alm_state),
+                    "objective": result.objective,
+                    "max_violation": result.max_violation,
+                    "source": "aso_stagnation",
+                })
                 break
 
         print(f"[Coordinator] Trajectory done: {traj.status}, {traj.steps} steps, "
-              f"{traj.evals_used} evals, {len(candidates)} candidates")
+              f"{traj.budget_used} evals, {len(candidates)} candidates")
 
         return candidates
 
@@ -755,55 +1239,65 @@ class Coordinator:
         alm_state: AugmentedLagrangianState,
         traj: TrajectoryState,
     ) -> OptimizerDiagnostics:
-        """Translate ALM state to semantic diagnostics."""
-        import jax.numpy as jnp
+        """Generate rich diagnostics from REAL ALM state."""
         aso = self.cfg.aso
-        prev = traj.history[-1] if traj.history else None
+        prev = traj.history[-2] if len(traj.history) >= 2 else None
+
+        # Extract all fields from ALM state
+        objective = float(alm_state.objective)
+        constraints = [float(c) for c in alm_state.constraints]
+        multipliers = [float(m) for m in alm_state.multipliers]
+        penalties = [float(p) for p in alm_state.penalty_parameters]
+        bounds_norm = float(jnp.linalg.norm(alm_state.bounds))
+
+        objective_delta = objective - float(prev.objective) if prev else 0.0
+        max_violation = max(0.0, max(constraints)) if constraints else 0.0
 
         # Constraint analysis
         constraint_diagnostics = []
         diverging_count = 0
 
         for i, name in enumerate(self.constraint_names):
-            if i >= len(alm_state.constraints):
+            if i >= len(constraints):
                 continue
 
-            violation = float(jnp.maximum(0.0, alm_state.constraints[i]))
-            penalty = float(alm_state.penalty_parameters[i]) if i < len(alm_state.penalty_parameters) else 1.0
+            violation = max(0.0, constraints[i])
+            penalty = penalties[i] if i < len(penalties) else 1.0
+            multiplier = multipliers[i] if i < len(multipliers) else 0.0
             trend = "stable"
             delta = 0.0
 
             if prev and i < len(prev.constraints):
-                prev_violation = float(jnp.maximum(0.0, prev.constraints[i]))
+                prev_violation = max(0.0, float(prev.constraints[i]))
                 delta = violation - prev_violation
 
-                if violation > prev_violation * (1 + aso.violation_increase_threshold):
+                if violation > prev_violation * (1 + aso.violation_increase_threshold) and violation > 1e-4:
                     trend = "increasing_violation"
                     diverging_count += 1
                 elif violation < prev_violation * (1 - aso.violation_decrease_threshold):
                     trend = "decreasing_violation"
 
             constraint_diagnostics.append(ConstraintDiagnostic(
-                name=name, violation=violation, penalty=penalty, trend=trend, delta=delta
+                name=name,
+                violation=violation,
+                penalty=penalty,
+                multiplier=multiplier,
+                trend=trend,
+                delta=delta,
             ))
 
-        # Objective
-        objective = float(alm_state.objective)
-        objective_delta = objective - float(prev.objective) if prev else 0.0
-        max_violation = float(jnp.max(jnp.maximum(0.0, alm_state.constraints)))
-
-        # Status
+        # Status determination
         narrative = []
         if max_violation < aso.feasibility_threshold:
             status = "FEASIBLE_FOUND"
-            narrative.append("Feasible region reached")
+            narrative.append(f"Feasible region reached (max_violation={max_violation:.4f})")
         elif diverging_count >= len(self.constraint_names) // 2:
             status = "DIVERGING"
-            narrative.append("Multiple constraints diverging")
+            narrative.append(f"{diverging_count} constraints diverging")
         elif prev and abs(objective_delta) < aso.stagnation_objective_threshold:
             if max_violation > aso.stagnation_violation_threshold:
                 status = "STAGNATION"
-                narrative.append("Stagnation with constraint violations")
+                narrative.append(f"Stagnation: obj_delta={objective_delta:.6f}, violation={max_violation:.4f}")
             else:
                 status = "IN_PROGRESS"
                 narrative.append("Near convergence")
@@ -817,63 +1311,18 @@ class Coordinator:
             objective=objective,
             objective_delta=objective_delta,
             max_violation=max_violation,
+            constraints_raw=constraints,
+            multipliers=multipliers,
+            penalty_parameters=penalties,
+            bounds_norm=bounds_norm,
             status=status,
             constraint_diagnostics=constraint_diagnostics,
-            optimizer_health={"stagnation_count": traj.stagnation_count},
             narrative=narrative,
             steps_since_improvement=traj.stagnation_count,
         )
 
-    def _generate_proxy_diagnostics(
-        self,
-        candidates: List[Dict],
-        traj: TrajectoryState,
-    ) -> OptimizerDiagnostics:
-        """Generate diagnostics from surrogate predictions when ALM state unavailable."""
-        if not candidates or not self.surrogate:
-            return OptimizerDiagnostics(
-                step=traj.steps,
-                trajectory_id=traj.id,
-                objective=traj.best_objective,
-                objective_delta=0.0,
-                max_violation=traj.best_violation,
-                status="IN_PROGRESS",
-                constraint_diagnostics=[],
-                optimizer_health={"stagnation_count": traj.stagnation_count},
-                narrative=["Using proxy diagnostics"],
-                steps_since_improvement=traj.stagnation_count,
-            )
-
-        # Use surrogate to estimate metrics
-        from ai_scientist import tools
-        best_candidate = candidates[0]
-        try:
-            flat, schema = tools.structured_flatten(best_candidate, self.cfg.boundary_template)
-            pred = self.surrogate.predict([flat])
-            objective = float(pred.mean[0])
-            # Simplified: use objective improvement as proxy for violation
-            objective_delta = objective - traj.best_objective
-            status = "FEASIBLE_FOUND" if objective_delta < -0.1 else "IN_PROGRESS"
-        except Exception:
-            objective = traj.best_objective
-            objective_delta = 0.0
-            status = "IN_PROGRESS"
-
-        return OptimizerDiagnostics(
-            step=traj.steps,
-            trajectory_id=traj.id,
-            objective=objective,
-            objective_delta=objective_delta,
-            max_violation=traj.best_violation,
-            status=status,
-            constraint_diagnostics=[],
-            optimizer_health={"stagnation_count": traj.stagnation_count},
-            narrative=["Proxy diagnostics from surrogate"],
-            steps_since_improvement=traj.stagnation_count,
-        )
-
     def _update_trajectory_best(self, traj: TrajectoryState, diag: OptimizerDiagnostics):
-        """Update trajectory best values and stagnation counter."""
+        """Update best values and stagnation counter."""
         improved = False
         if diag.max_violation < traj.best_violation:
             traj.best_violation = diag.max_violation
@@ -887,41 +1336,6 @@ class Coordinator:
         else:
             traj.stagnation_count += 1
 
-    def _apply_directive(
-        self,
-        directive: OptimizationDirective,
-        config: ai_config.ExperimentConfig,
-    ) -> Tuple[ai_config.ExperimentConfig, Dict[str, Any]]:
-        """Apply directive config overrides with safety guards."""
-        from dataclasses import replace
-
-        if not directive.config_overrides:
-            return config, {}
-
-        aso = config.aso
-        new_cfg = config
-        worker_overrides: Dict[str, Any] = {}
-        overrides = directive.config_overrides
-
-        try:
-            # Constraint weights
-            if "constraint_weights" in overrides:
-                clamped = {
-                    k: min(float(v), aso.max_constraint_weight)
-                    for k, v in overrides["constraint_weights"].items()
-                }
-                new_weights = replace(new_cfg.constraint_weights, **clamped)
-                new_cfg = replace(new_cfg, constraint_weights=new_weights)
-
-            # ALM settings (pass to worker)
-            if "alm" in overrides:
-                worker_overrides["alm"] = overrides["alm"]
-
-        except Exception as e:
-            print(f"[Coordinator] Failed to apply directive: {e}")
-
-        return new_cfg, worker_overrides
-
     def _log_telemetry(
         self,
         experiment_id: int,
@@ -932,7 +1346,7 @@ class Coordinator:
         wall_time_ms: float,
         llm_called: bool,
     ):
-        """Record telemetry event."""
+        """Record telemetry event with full ALM state."""
         from datetime import datetime, timezone
         self.telemetry.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -943,10 +1357,13 @@ class Coordinator:
             "status": diag.status,
             "objective": diag.objective,
             "max_violation": diag.max_violation,
+            "bounds_norm": diag.bounds_norm,
+            "penalties": diag.penalty_parameters,
+            "multipliers": diag.multipliers,
             "directive_action": directive.action.value,
             "directive_source": directive.source.value,
             "directive_reasoning": directive.reasoning,
-            "evals_used": traj.evals_used,
+            "evals_used": traj.budget_used,
             "wall_time_ms": wall_time_ms,
             "llm_called": llm_called,
         })
@@ -957,97 +1374,38 @@ class Coordinator:
             return
 
         from pathlib import Path
+        import json
+
         telemetry_dir = Path(self.cfg.reporting_dir) / "telemetry"
         telemetry_dir.mkdir(parents=True, exist_ok=True)
         telemetry_file = telemetry_dir / f"aso_exp{experiment_id}.jsonl"
 
-        import json
         with open(telemetry_file, "a") as f:
             for event in self.telemetry:
                 f.write(json.dumps(event) + "\n")
 
         self.telemetry = []
 
-    # Keep existing methods for backward compatibility
-    def decide_strategy(self, cycle: int, experiment_id: int) -> str:
-        """Legacy strategy selector (unchanged)."""
-        if cycle < 5:
-            return "HYBRID"
-        hv_delta = self.world_model.average_recent_hv_delta(experiment_id, lookback=3)
-        if hv_delta is not None and hv_delta < 0.005:
-            return "EXPLORE"
-        return "HYBRID"
-
-    def produce_candidates(
-        self,
-        cycle: int,
-        experiment_id: int,
-        n_candidates: int,
-        template: ai_config.BoundaryTemplateConfig,
-    ) -> List[Dict[str, Any]]:
-        """Legacy candidate production (unchanged for backward compatibility)."""
-        # ... existing implementation ...
+    # Helper methods (implement based on existing code)
+    def _prepare_seeds(self, initial_seeds, cycle, n_needed):
+        """Prepare and validate seeds using ExplorationWorker + GeometerWorker."""
+        # ... implementation ...
         pass
-```
 
-### 3.6 Worker Contract Update
+    def _seed_to_boundary(self, seed):
+        """Convert seed dict to SurfaceRZFourier."""
+        # ... implementation ...
+        pass
 
-Update `ai_scientist/workers.py` to include ALM state return:
+    def _get_problem(self, config):
+        """Get problem instance from config."""
+        # ... implementation ...
+        pass
 
-```python
-class OptimizationWorker(Worker):
-    """Worker for gradient-based optimization with ALM state return."""
-
-    def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute optimization chunk.
-
-        Args:
-            context:
-                initial_guesses: List of starting boundary params
-                budget: Max evaluations for this chunk
-                return_alm_state: If True, include ALM state in result
-                alm_settings_overrides: Dict of ALM hyperparameters
-
-        Returns:
-            Dict with keys:
-                candidates: List of boundary param dicts
-                alm_state: AugmentedLagrangianState (if return_alm_state)
-                evals_used: Actual evaluations consumed
-                status: "optimized", "skipped", "failed"
-        """
-        initial_guesses = context.get("initial_guesses", [])
-        budget = context.get("budget", 10)
-        return_alm = context.get("return_alm_state", False)
-        alm_overrides = context.get("alm_settings_overrides", {})
-
-        if not initial_guesses:
-            return {"candidates": [], "alm_state": None, "evals_used": 0, "status": "skipped"}
-
-        if not self.surrogate or not self.surrogate._trained:
-            return {"candidates": initial_guesses, "alm_state": None, "evals_used": 0, "status": "skipped"}
-
-        try:
-            from ai_scientist.optim import differentiable
-
-            optimized, final_state, evals = differentiable.gradient_descent_on_inputs(
-                initial_guesses,
-                self.surrogate,
-                self.cfg,
-                budget=budget,
-                alm_settings=alm_overrides,
-                return_state=return_alm,
-            )
-
-            return {
-                "candidates": optimized,
-                "alm_state": final_state if return_alm else None,
-                "evals_used": evals,
-                "status": "optimized",
-            }
-        except Exception as e:
-            print(f"[OptimizationWorker] Failed: {e}")
-            return {"candidates": initial_guesses, "alm_state": None, "evals_used": 0, "status": "failed"}
+    def _build_optimization_settings(self, config):
+        """Build OptimizationSettings from config."""
+        # ... implementation ...
+        pass
 ```
 
 ---
@@ -1055,8 +1413,6 @@ class OptimizationWorker(Worker):
 ## Part 4: Runner Integration
 
 ### 4.1 Control Mode Selection
-
-Update runner to support ASO mode:
 
 ```python
 # In runner.py
@@ -1069,9 +1425,8 @@ def _run_cycle(
     planner: ai_planner.PlanningAgent,
     coordinator: Coordinator,
     budget_controller: BudgetController,
-    # ... other params ...
-) -> Tuple[Path | None, Dict | None, tools.P3Summary | None]:
-    """Run single cycle with ASO or legacy mode."""
+    # ...
+):
     cycle_number = cycle_index + 1
 
     # 1. High-level planning
@@ -1083,7 +1438,6 @@ def _run_cycle(
         experiment_id=experiment_id,
     )
 
-    # Apply config overrides
     active_cfg = cfg
     if planning_outcome.config_overrides:
         active_cfg = _apply_config_overrides(cfg, planning_outcome.config_overrides)
@@ -1092,12 +1446,11 @@ def _run_cycle(
 
     # 2. Branch on control mode
     if active_cfg.aso.enabled:
-        # ASO V4 path
+        print(f"[runner][cycle={cycle_number}] ASO mode with real ALM state")
+
         initial_seeds = []
         if planning_outcome.suggested_params:
             initial_seeds = [planning_outcome.suggested_params]
-
-        print(f"[runner][cycle={cycle_number}] ASO mode enabled")
 
         candidates = coordinator.produce_candidates_aso(
             cycle=cycle_number,
@@ -1108,121 +1461,112 @@ def _run_cycle(
             initial_config=active_cfg,
         )
     else:
-        # Legacy path (unchanged)
-        candidates = coordinator.produce_candidates(
-            cycle=cycle_number,
-            experiment_id=experiment_id,
-            n_candidates=budget_snapshot.screen_evals_per_cycle,
-            template=active_cfg.boundary_template,
-        )
+        # Legacy path
+        candidates = coordinator.produce_candidates(...)
 
-    # 3. Continue with evaluation, promotion, etc. (unchanged)
+    # 3. Continue with evaluation, promotion, etc.
     # ...
 ```
 
 ### 4.2 CLI Flag
 
-Add to runner CLI:
-
 ```python
 parser.add_argument(
     "--aso",
     action="store_true",
-    help="Enable Agent-Supervised Optimization mode",
+    help="Enable Agent-Supervised Optimization with real ALM state",
 )
 
 # In main():
 if args.aso:
+    from dataclasses import replace
     cfg = replace(cfg, aso=replace(cfg.aso, enabled=True))
 ```
 
 ---
 
-## Part 5: Implementation Checklist
+## Part 5: Implementation Checklist (Reordered by Priority)
 
-### Phase 1: Foundation (Priority 0)
+### Phase 0: ALM Bridge (Priority 0 - Critical Path)
+
+**File: `ai_scientist/optim/alm_bridge.py` (NEW)**
+- [ ] 0.1 Create `ALMStepResult` dataclass
+- [ ] 0.2 Create `ALMContext` dataclass
+- [ ] 0.3 Implement `create_alm_context()` - wraps constellaration setup
+- [ ] 0.4 Implement `step_alm()` - single outer ALM iteration
+- [ ] 0.5 Implement `state_to_boundary_params()` - convert back to dict
+- [ ] 0.6 Unit test: `create_alm_context()` returns valid state
+- [ ] 0.7 Unit test: `step_alm()` reduces violation over iterations
+
+### Phase 1: Data Structures (Priority 0)
 
 **File: `ai_scientist/config.py`**
-- [ ] 1.1 Add `ALMConfig` dataclass (frozen, mirrors constellaration settings)
-- [ ] 1.2 Add `ASOConfig` dataclass (supervision mode, thresholds, fallback settings)
-- [ ] 1.3 Update `ExperimentConfig` to include `alm: ALMConfig` and `aso: ASOConfig` fields
+- [ ] 1.1 Add `ALMConfig` dataclass (mirrors constellaration)
+- [ ] 1.2 Add `ASOConfig` dataclass
+- [ ] 1.3 Update `ExperimentConfig` with `alm` and `aso` fields
+- [ ] 1.4 Add `_alm_config_from_dict()` loader
+- [ ] 1.5 Add `_aso_config_from_dict()` loader
 
 **File: `ai_scientist/planner.py`**
-- [ ] 1.4 Add `DirectiveAction` enum (`CONTINUE`, `ADJUST`, `STOP`, `RESTART`)
-- [ ] 1.5 Add `DirectiveSource` enum (`LLM`, `HEURISTIC`, `CONVERGENCE`, `FALLBACK`)
-- [ ] 1.6 Add `OptimizationDirective` dataclass with `to_dict()` method
-- [ ] 1.7 Add `ConstraintDiagnostic` dataclass (name, violation, penalty, trend, delta)
-- [ ] 1.8 Add `OptimizerDiagnostics` dataclass with `requires_llm_supervision()` and `to_json()`
-- [ ] 1.9 Add `HeuristicSupervisor` class with `analyze()` method
-- [ ] 1.10 Add `_ensure_heuristic()` method to `PlanningAgent`
-- [ ] 1.11 Add `supervise()` method to `PlanningAgent`
-- [ ] 1.12 Add `_llm_supervise()` method to `PlanningAgent`
-- [ ] 1.13 Add `_build_supervision_prompt()` method to `PlanningAgent`
-- [ ] 1.14 Add `_parse_directive()` method to `PlanningAgent`
+- [ ] 1.6 Add `DirectiveAction` enum
+- [ ] 1.7 Add `DirectiveSource` enum
+- [ ] 1.8 Add `OptimizationDirective` dataclass with `alm_overrides` field
+- [ ] 1.9 Add `ConstraintDiagnostic` dataclass with `multiplier` field
+- [ ] 1.10 Add `OptimizerDiagnostics` dataclass with full ALM state fields
 
-### Phase 2: Coordinator (Priority 0)
+### Phase 2: Supervision (Priority 0)
+
+**File: `ai_scientist/planner.py`**
+- [ ] 2.1 Add `HeuristicSupervisor` class
+- [ ] 2.2 Implement decision tree with penalty boost logic
+- [ ] 2.3 Add `_ensure_heuristic()` to `PlanningAgent`
+- [ ] 2.4 Add `supervise()` to `PlanningAgent`
+- [ ] 2.5 Add `_llm_supervise()` with ALM-aware prompt
+- [ ] 2.6 Add `_build_supervision_prompt()` with penalty guidance
+- [ ] 2.7 Add `_parse_directive()` supporting `alm_overrides`
+
+### Phase 3: Coordinator (Priority 1)
 
 **File: `ai_scientist/coordinator.py`**
-- [ ] 2.1 Add import for `AugmentedLagrangianState` from constellaration
-- [ ] 2.2 Add `CONSTRAINT_NAMES` class constant (mapping problem type → constraint names)
-- [ ] 2.3 Add `TrajectoryState` dataclass (id, seed, alm_state, history, evals_used, status, etc.)
-- [ ] 2.4 Update `__init__()` to set `constraint_names` and `telemetry` buffer
-- [ ] 2.5 Add `produce_candidates_aso()` method (main ASO entry point)
-- [ ] 2.6 Add `_prepare_seeds()` method (seed validation with GeometerWorker)
-- [ ] 2.7 Add `_run_trajectory_aso()` method (single trajectory ASO loop)
-- [ ] 2.8 Add `_generate_diagnostics()` method (ALM state → OptimizerDiagnostics)
-- [ ] 2.9 Add `_generate_proxy_diagnostics()` method (surrogate-based fallback)
-- [ ] 2.10 Add `_update_trajectory_best()` method (track stagnation)
-- [ ] 2.11 Add `_apply_directive()` method (config overrides with safety guards)
-- [ ] 2.12 Add `_log_telemetry()` method (event recording)
-- [ ] 2.13 Add `_persist_telemetry()` method (JSONL file writing)
+- [ ] 3.1 Add `TrajectoryState` dataclass with `alm_context`, `alm_state`
+- [ ] 3.2 Add `CONSTRAINT_NAMES` mapping
+- [ ] 3.3 Add `produce_candidates_aso()` entry point
+- [ ] 3.4 Implement `_run_trajectory_aso()` using `step_alm()`
+- [ ] 3.5 Implement `_generate_diagnostics()` from real ALM state
+- [ ] 3.6 Implement `_update_trajectory_best()`
+- [ ] 3.7 Implement `_log_telemetry()` with full ALM state
+- [ ] 3.8 Implement `_persist_telemetry()` to JSONL
+- [ ] 3.9 Implement helper methods (`_seed_to_boundary`, etc.)
 
-### Phase 3: Integration (Priority 1)
-
-**File: `ai_scientist/workers.py`**
-- [ ] 3.1 Update `OptimizationWorker.run()` to accept `return_alm_state` context param
-- [ ] 3.2 Update `OptimizationWorker.run()` to return `alm_state` in result dict
-- [ ] 3.3 Update `OptimizationWorker.run()` to accept `alm_settings_overrides` context param
-
-**File: `ai_scientist/optim/differentiable.py`**
-- [ ] 3.4 Add `return_state` parameter to `gradient_descent_on_inputs()`
-- [ ] 3.5 Add `alm_settings` parameter to `gradient_descent_on_inputs()`
-- [ ] 3.6 Return `(optimized, final_state, evals)` tuple when `return_state=True`
+### Phase 4: Runner Integration (Priority 1)
 
 **File: `ai_scientist/runner.py`**
-- [ ] 3.7 Add `--aso` CLI argument to argument parser
-- [ ] 3.8 Update config initialization to set `aso.enabled` from CLI flag
-- [ ] 3.9 Update `_run_cycle()` to branch on `cfg.aso.enabled`
-- [ ] 3.10 Call `coordinator.produce_candidates_aso()` in ASO branch
-- [ ] 3.11 Add `initialize_architecture()` helper function
+- [ ] 4.1 Add `--aso` CLI argument
+- [ ] 4.2 Update config initialization for ASO flag
+- [ ] 4.3 Update `_run_cycle()` to branch on `cfg.aso.enabled`
+- [ ] 4.4 Call `produce_candidates_aso()` in ASO path
 
-### Phase 4: Testing (Priority 1)
+### Phase 5: Testing (Priority 1)
+
+**File: `tests/test_alm_bridge.py` (NEW)**
+- [ ] 5.1 Test `create_alm_context()` with P3 problem
+- [ ] 5.2 Test `step_alm()` executes and returns valid state
+- [ ] 5.3 Test penalty override is applied correctly
 
 **File: `tests/test_planner.py`**
-- [ ] 4.1 Unit test: `HeuristicSupervisor.analyze()` returns STOP on FEASIBLE_FOUND + stable
-- [ ] 4.2 Unit test: `HeuristicSupervisor.analyze()` returns ADJUST on STAGNATION + high violation
-- [ ] 4.3 Unit test: `HeuristicSupervisor.analyze()` returns RESTART on STAGNATION + low violation
-- [ ] 4.4 Unit test: `HeuristicSupervisor.analyze()` returns ADJUST on increasing_violation trend
-- [ ] 4.5 Unit test: `HeuristicSupervisor.analyze()` returns CONTINUE on normal progress
+- [ ] 5.4 Test `HeuristicSupervisor` STOP on FEASIBLE_FOUND
+- [ ] 5.5 Test `HeuristicSupervisor` ADJUST on STAGNATION
+- [ ] 5.6 Test `HeuristicSupervisor` penalty boost calculation
 
 **File: `tests/test_coordinator.py`**
-- [ ] 4.6 Unit test: `OptimizerDiagnostics.requires_llm_supervision()` with `every_step` mode
-- [ ] 4.7 Unit test: `OptimizerDiagnostics.requires_llm_supervision()` with `periodic` mode
-- [ ] 4.8 Unit test: `OptimizerDiagnostics.requires_llm_supervision()` with `event_triggered` mode
-- [ ] 4.9 Integration test: `produce_candidates_aso()` with mock `OptimizationWorker`
-- [ ] 4.10 Integration test: Verify telemetry JSONL file is written correctly
+- [ ] 5.7 Test `_generate_diagnostics()` extracts all ALM fields
+- [ ] 5.8 Integration test: 3-step ASO loop with mock problem
 
-**File: `scripts/test_aso_loop.py`**
-- [ ] 4.11 Create smoke test script that runs ASO loop for 3 steps
-- [ ] 4.12 Verify heuristic fallback works when LLM is disabled
-- [ ] 4.13 Verify STOP directive terminates trajectory correctly
+### Phase 6: Documentation (Priority 2)
 
-### Phase 5: Documentation & Cleanup (Priority 2)
-
-- [ ] 5.1 Update `docs/run_protocol.md` with ASO mode instructions
-- [ ] 5.2 Add example config YAML with ASO settings
-- [ ] 5.3 Remove duplicate EXPLOIT/HYBRID logic in legacy `produce_candidates()`
-- [ ] 5.4 Archive `UNIFIED_PLAN.md` and `ASO_V3_PLAN.md` (mark as superseded)
+- [ ] 6.1 Update `docs/run_protocol.md` with ASO instructions
+- [ ] 6.2 Add example config YAML with ASO/ALM settings
+- [ ] 6.3 Move superseded docs to `docs/archive/`
 
 ---
 
@@ -1230,11 +1574,12 @@ if args.aso:
 
 | Metric | Baseline (Legacy) | Target (ASO V4) | Measurement |
 |--------|-------------------|-----------------|-------------|
-| LLM calls/cycle | 0 (no supervision) | <10 | Telemetry |
+| LLM calls/cycle | 0 | <10 | Telemetry |
 | Heuristic decisions/cycle | 0 | >40 | Telemetry |
-| Wall-clock/cycle | ~5 min | <3 min | Timer |
+| Wall-clock/cycle | ~5 min | ~5 min (same, different work) | Timer |
 | Feasibility rate | ~30% | >50% | WorldModel |
-| Stagnation recovery | 0% | >50% | RESTART success rate |
+| Stagnation recovery | 0% | >50% | RESTART success |
+| Constraint-specific adjustments | 0 | >20 | Telemetry (ADJUST count) |
 
 ---
 
@@ -1243,23 +1588,72 @@ if args.aso:
 ### From Legacy Mode
 
 1. Set `aso.enabled = True` in config or use `--aso` flag
-2. Legacy `produce_candidates()` still works unchanged
+2. Optionally tune `alm.*` settings (defaults match constellaration)
 3. ASO telemetry written to `reports/telemetry/aso_exp{id}.jsonl`
+4. Legacy `produce_candidates()` still works unchanged
 
-### From ASO V3 Plan
+### From Previous Planning Documents
 
-1. `analyze_optimizer_diagnostics()` → `supervise()` + `HeuristicSupervisor`
-2. Multi-trajectory → Single trajectory (simplification; extensible later)
-3. SQL telemetry → JSONL telemetry (simpler, grep-friendly)
-4. `alm_settings` → `alm` config section with proper dataclass
+| Old Concept | New Implementation |
+|-------------|-------------------|
+| "Build ALM loop" | Use `alm_bridge.py` wrapping constellaration |
+| "Proxy diagnostics" | Real diagnostics from `AugmentedLagrangianState` |
+| "config_overrides" | `alm_overrides` with direct penalty manipulation |
+| "surrogate-based supervision" | Real ALM state + heuristics |
 
 ---
 
-## Appendix A: Example Telemetry Event
+## Appendix A: constellaration ALM API Reference
+
+### AugmentedLagrangianState
+
+```python
+class AugmentedLagrangianState(pydantic.BaseModel):
+    x: jnp.ndarray                    # Design vector (scaled)
+    multipliers: jnp.ndarray          # λ_i: Lagrange multipliers
+    penalty_parameters: jnp.ndarray   # ρ_i: Penalty scaling
+    objective: jnp.ndarray            # f(x)
+    constraints: jnp.ndarray          # g_i(x), positive = violated
+    bounds: jnp.ndarray               # Trust region per dimension
+```
+
+### Key Functions
+
+```python
+# Compute augmented Lagrangian value
+augmented_lagrangian_function(objective, constraints, state) -> jnp.ndarray
+
+# Update state after optimization step
+update_augmented_lagrangian_state(
+    x, objective, constraints, state, settings,
+    penalty_parameters=None,  # Override if provided
+    bounds=None,              # Override if provided
+) -> AugmentedLagrangianState
+```
+
+### Problem Types
+
+```python
+# P1: Geometrical (3 constraints)
+GeometricalProblem: aspect_ratio, average_triangularity, edge_rotational_transform
+
+# P2: SimpleToBuildQIStellarator (5 constraints)
+SimpleToBuildQIStellarator: aspect_ratio, edge_rotational_transform,
+                            edge_magnetic_mirror_ratio, max_elongation, qi
+
+# P3: MHDStableQIStellarator (6 constraints)
+MHDStableQIStellarator: aspect_ratio, edge_rotational_transform,
+                        edge_magnetic_mirror_ratio, flux_compression,
+                        vacuum_well, qi
+```
+
+---
+
+## Appendix B: Example Telemetry Event (Enhanced)
 
 ```json
 {
-  "timestamp": "2025-11-29T14:30:22.456Z",
+  "timestamp": "2025-11-30T14:30:22.456Z",
   "experiment_id": 42,
   "cycle": 5,
   "trajectory_id": 0,
@@ -1267,34 +1661,29 @@ if args.aso:
   "status": "STAGNATION",
   "objective": 6.82,
   "max_violation": 0.12,
+  "bounds_norm": 0.34,
+  "penalties": [10.0, 20.0, 40.0, 10.0, 80.0],
+  "multipliers": [0.5, 1.2, 3.4, 0.1, 5.6],
   "directive_action": "ADJUST",
   "directive_source": "heuristic",
-  "directive_reasoning": "Constraint 'qi' worsening, boosting weight to 200.0",
-  "evals_used": 70,
-  "wall_time_ms": 1523.4,
+  "directive_reasoning": "Constraint 'qi' worsening (violation=0.12), boosting penalty to 160.0",
+  "evals_used": 700,
+  "wall_time_ms": 45234.5,
   "llm_called": false
 }
 ```
 
 ---
 
-## Appendix B: Constraint Names by Problem
-
-| Problem | Constraints |
-|---------|-------------|
-| P1 | aspect_ratio, average_triangularity, edge_rotational_transform |
-| P2 | aspect_ratio, edge_rotational_transform, edge_magnetic_mirror_ratio, max_elongation, qi |
-| P3 | edge_rotational_transform, edge_magnetic_mirror_ratio, vacuum_well, flux_compression, qi |
-
----
-
 ## Appendix C: Key File Locations
 
-| Component | File | Lines to Modify |
-|-----------|------|-----------------|
-| Config | `ai_scientist/config.py` | Add ALMConfig, ASOConfig |
-| Planner | `ai_scientist/planner.py` | Add dataclasses, HeuristicSupervisor, supervise() |
-| Coordinator | `ai_scientist/coordinator.py` | Add TrajectoryState, produce_candidates_aso() |
-| Workers | `ai_scientist/workers.py` | Update OptimizationWorker.run() |
-| Differentiable | `ai_scientist/optim/differentiable.py` | Add return_state parameter |
-| Runner | `ai_scientist/runner.py` | Add --aso flag, branch in _run_cycle() |
+| Component | File | Key Functions/Classes |
+|-----------|------|----------------------|
+| ALM Core | `constellaration/.../augmented_lagrangian.py` | `AugmentedLagrangianState`, `update_...state()` |
+| ALM Runner | `constellaration/.../augmented_lagrangian_runner.py` | `run()`, `objective_constraints()` |
+| ALM Settings | `constellaration/.../settings.py` | `AugmentedLagrangianMethodSettings` |
+| **ALM Bridge** | `ai_scientist/optim/alm_bridge.py` | `create_alm_context()`, `step_alm()` |
+| Config | `ai_scientist/config.py` | `ALMConfig`, `ASOConfig` |
+| Planner | `ai_scientist/planner.py` | `HeuristicSupervisor`, `supervise()` |
+| Coordinator | `ai_scientist/coordinator.py` | `produce_candidates_aso()` |
+| Runner | `ai_scientist/runner.py` | `--aso` flag, `_run_cycle()` |
