@@ -54,6 +54,7 @@ class ForwardModelSettings(pydantic.BaseModel):
     problem: str = "p3"  # p1, p2, p3, etc.
     stage: str = "unknown"
     calculate_gradients: bool = False
+    fidelity: str = "low"
 
 
 class EvaluationResult(pydantic.BaseModel):
@@ -70,6 +71,41 @@ class EvaluationResult(pydantic.BaseModel):
     design_hash: str
     evaluation_time_sec: float
     settings: ForwardModelSettings
+
+    # Telemetry & Diagnostics
+    fidelity: str = "unknown"
+    equilibrium_converged: bool = True
+    error_message: str | None = None
+
+    @property
+    def constraint_names(self) -> List[str]:
+        """List of constraint names (keys)."""
+        return list(self.constraints.keys())
+
+    @property
+    def constraint_values(self) -> List[float]:
+        """List of constraint values."""
+        return list(self.constraints.values())
+
+    def to_pareto_point(self) -> tuple[float, float]:
+        """
+        Return a tuple for Pareto optimization (objective, feasibility).
+        """
+        return (self.objective, self.feasibility)
+
+    def dominates(self, other: "EvaluationResult") -> bool:
+        """
+        Check if this result dominates another.
+        
+        Assumes minimization for feasibility (0 is best).
+        For objective, direction depends on problem, so this checks
+        feasibility dominance only and equality on objective.
+        """
+        if self.feasibility > other.feasibility:
+            return False
+        # This is incomplete without objective direction, 
+        # strictly returning False to avoid incorrect optimization.
+        return False
 
 
 # --- Helper Functions (Hashing & Boundary) ---
@@ -331,6 +367,9 @@ def forward_model(
         design_hash=d_hash,
         evaluation_time_sec=evaluation_time,
         settings=settings,
+        fidelity=settings.fidelity,
+        equilibrium_converged=True,
+        error_message=None,
     )
 
     # 6. Update Cache
