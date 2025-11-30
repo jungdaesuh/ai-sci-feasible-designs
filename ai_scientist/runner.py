@@ -7,6 +7,11 @@ from ai_scientist.experiment_runner import run_experiment as run
 
 # Restore symbols expected by tests/external users
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogateBundle
+from ai_scientist.cycle_executor import (
+    _propose_p3_candidates_for_cycle,
+    _surrogate_rank_screen_candidates,
+    _surrogate_candidate_pool_size,
+)
 from ai_scientist.experiment_setup import (
     build_argument_parser as _build_argument_parser,
     load_run_presets as _load_run_presets,
