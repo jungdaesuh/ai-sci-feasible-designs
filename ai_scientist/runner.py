@@ -530,6 +530,7 @@ class RunnerCLIConfig:
     run_preset: str | None
     planner: str
     resume_from: Path | None = None
+    aso: bool = False
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -625,6 +626,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a cycle checkpoint JSON to resume from (skips completed cycles).",
     )
+    parser.add_argument(
+        "--aso",
+        action="store_true",
+        help="Enable Agent-Supervised Optimization with real ALM state",
+    )
     return parser
 
 
@@ -649,6 +655,7 @@ def parse_args(args: Sequence[str] | None = None) -> RunnerCLIConfig:
         run_preset=namespace.run_preset,
         planner=namespace.planner,
         resume_from=namespace.resume_from,
+        aso=bool(namespace.aso),
     )
 
 
@@ -1821,18 +1828,37 @@ def _run_cycle(
     candidate_pool: list[Mapping[str, Any]] = []
     
     # START ALM_BLOCK_PLACEHOLDER
-    if cfg.optimizer_backend == "gradient_descent":
+    # Initialize Coordinator (Phase 5)
+    # The Coordinator is responsible for orchestrating candidate generation,
+    # including ASO (Agent-Supervised Optimization).
+    coordinator = Coordinator(
+        active_cfg, 
+        world_model, 
+        planner=ai_planner.PlanningAgent(config=active_cfg.model_config), # Pass the planner instance
+        surrogate=surrogate_model if isinstance(surrogate_model, NeuralOperatorSurrogate) else None, 
+        generative_model=generative_model
+    )
+
+    if active_cfg.aso.enabled:
+        if runtime and runtime.verbose:
+            print(f"[runner][cycle={cycle_number}] ASO mode with real ALM state.")
+        
+        initial_seeds = []
+        if suggested_params:
+            initial_seeds = suggested_params
+
+        candidate_pool = coordinator.produce_candidates_aso(
+            cycle=cycle_number,
+            experiment_id=experiment_id,
+            eval_budget=active_budgets.screen_evals_per_cycle,
+            template=active_cfg.boundary_template,
+            initial_seeds=initial_seeds,
+            initial_config=active_cfg,
+        )
+
+    elif cfg.optimizer_backend == "gradient_descent":
         if runtime and runtime.verbose:
             print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active (Phase 5 Coordinator).")
-        
-        # Initialize Coordinator (Phase 5)
-        coordinator = Coordinator(
-            active_cfg, 
-            world_model, 
-            planner=None, # We don't pass the legacy planner instance here to avoid confusion, or we could. 
-            surrogate=surrogate_model if isinstance(surrogate_model, NeuralOperatorSurrogate) else None, 
-            generative_model=generative_model
-        )
         
         candidate_pool = coordinator.produce_candidates(
             cycle=cycle_number,
@@ -1871,9 +1897,9 @@ def _run_cycle(
         )
 
     elif (optimizer_mode == "alm" or optimizer_mode == "sa-alm") or (cfg.optimizer_backend in ["alm", "sa-alm"]):
-        # ALM Execution Branch
+        # ALM Execution Branch (legacy, will be replaced by ASO)
         if runtime and runtime.verbose:
-            print(f"[runner][cycle={cycle_number}] {optimizer_mode if optimizer_mode != 'default' else cfg.optimizer_backend} optimizer mode active.")
+            print(f"[runner][cycle={cycle_number}] {optimizer_mode if optimizer_mode != 'default' else cfg.optimizer_backend} optimizer mode active (LEGACY ALM path).")
         
         initial_params_map: Mapping[str, Any]
         if suggested_params and suggested_params[0]:

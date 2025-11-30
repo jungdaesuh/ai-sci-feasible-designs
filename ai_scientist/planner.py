@@ -125,6 +125,116 @@ class OptimizerDiagnostics:
         }, indent=2)
 
 
+class HeuristicSupervisor:
+    """
+    Rule-based optimization supervisor.
+    Handles 80%+ of cases without LLM latency.
+
+    Key insight: We can now use REAL ALM state (multipliers, penalties, bounds)
+    to make informed decisions.
+    """
+
+    def __init__(self, aso_config: "ASOConfig"):
+        self.config = aso_config
+
+    def analyze(self, diagnostics: OptimizerDiagnostics) -> OptimizationDirective:
+        """
+        Generate directive using heuristic rules based on real ALM state.
+
+        Decision tree:
+        1. FEASIBLE_FOUND + stable objective -> STOP (converged)
+        2. FEASIBLE_FOUND + improving -> CONTINUE
+        3. STAGNATION + high violation -> ADJUST (boost penalties directly)
+        4. STAGNATION + low violation + small bounds -> STOP (local minimum)
+        5. DIVERGING -> STOP (abandon trajectory)
+        6. Specific constraint worsening + low multiplier -> ADJUST (boost that penalty)
+        7. Otherwise -> CONTINUE
+        """
+        cfg = self.config
+
+        # Case 1 & 2: Feasible region reached
+        if diagnostics.status == "FEASIBLE_FOUND":
+            if abs(diagnostics.objective_delta) < cfg.stagnation_objective_threshold:
+                return OptimizationDirective(
+                    action=DirectiveAction.STOP,
+                    reasoning=f"Converged: feasible (violation={diagnostics.max_violation:.4f}) with stable objective",
+                    source=DirectiveSource.CONVERGENCE,
+                )
+            return OptimizationDirective(
+                action=DirectiveAction.CONTINUE,
+                reasoning="Feasible and still improving objective",
+                source=DirectiveSource.HEURISTIC,
+            )
+
+        # Case 3 & 4: Stagnation
+        if diagnostics.status == "STAGNATION":
+            if diagnostics.max_violation > cfg.stagnation_violation_threshold:
+                # High violation stagnation: boost penalties
+                worst_idx = max(
+                    range(len(diagnostics.constraint_diagnostics)),
+                    key=lambda i: diagnostics.constraint_diagnostics[i].violation /
+                                  (diagnostics.constraint_diagnostics[i].penalty + 1e-6)
+                )
+                worst = diagnostics.constraint_diagnostics[worst_idx]
+
+                new_penalties = diagnostics.penalty_parameters.copy()
+                new_penalties[worst_idx] = min(
+                    worst.penalty * cfg.max_penalty_boost,
+                    cfg.max_constraint_weight
+                )
+
+                return OptimizationDirective(
+                    action=DirectiveAction.ADJUST,
+                    alm_overrides={"penalty_parameters": new_penalties},
+                    reasoning=f"Stagnation with violation={diagnostics.max_violation:.4f}, "
+                              f"boosting penalty for '{worst.name}' from {worst.penalty:.1f} to {new_penalties[worst_idx]:.1f}",
+                    source=DirectiveSource.HEURISTIC,
+                )
+            else:
+                if diagnostics.bounds_norm < 0.1:
+                    return OptimizationDirective(
+                        action=DirectiveAction.STOP,
+                        reasoning="Stagnation with small trust region, likely local minimum",
+                        source=DirectiveSource.HEURISTIC,
+                    )
+                return OptimizationDirective(
+                    action=DirectiveAction.RESTART,
+                    reasoning="Stagnation near feasibility, trying new seed",
+                    source=DirectiveSource.HEURISTIC,
+                )
+
+        # Case 5: Diverging
+        if diagnostics.status == "DIVERGING":
+            return OptimizationDirective(
+                action=DirectiveAction.STOP,
+                reasoning="Multiple constraints diverging, abandoning trajectory",
+                source=DirectiveSource.HEURISTIC,
+            )
+
+        # Case 6: Specific constraint struggling
+        struggling = [c for c in diagnostics.constraint_diagnostics if c.trend == "increasing_violation"]
+        if struggling:
+            worst = max(struggling, key=lambda c: c.violation)
+            worst_idx = next(i for i, c in enumerate(diagnostics.constraint_diagnostics) if c.name == worst.name)
+
+            new_penalties = diagnostics.penalty_parameters.copy()
+            new_penalties[worst_idx] = min(worst.penalty * 2, cfg.max_constraint_weight)
+
+            return OptimizationDirective(
+                action=DirectiveAction.ADJUST,
+                alm_overrides={"penalty_parameters": new_penalties},
+                reasoning=f"Constraint '{worst.name}' worsening (violation={worst.violation:.4f}), "
+                          f"boosting penalty to {new_penalties[worst_idx]:.1f}",
+                source=DirectiveSource.HEURISTIC,
+            )
+
+        # Case 7: Default
+        return OptimizationDirective(
+            action=DirectiveAction.CONTINUE,
+            reasoning="Normal progress",
+            source=DirectiveSource.HEURISTIC,
+        )
+
 class PlanningOutcome:
     """Structured output that mirrors the JSON sections sent to the planning agent prompt."""
 
@@ -145,6 +255,7 @@ class PlanningOutcome:
         self.graph_summary = graph_summary
         self.suggested_params = suggested_params
         self.config_overrides = config_overrides
+
 
 
 def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | None:
@@ -189,6 +300,7 @@ class PlanningAgent:
         self.rag_index = Path(rag_index or rag.DEFAULT_INDEX_PATH)
         self.world_model = world_model
         self.last_context: Mapping[str, Any] | None = None
+        self.heuristic: HeuristicSupervisor | None = None
 
     def _hash_context(self, payload: Mapping[str, Any]) -> str:
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -585,3 +697,4 @@ class PlanningAgent:
             suggested_params=suggested_params,
             config_overrides=config_overrides
         )
+
