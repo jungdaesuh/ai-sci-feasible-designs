@@ -1603,6 +1603,471 @@ if args.aso:
 
 ---
 
+## Part 8: Risks and Mitigations
+
+### 8.1 Risk: Multiprocessing Boilerplate Duplication
+
+**Problem:** The `step_alm()` function in `alm_bridge.py` replicates the `concurrent.futures` logic from `augmented_lagrangian_runner.py`. This code is complex (forkserver context, running evaluations tracking, `FIRST_COMPLETED` vs `ALL_COMPLETED`). Copy-paste errors or subtle divergence will cause hard-to-debug failures.
+
+**Mitigations:**
+
+1. **Option A (Recommended): Extract shared inner loop upstream**
+
+   Submit a PR to constellaration to extract the inner loop:
+
+   ```python
+   # constellaration/src/constellaration/optimization/augmented_lagrangian_runner.py
+
+   def run_single_outer_iteration(
+       state: al.AugmentedLagrangianState,
+       budget: int,
+       scale: jnp.ndarray,
+       problem: problems.SingleObjectiveProblem | problems.MHDStableQIStellarator,
+       unravel_fn: Callable,
+       forward_settings: forward_model.ConstellarationSettings,
+       aspect_ratio_upper_bound: float | None,
+       alm_settings: al.AugmentedLagrangianSettings,
+       oracle_settings: NevergradSettings,
+   ) -> tuple[al.AugmentedLagrangianState, int, forward_model.ConstellarationMetrics | None]:
+       """Execute ONE outer ALM iteration. Extracted for reuse by alm_bridge."""
+       mp_context = multiprocessing.get_context("forkserver")
+       # ... existing ProcessPoolExecutor logic from lines 204-264 ...
+       return new_state, n_evals, metrics
+
+
+   def run(boundary, settings, problem, aspect_ratio_upper_bound=None):
+       # ... setup code ...
+       for k in range(settings.optimizer_settings.maxit):
+           state, n_evals, metrics = run_single_outer_iteration(
+               state, budget, scale, problem, unravel_fn,
+               settings.forward_model_settings, aspect_ratio_upper_bound,
+               settings.optimizer_settings.augmented_lagrangian_settings,
+               settings.optimizer_settings.oracle_settings,
+           )
+           # ... budget update, logging ...
+   ```
+
+   Then `alm_bridge.py` simply imports and calls `run_single_outer_iteration()`.
+
+2. **Option B (Fallback): Literal copy-paste with hash verification**
+
+   If upstream refactoring is not feasible:
+
+   ```python
+   # alm_bridge.py
+
+   # SYNC MARKER: This block is copied from augmented_lagrangian_runner.py:204-264
+   # Source hash: sha256(lines 204-264) = "abc123..."
+   # Last synced: 2025-11-30
+   # If upstream changes, CI will fail (see test_alm_bridge.py::test_source_sync)
+
+   def _run_inner_loop(state, budget, context):
+       # ... copied logic ...
+   ```
+
+   With corresponding test:
+
+   ```python
+   # tests/test_alm_bridge.py
+
+   import hashlib
+   from pathlib import Path
+
+   EXPECTED_HASH = "abc123..."  # Update when intentionally syncing
+
+   def test_source_sync():
+       """Fail if upstream ProcessPoolExecutor logic has changed."""
+       runner_path = Path("constellaration/src/constellaration/optimization/augmented_lagrangian_runner.py")
+       lines = runner_path.read_text().splitlines()[203:264]  # 0-indexed
+       actual_hash = hashlib.sha256("\n".join(lines).encode()).hexdigest()[:12]
+       assert actual_hash == EXPECTED_HASH, (
+           f"augmented_lagrangian_runner.py:204-264 has changed (hash {actual_hash}). "
+           f"Review changes and update alm_bridge.py accordingly, then update EXPECTED_HASH."
+       )
+   ```
+
+**Recommendation:** Pursue Option A. The upstream refactoring is a clean separation of concerns and benefits constellaration independently.
+
+---
+
+### 8.2 Risk: API Drift / Upstream Breakage
+
+**Problem:** `alm_bridge.py` imports from `constellaration.optimization`. Any changes to function signatures (e.g., `objective_constraints`, `update_augmented_lagrangian_state`) will break the bridge at runtime.
+
+**Mitigations:**
+
+1. **Explicit version coupling with type checking**
+
+   ```python
+   # alm_bridge.py
+
+   # =============================================================================
+   # CONSTELLARATION API CONTRACT
+   # =============================================================================
+   # This module depends on specific constellaration function signatures.
+   # If these imports fail or type-check errors occur, constellaration has changed.
+   # Last verified: 2025-11-30
+   # Minimum constellaration version: (pin in pyproject.toml)
+   # =============================================================================
+
+   from constellaration.optimization.augmented_lagrangian import (
+       AugmentedLagrangianState,
+       AugmentedLagrangianSettings,
+       augmented_lagrangian_function,
+       update_augmented_lagrangian_state,
+   )
+   from constellaration.optimization.augmented_lagrangian_runner import (
+       objective_constraints,
+   )
+   from constellaration.optimization.settings import (
+       AugmentedLagrangianMethodSettings,
+       NevergradSettings,
+       OptimizationSettings,
+   )
+
+   # Type assertions to catch signature changes at import time
+   from typing import TYPE_CHECKING
+   if TYPE_CHECKING:
+       from typing import Callable
+       _: Callable[
+           [jnp.ndarray, jnp.ndarray, "SingleObjectiveProblem", Callable, "ConstellarationSettings", float | None],
+           tuple[tuple[jnp.ndarray, jnp.ndarray], "ConstellarationMetrics | None"]
+       ] = objective_constraints
+   ```
+
+2. **Rigorous integration test in CI**
+
+   ```python
+   # tests/test_alm_bridge.py
+
+   import pytest
+   from ai_scientist.optim.alm_bridge import (
+       ALMContext,
+       ALMStepResult,
+       create_alm_context,
+       step_alm,
+       state_to_boundary_params,
+   )
+   from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
+   import constellaration.problems as problems
+
+
+   @pytest.fixture
+   def minimal_p3_problem():
+       """Minimal P3 problem for testing."""
+       return problems.MHDStableQIStellarator(
+           edge_rotational_transform_over_n_field_periods_lower_bound=0.1,
+           log10_qi_upper_bound=-1.0,
+           edge_magnetic_mirror_ratio_upper_bound=0.3,
+           flux_compression_in_regions_of_bad_curvature_upper_bound=1.0,
+           vacuum_well_lower_bound=0.0,
+       )
+
+
+   @pytest.fixture
+   def minimal_boundary():
+       """Minimal SurfaceRZFourier for testing."""
+       from constellaration.geometry.surface_rz_fourier import SurfaceRZFourier
+       import jax.numpy as jnp
+       # ... create minimal valid boundary ...
+       return boundary
+
+
+   class TestALMBridgeAPIContract:
+       """Tests that verify the constellaration API contract is stable."""
+
+       def test_augmented_lagrangian_state_fields(self):
+           """Verify AugmentedLagrangianState has expected fields."""
+           import jax.numpy as jnp
+           state = AugmentedLagrangianState(
+               x=jnp.zeros(2),
+               multipliers=jnp.zeros(3),
+               penalty_parameters=jnp.ones(3),
+               objective=jnp.array(1.0),
+               constraints=jnp.zeros(3),
+               bounds=jnp.ones(2),
+           )
+           # These will fail if fields are renamed/removed
+           assert hasattr(state, 'x')
+           assert hasattr(state, 'multipliers')
+           assert hasattr(state, 'penalty_parameters')
+           assert hasattr(state, 'objective')
+           assert hasattr(state, 'constraints')
+           assert hasattr(state, 'bounds')
+
+       def test_objective_constraints_signature(self):
+           """Verify objective_constraints accepts expected arguments."""
+           import inspect
+           from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
+           sig = inspect.signature(objective_constraints)
+           params = list(sig.parameters.keys())
+           # Must have these positional params in order
+           assert params[:6] == ['x', 'scale', 'problem', 'unravel_and_unmask_fn', 'settings', 'aspect_ratio_upper_bound']
+
+       def test_update_state_signature(self):
+           """Verify update_augmented_lagrangian_state accepts overrides."""
+           import inspect
+           from constellaration.optimization.augmented_lagrangian import update_augmented_lagrangian_state
+           sig = inspect.signature(update_augmented_lagrangian_state)
+           params = sig.parameters
+           # Must accept penalty_parameters and bounds overrides
+           assert 'penalty_parameters' in params
+           assert 'bounds' in params
+
+
+   class TestALMBridgeFunctionality:
+       """Tests that verify alm_bridge works end-to-end."""
+
+       @pytest.mark.slow
+       def test_create_context_and_step(self, minimal_boundary, minimal_p3_problem):
+           """Integration test: create context and run one step."""
+           from constellaration.optimization.settings import OptimizationSettings
+           # ... create settings ...
+
+           context, initial_state = create_alm_context(
+               minimal_boundary, minimal_p3_problem, settings
+           )
+
+           assert isinstance(context, ALMContext)
+           assert isinstance(initial_state, AugmentedLagrangianState)
+
+           result = step_alm(context, initial_state, budget=10, num_workers=2)
+
+           assert isinstance(result, ALMStepResult)
+           assert isinstance(result.state, AugmentedLagrangianState)
+           assert result.n_evals > 0
+
+       @pytest.mark.slow
+       def test_penalty_override_applied(self, minimal_boundary, minimal_p3_problem):
+           """Test that penalty_override actually modifies behavior."""
+           # ... setup ...
+           import jax.numpy as jnp
+
+           context, state = create_alm_context(...)
+
+           # Run with default penalties
+           result_default = step_alm(context, state, budget=10)
+
+           # Run with boosted penalties
+           boosted = state.penalty_parameters * 10.0
+           result_boosted = step_alm(context, state, budget=10, penalty_override=boosted)
+
+           # Results should differ (optimizer sees different loss landscape)
+           # This is a weak test but catches "override is ignored" bugs
+           assert not jnp.allclose(result_default.state.x, result_boosted.state.x)
+   ```
+
+3. **Pin constellaration version in pyproject.toml**
+
+   ```toml
+   [project.dependencies]
+   constellaration = ">=0.5.0,<0.6.0"  # Pin to minor version
+   ```
+
+   With CI job that tests against `constellaration@main` to catch breakages early:
+
+   ```yaml
+   # .github/workflows/ci.yml
+   jobs:
+     test-constellaration-head:
+       name: Test against constellaration main
+       runs-on: ubuntu-latest
+       continue-on-error: true  # Don't block PRs, but notify
+       steps:
+         - uses: actions/checkout@v4
+         - run: pip install git+https://github.com/proxima-fusion/constellaration@main
+         - run: pytest tests/test_alm_bridge.py -v
+   ```
+
+---
+
+### 8.3 Risk: Divergent Behavior Between Bridge and Original Runner
+
+**Problem:** Subtle differences between `step_alm()` and the original `run()` loop could cause different optimization trajectories, making debugging difficult.
+
+**Mitigations:**
+
+1. **Behavioral equivalence test**
+
+   ```python
+   # tests/test_alm_bridge.py
+
+   @pytest.mark.slow
+   def test_bridge_matches_original_runner():
+       """Verify step_alm produces same trajectory as original run()."""
+       import numpy as np
+       from constellaration.optimization.augmented_lagrangian_runner import run
+       from constellaration.utils.seed_util import seed_everything
+
+       # Setup identical conditions
+       seed_everything(42)
+       boundary = ...
+       problem = ...
+       settings = ...
+
+       # Run original for 3 iterations
+       # (would need to modify run() to return intermediate states, or patch _logging)
+
+       # Run bridge for 3 steps
+       seed_everything(42)
+       context, state = create_alm_context(boundary, problem, settings)
+       states_bridge = [state]
+       for _ in range(3):
+           result = step_alm(context, states_bridge[-1], budget=settings.oracle_settings.budget_initial)
+           states_bridge.append(result.state)
+
+       # Compare (objective, constraint violation) trajectories
+       # Allow small numerical tolerance
+       for i, (orig, bridge) in enumerate(zip(states_orig, states_bridge)):
+           np.testing.assert_allclose(orig.objective, bridge.objective, rtol=1e-5,
+               err_msg=f"Objective diverged at step {i}")
+           np.testing.assert_allclose(orig.constraints, bridge.constraints, rtol=1e-5,
+               err_msg=f"Constraints diverged at step {i}")
+   ```
+
+2. **Deterministic seeding in bridge**
+
+   ```python
+   # alm_bridge.py
+
+   def step_alm(
+       context: ALMContext,
+       state: AugmentedLagrangianState,
+       budget: int,
+       *,
+       seed: int | None = None,  # For reproducibility testing
+       # ... other params ...
+   ) -> ALMStepResult:
+       if seed is not None:
+           import numpy as np
+           np.random.seed(seed)
+       # ... rest of function ...
+   ```
+
+---
+
+### 8.4 Risk: Silent Failures in Multiprocessing
+
+**Problem:** `ProcessPoolExecutor` can silently swallow exceptions in child processes, or fail to propagate them clearly. This makes debugging physics evaluation failures difficult.
+
+**Mitigations:**
+
+1. **Explicit exception handling with context**
+
+   ```python
+   # alm_bridge.py
+
+   class ALMEvaluationError(Exception):
+       """Raised when objective_constraints fails in worker."""
+       def __init__(self, candidate_value, original_error):
+           self.candidate_value = candidate_value
+           self.original_error = original_error
+           super().__init__(f"Evaluation failed for x={candidate_value[:3]}...: {original_error}")
+
+
+   def _safe_objective_constraints(x, scale, problem, unravel_fn, settings, ar_bound):
+       """Wrapper that captures exceptions with context."""
+       try:
+           return objective_constraints(x, scale, problem, unravel_fn, settings, ar_bound)
+       except Exception as e:
+           # Return sentinel that step_alm can detect
+           return (("ERROR", str(e), x.tolist()[:5]), None)
+
+
+   def step_alm(...):
+       # ...
+       for future, candidate in running:
+           if future in completed:
+               result = future.result()
+               if isinstance(result[0][0], str) and result[0][0] == "ERROR":
+                   _, error_msg, x_sample = result[0]
+                   logger.warning(f"Evaluation failed: {error_msg} at x={x_sample}")
+                   # Skip this candidate, don't tell oracle
+                   continue
+               # ... normal processing ...
+   ```
+
+2. **Timeout per evaluation**
+
+   ```python
+   # alm_bridge.py
+
+   EVAL_TIMEOUT_SECONDS = 300  # 5 minutes per evaluation
+
+   def step_alm(...):
+       # ...
+       for future, candidate in running:
+           if future in completed:
+               try:
+                   result = future.result(timeout=EVAL_TIMEOUT_SECONDS)
+               except futures.TimeoutError:
+                   logger.warning(f"Evaluation timed out for candidate")
+                   continue
+               # ...
+   ```
+
+---
+
+### 8.5 Risk: Memory Leaks in Long-Running ASO Loops
+
+**Problem:** Repeated `create_alm_context()` calls or JAX array accumulation could cause memory growth over long optimization runs.
+
+**Mitigations:**
+
+1. **Reuse context across steps** (already in design)
+
+   ```python
+   # Coordinator.produce_candidates_aso()
+   context, state = create_alm_context(...)  # Once
+   for step in range(max_steps):
+       result = step_alm(context, state, ...)  # Reuse context
+       state = result.state
+   ```
+
+2. **Explicit garbage collection between trajectories**
+
+   ```python
+   # coordinator.py
+
+   def produce_candidates_aso(self, ...):
+       try:
+           # ... optimization loop ...
+       finally:
+           # Force cleanup between trajectories
+           import gc
+           gc.collect()
+   ```
+
+3. **Monitor memory in telemetry**
+
+   ```python
+   # coordinator.py
+
+   import psutil
+
+   def _emit_telemetry(self, event_type, state, ...):
+       process = psutil.Process()
+       memory_mb = process.memory_info().rss / 1024 / 1024
+       event = {
+           # ... existing fields ...
+           "memory_mb": memory_mb,
+       }
+   ```
+
+---
+
+### 8.6 Summary: Implementation Checklist for Risks
+
+| Risk | Mitigation | Owner | Priority |
+|------|------------|-------|----------|
+| Multiprocessing duplication | Extract `run_single_outer_iteration()` upstream | constellaration PR | P0 |
+| API drift | Integration tests + version pin | ai-sci-feasible-designs CI | P0 |
+| Behavioral divergence | Equivalence test with seeding | tests/test_alm_bridge.py | P1 |
+| Silent failures | `_safe_objective_constraints` wrapper | alm_bridge.py | P1 |
+| Memory leaks | Context reuse + gc.collect() | coordinator.py | P2 |
+
+---
+
 ## Appendix A: constellaration ALM API Reference
 
 ### AugmentedLagrangianState
