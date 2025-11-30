@@ -87,11 +87,11 @@ class AugmentedLagrangianState(pydantic.BaseModel):
   - Add jaxtyping annotations for array shapes
   - Enable `model_copy()` for immutable updates
 
-- [ ] **2.2 Convert `OptimizerDiagnostics` to Pydantic**
+- [x] **2.2 Convert `OptimizerDiagnostics` to Pydantic**
   - File: `ai_scientist/planner.py`
   - Already has `to_json()` - Pydantic provides this automatically
 
-- [ ] **2.3 Convert `OptimizationDirective` to Pydantic**
+- [x] **2.3 Convert `OptimizationDirective` to Pydantic**
   - File: `ai_scientist/planner.py`
   - Leverage Pydantic's `model_dump()` for serialization
 

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence
+
+import pydantic
 
 from ai_scientist import agent as agent_module
 from ai_scientist import config as ai_config
@@ -34,9 +36,10 @@ class DirectiveSource(Enum):
     FALLBACK = "fallback"
 
 
-@dataclass
-class OptimizationDirective:
+class OptimizationDirective(pydantic.BaseModel):
     """Structured directive from Planner to Coordinator."""
+    model_config = pydantic.ConfigDict(frozen=True)
+
     action: DirectiveAction
     config_overrides: Optional[Mapping[str, Any]] = None
     alm_overrides: Optional[Mapping[str, Any]] = None  # Direct ALM state manipulation
@@ -56,9 +59,10 @@ class OptimizationDirective:
         }
 
 
-@dataclass
-class ConstraintDiagnostic:
+class ConstraintDiagnostic(pydantic.BaseModel):
     """Diagnostic for a single constraint (from real ALM state)."""
+    model_config = pydantic.ConfigDict(frozen=True)
+
     name: str
     violation: float           # max(0, constraint_value)
     penalty: float             # Current penalty parameter
@@ -67,9 +71,10 @@ class ConstraintDiagnostic:
     delta: float = 0.0         # Change from previous step
 
 
-@dataclass
-class OptimizerDiagnostics:
+class OptimizerDiagnostics(pydantic.BaseModel):
     """Rich diagnostic report from real ALM state."""
+    model_config = pydantic.ConfigDict(frozen=True)
+
     step: int
     trajectory_id: int
 
