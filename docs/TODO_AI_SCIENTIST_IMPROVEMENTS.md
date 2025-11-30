@@ -114,7 +114,7 @@ def forward_model(boundary, ideal_mhd_parameters, settings)
     # Single orchestration point for all evaluations
 ```
 
-- [ ] **3.1 Create centralized forward model**
+- [x] **3.1 Create centralized forward model**
   - File: `ai_scientist/forward_model.py` (new)
   - Consolidate `tools.evaluate_p3_set()`, `design_hash()`, caching
   - Single entry point: `forward_model(boundary, settings) -> EvaluationResult`
@@ -123,7 +123,7 @@ def forward_model(boundary, ideal_mhd_parameters, settings)
   - Include: `metrics`, `objective`, `constraints`, `feasibility`, `cache_hit`
   - Use Pydantic for serialization
 
-- [ ] **3.3 Migrate existing callers**
+- [x] **3.3 Migrate existing callers**
   - Update `runner.py`, `coordinator.py` to use new forward model
   - Preserve backward compatibility via `tools.py` wrappers
 

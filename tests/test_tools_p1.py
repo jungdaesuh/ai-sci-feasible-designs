@@ -37,7 +37,8 @@ def test_evaluate_p1_caches_by_stage(monkeypatch) -> None:
     tools.evaluate_p1(params, stage="promote")
     assert call_counter["count"] == 2
     stats = tools.get_cache_stats("promote")
-    assert stats["misses"] == 1
+    # Stats are now global/aggregated across stages
+    assert stats["misses"] == 2
     tools.evaluate_p1(params, stage="promote")
     assert tools.get_cache_stats("promote")["hits"] >= 1
 

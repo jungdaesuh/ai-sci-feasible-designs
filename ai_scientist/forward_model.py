@@ -277,7 +277,7 @@ def compute_objective(
         return float(metrics.aspect_ratio)
 
 
-def _max_violation(margins: Mapping[str, float]) -> float:
+def max_violation(margins: Mapping[str, float]) -> float:
     if not margins:
         return float("inf")
     return float(max(0.0, *[max(0.0, value) for value in margins.values()]))
@@ -352,7 +352,7 @@ def forward_model(
     # 5. Compute Derived Values
     objective = compute_objective(metrics, settings.problem)
     constraints = compute_constraint_margins(metrics, settings.problem)
-    feasibility = _max_violation(constraints)
+    feasibility = max_violation(constraints)
     is_feasible = feasibility <= 1e-2 # Tolerance
 
     evaluation_time = time.time() - start_time
