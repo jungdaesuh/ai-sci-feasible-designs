@@ -82,7 +82,7 @@ class AugmentedLagrangianState(pydantic.BaseModel):
     bounds: jnp.ndarray
 ```
 
-- [ ] **2.1 Convert `TrajectoryState` to Pydantic**
+- [x] **2.1 Convert `TrajectoryState` to Pydantic**
   - File: `ai_scientist/coordinator.py`
   - Add jaxtyping annotations for array shapes
   - Enable `model_copy()` for immutable updates
