@@ -64,7 +64,7 @@ Run the random-search baseline from the repo root via `python -m orchestration.r
 
 Enable with `--aso` flag:
 ```bash
-python -m ai_scientist.runner --aso --experiment-id 1
+python -m ai_scientist.runner --aso
 ```
 
 ASO mode uses real ALM state for supervision decisions. See `ASO_V4_IMPLEMENTATION_GUIDE.md` for details.
