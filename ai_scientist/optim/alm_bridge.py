@@ -15,15 +15,6 @@ import time
 import jax.numpy as jnp
 import numpy as np
 import nevergrad
-from nevergrad.parametrization import parameter as param
-
-# =============================================================================
-# CONSTELLARATION API CONTRACT
-# =============================================================================
-# This module depends on specific constellaration function signatures.
-# If these imports fail or type-check errors occur, constellaration has changed.
-# Last verified: 2025-11-30
-# =============================================================================
 
 from constellaration.optimization.augmented_lagrangian import (
     AugmentedLagrangianState,
@@ -40,7 +31,6 @@ from constellaration.geometry import surface_rz_fourier as rz_fourier
 from constellaration.utils import pytree
 import constellaration.forward_model as forward_model
 import constellaration.problems as problems
-from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
 
 
 @dataclass
@@ -64,41 +54,10 @@ class ALMContext:
     aspect_ratio_upper_bound: Optional[float]
 
 
-def _safe_objective_constraints(
-    x: jnp.ndarray,
-    scale: jnp.ndarray,
-    problem: problems.SingleObjectiveProblem | problems.MHDStableQIStellarator,
-    unravel_fn: Callable[[jnp.ndarray], rz_fourier.SurfaceRZFourier],
-    settings: forward_model.ConstellarationSettings,
-    aspect_ratio_upper_bound: float | None,
-    constraint_shape: tuple[int, ...],
-) -> tuple[
-    tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
-]:
-    """Wrapper for objective_constraints that handles exceptions gracefully."""
-    try:
-        return objective_constraints(
-            x, scale, problem, unravel_fn, settings, aspect_ratio_upper_bound
-        )
-    except Exception as e:
-        # Return high objective/constraints to discourage this point
-        # We use a string error indicator in the first element of the tuple if needed,
-        # but here we follow the pattern of returning a result that won't crash the loop.
-        # However, the guide suggests: return (("ERROR", str(e), x.tolist()[:5]), None)
-        # But objective_constraints return signature is strict (tuple[jnp, jnp], metrics).
-        # constellaration's objective_constraints handles its own exceptions and returns 
-        # NAN_TO_HIGH_VALUE. We will trust it mostly, but wrap strictly for unhandled ones.
-        NAN_VALUE = 1e6
-        objective = jnp.array(NAN_VALUE)
-        print(f"Evaluation failed: {e}")
-        # Use the passed shape to create the fallback constraints
-        return ((objective, jnp.ones(constraint_shape) * NAN_VALUE), None)
-
-
 def create_alm_context(
     boundary: rz_fourier.SurfaceRZFourier,
     problem: problems.SingleObjectiveProblem | problems.MHDStableQIStellarator,
-    settings: OptimizationSettings,
+    settings: OptimizationSettings,  # from constellaration.optimization.settings
     aspect_ratio_upper_bound: Optional[float] = None,
 ) -> Tuple[ALMContext, AugmentedLagrangianState]:
     """
@@ -118,11 +77,11 @@ def create_alm_context(
     mask = rz_fourier.build_mask(
         boundary,
         max_poloidal_mode=settings.max_poloidal_mode,
-        max_toroidal_mode=settings.max_toroidal_mode,
+        max_toroidal_mode=settings.toroidal_modes.max(), # Fix: use max from boundary, not settings
     )
 
     # Flatten to optimization vector
-    initial_guess, unravel_fn = pytree.mask_and_ravel(pytree=boundary, mask=mask)
+    initial_guess, unravel_fn = pytree.mask_and_ravel(boundary, mask)
 
     # Compute scaling
     scale = rz_fourier.compute_infinity_norm_spectrum_scaling_fun(
@@ -135,26 +94,18 @@ def create_alm_context(
     x0 = jnp.array(initial_guess) / scale
 
     # Evaluate initial point
+    from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
     (objective, constraints), _ = objective_constraints(
-        x0,
-        scale,
-        problem,
-        unravel_fn,
-        settings.forward_model_settings,
-        aspect_ratio_upper_bound,
+        x0, scale, problem, unravel_fn,
+        settings.forward_model_settings, aspect_ratio_upper_bound,
     )
 
     # Create initial state
-    assert isinstance(
-        settings.optimizer_settings, AugmentedLagrangianMethodSettings
-    )
     alm_settings = settings.optimizer_settings
-    
     state = AugmentedLagrangianState(
         x=jnp.copy(x0),
         multipliers=jnp.zeros_like(constraints),
-        penalty_parameters=alm_settings.penalty_parameters_initial
-        * jnp.ones_like(constraints),
+        penalty_parameters=alm_settings.penalty_parameters_initial * jnp.ones_like(constraints),
         objective=objective,
         constraints=constraints,
         bounds=jnp.ones_like(x0) * alm_settings.bounds_initial,
@@ -197,11 +148,13 @@ def step_alm(
     Returns:
         ALMStepResult with updated state and metrics
     """
+    from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
+
     # Apply overrides to state before optimization
     if penalty_override is not None:
-        state = state.model_copy(update={"penalty_parameters": penalty_override})
+        state = state.copy(update={"penalty_parameters": penalty_override})
     if bounds_override is not None:
-        state = state.model_copy(update={"bounds": bounds_override})
+        state = state.copy(update={"bounds": bounds_override})
 
     # Setup trust region parametrization
     parametrization = nevergrad.p.Array(
@@ -209,8 +162,6 @@ def step_alm(
         lower=np.array(state.x - state.bounds),
         upper=np.array(state.x + state.bounds),
     )
-    random_state = np.random.get_state()  # noqa: NPY002
-    parametrization.random_state.set_state(random_state)
 
     oracle = nevergrad.optimizers.NGOpt(
         parametrization=parametrization,
@@ -221,51 +172,36 @@ def step_alm(
 
     n_evals = 0
     last_metrics = None
-    
-    # Extract constraint shape for safe fallback
-    constraint_shape = state.constraints.shape
 
     mp_context = multiprocessing.get_context("forkserver")
 
-    with futures.ProcessPoolExecutor(
-        max_workers=num_workers, mp_context=mp_context
-    ) as executor:
-        running_evaluations: list[Tuple[futures.Future, param.Parameter]] = []
+    with futures.ProcessPoolExecutor(max_workers=num_workers, mp_context=mp_context) as executor:
+        running: list[Tuple[futures.Future, Any]] = []
         rest_budget = budget
-        
-        # Using the same batch_mode logic as the original runner (defaulting to False here as not in settings)
-        batch_mode = False
-        
-        # Time limit check omitted as per step-based design, but can be added if needed.
-        
-        while rest_budget or running_evaluations:
+
+        while rest_budget or running:
             # Submit new evaluations
-            while len(running_evaluations) < min(num_workers, rest_budget):
+            while len(running) < min(num_workers, rest_budget):
                 candidate = oracle.ask()
-                
                 future = executor.submit(
-                    _safe_objective_constraints,
+                    objective_constraints,
                     jnp.array(candidate.value),
                     context.scale,
                     context.problem,
                     context.unravel_fn,
                     context.forward_settings,
                     context.aspect_ratio_upper_bound,
-                    constraint_shape,
                 )
-                running_evaluations.append((future, candidate))
+                running.append((future, candidate))
                 rest_budget -= 1
 
             # Wait for completions
-            return_when = (
-                futures.ALL_COMPLETED if batch_mode else futures.FIRST_COMPLETED
-            )
             completed, _ = futures.wait(
-                [f for f, _ in running_evaluations],
-                return_when=return_when,
+                [f for f, _ in running],
+                return_when=futures.FIRST_COMPLETED,
             )
 
-            for future, candidate in running_evaluations:
+            for future, candidate in running:
                 if future in completed:
                     n_evals += 1
                     (obj, cons), metrics = future.result()
@@ -276,10 +212,7 @@ def step_alm(
                         augmented_lagrangian_function(obj, cons, state).item(),
                     )
 
-            # Remove completed from the running list
-            running_evaluations = [
-                (fut, cand) for fut, cand in running_evaluations if fut not in completed
-            ]
+            running = [(f, c) for f, c in running if f not in completed]
 
     # Get final recommendation
     recommendation = oracle.provide_recommendation()
@@ -287,12 +220,8 @@ def step_alm(
 
     # Evaluate final point
     (objective, constraints), final_metrics = objective_constraints(
-        x,
-        context.scale,
-        context.problem,
-        context.unravel_fn,
-        context.forward_settings,
-        context.aspect_ratio_upper_bound,
+        x, context.scale, context.problem, context.unravel_fn,
+        context.forward_settings, context.aspect_ratio_upper_bound,
     )
 
     # Update ALM state

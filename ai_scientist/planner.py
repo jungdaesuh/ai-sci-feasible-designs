@@ -4,16 +4,125 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, List, Mapping, Optional, Sequence
 
 from ai_scientist import agent as agent_module
 from ai_scientist import config as ai_config
+from ai_scientist.config import ASOConfig
 from ai_scientist import memory
 from ai_scientist import rag
 from ai_scientist import tools
 from ai_scientist import tools_api
+
+
+class DirectiveAction(Enum):
+    """Enumerated actions for type safety."""
+    CONTINUE = "CONTINUE"
+    ADJUST = "ADJUST"
+    STOP = "STOP"
+    RESTART = "RESTART"
+
+
+class DirectiveSource(Enum):
+    """Source of the directive for debugging."""
+    LLM = "llm"
+    HEURISTIC = "heuristic"
+    CONVERGENCE = "convergence"
+    FALLBACK = "fallback"
+
+
+@dataclass
+class OptimizationDirective:
+    """Structured directive from Planner to Coordinator."""
+    action: DirectiveAction
+    config_overrides: Optional[Mapping[str, Any]] = None
+    alm_overrides: Optional[Mapping[str, Any]] = None  # Direct ALM state manipulation
+    suggested_params: Optional[Mapping[str, Any]] = None
+    reasoning: str = ""
+    confidence: float = 1.0
+    source: DirectiveSource = DirectiveSource.HEURISTIC
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action.value,
+            "config_overrides": dict(self.config_overrides) if self.config_overrides else None,
+            "alm_overrides": dict(self.alm_overrides) if self.alm_overrides else None,
+            "reasoning": self.reasoning,
+            "confidence": self.confidence,
+            "source": self.source.value,
+        }
+
+
+@dataclass
+class ConstraintDiagnostic:
+    """Diagnostic for a single constraint (from real ALM state)."""
+    name: str
+    violation: float           # max(0, constraint_value)
+    penalty: float             # Current penalty parameter
+    multiplier: float          # Lagrange multiplier (learned importance)
+    trend: str                 # "stable", "increasing_violation", "decreasing_violation"
+    delta: float = 0.0         # Change from previous step
+
+
+@dataclass
+class OptimizerDiagnostics:
+    """Rich diagnostic report from real ALM state."""
+    step: int
+    trajectory_id: int
+
+    # From AugmentedLagrangianState
+    objective: float
+    objective_delta: float
+    max_violation: float
+    constraints_raw: List[float]
+    multipliers: List[float]
+    penalty_parameters: List[float]
+    bounds_norm: float
+
+    # Derived analysis
+    status: str  # "IN_PROGRESS", "STAGNATION", "FEASIBLE_FOUND", "DIVERGING"
+    constraint_diagnostics: List[ConstraintDiagnostic]
+    narrative: List[str]
+    steps_since_improvement: int = 0
+
+    def requires_llm_supervision(self, aso_config: "ASOConfig") -> bool:
+        """Determine if this diagnostic warrants an LLM call."""
+        if aso_config.supervision_mode == "every_step":
+            return True
+        if aso_config.supervision_mode == "periodic":
+            return self.step % aso_config.supervision_interval == 0
+        # Event-triggered
+        return any([
+            self.status == "STAGNATION",
+            self.status == "FEASIBLE_FOUND",
+            self.status == "DIVERGING",
+            any(c.trend == "increasing_violation" for c in self.constraint_diagnostics),
+            self.steps_since_improvement >= aso_config.max_stagnation_steps,
+        ])
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "step": self.step,
+            "objective": round(self.objective, 4),
+            "objective_delta": round(self.objective_delta, 6),
+            "max_violation": round(self.max_violation, 4),
+            "status": self.status,
+            "bounds_norm": round(self.bounds_norm, 4),
+            "constraints": [
+                {
+                    "name": c.name,
+                    "violation": round(c.violation, 4),
+                    "penalty": round(c.penalty, 2),
+                    "multiplier": round(c.multiplier, 4),
+                    "trend": c.trend,
+                }
+                for c in self.constraint_diagnostics
+            ],
+            "narrative": self.narrative,
+        }, indent=2)
 
 
 class PlanningOutcome:

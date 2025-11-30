@@ -1490,11 +1490,11 @@ if args.aso:
 ### Phase 0: ALM Bridge (Priority 0 - Critical Path)
 
 **File: `ai_scientist/optim/alm_bridge.py` (NEW)**
-- [ ] 0.1 Create `ALMStepResult` dataclass
-- [ ] 0.2 Create `ALMContext` dataclass
-- [ ] 0.3 Implement `create_alm_context()` - wraps constellaration setup
-- [ ] 0.4 Implement `step_alm()` - single outer ALM iteration
-- [ ] 0.5 Implement `state_to_boundary_params()` - convert back to dict
+- [x] 0.1 Create `ALMStepResult` dataclass
+- [x] 0.2 Create `ALMContext` dataclass
+- [x] 0.3 Implement `create_alm_context()` - wraps constellaration setup
+- [x] 0.4 Implement `step_alm()` - single outer ALM iteration
+- [x] 0.5 Implement `state_to_boundary_params()` - convert back to dict
 - [ ] 0.6 Unit test: `create_alm_context()` returns valid state
 - [ ] 0.7 Unit test: `step_alm()` reduces violation over iterations
 
@@ -1508,11 +1508,11 @@ if args.aso:
 - [x] 1.5 Add `_aso_config_from_dict()` loader
 
 **File: `ai_scientist/planner.py`**
-- [ ] 1.6 Add `DirectiveAction` enum
-- [ ] 1.7 Add `DirectiveSource` enum
-- [ ] 1.8 Add `OptimizationDirective` dataclass with `alm_overrides` field
-- [ ] 1.9 Add `ConstraintDiagnostic` dataclass with `multiplier` field
-- [ ] 1.10 Add `OptimizerDiagnostics` dataclass with full ALM state fields
+- [x] 1.6 Add `DirectiveAction` enum
+- [x] 1.7 Add `DirectiveSource` enum
+- [x] 1.8 Add `OptimizationDirective` dataclass with `alm_overrides` field
+- [x] 1.9 Add `ConstraintDiagnostic` dataclass with `multiplier` field
+- [x] 1.10 Add `OptimizerDiagnostics` dataclass with full ALM state fields
 
 ### Phase 2: Supervision (Priority 0)
 
