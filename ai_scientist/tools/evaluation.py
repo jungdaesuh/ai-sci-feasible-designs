@@ -10,7 +10,7 @@ import json
 import math
 import numpy as np
 
-from ai_scientist import forward_model as centralized_fm
+import ai_scientist.forward_model as centralized_fm
 from constellaration import forward_model
 
 from ai_scientist.tools.hypervolume import (
