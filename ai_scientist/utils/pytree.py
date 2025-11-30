@@ -1,6 +1,8 @@
+"""Utilities for JAX pytree registration and manipulation."""
+
 import dataclasses
 from collections.abc import Iterable
-from typing import Any, Callable, TypeVar, Union, List, Tuple, Dict
+from typing import Any, Callable, List, Tuple, Type, TypeVar, Union
 
 import jax
 import jax.numpy as jnp
@@ -13,19 +15,12 @@ NpOrJaxArray = Union[np.ndarray, jnp.ndarray]
 
 def pydantic_flatten(
     something: pydantic.BaseModel,
-    meta_fields: List[str] | None = None,
-) -> Tuple[
-    Tuple[Tuple[jtu.GetAttrKey, Any], ...],
-    Tuple[type[pydantic.BaseModel], Tuple[str, ...], Tuple[str, ...], Tuple[Any, ...]],
+    meta_fields: list[str] | None = None,
+) -> tuple[
+    tuple,
+    tuple[type[pydantic.BaseModel], tuple[str, ...], tuple[str, ...], tuple[Any, ...]],
 ]:
-    """A jax pytree compatible implementation of flattening pydantic objects.
-
-    A general pydantic.BaseModel is flattened into a tuple of children and aux_data.
-    aux_data is used to reconstruct the same type of Pydantic in unflatten. meta_fields
-    are used to specify fields that should not be visible to pytree operations. See
-    https://jax.readthedocs.io/en/latest/_autosummary/jax.tree_util.register_dataclass.html
-    for details.
-    """
+    """A jax pytree compatible implementation of flattening pydantic objects."""
 
     if meta_fields is None:
         meta_fields = []
@@ -47,51 +42,22 @@ def pydantic_flatten(
 
 
 def pydantic_unflatten(
-    aux_data: Tuple[
-        type[pydantic.BaseModel], Tuple[str, ...], Tuple[str, ...], Tuple[Any, ...]
+    aux_data: tuple[
+        type[pydantic.BaseModel], tuple[str, ...], tuple[str, ...], tuple[Any, ...]
     ],
     children: Iterable[Any],
 ) -> pydantic.BaseModel:
-    """A jax pytree compatible implementation of un-flattening Pydantic objects.
-
-    pydantic_unflatten is the inverse of pydantic_flatten. Using the type annotation
-    and children-meta_fields split in aux_data, it constructs a new Pydantic object.
-
-    Note that this object will typically not validate against the Pydantic
-    specification. Pytrees are used to manipulate the data stored in leafs and thus can
-    contain anything. Pytrees only make statements about the structure of the data, not
-    the content. An example of data manipulation might be to filter data in a pytree by
-    type:
-
-    ```
-    my_data = MyModel(...)
-    strings = jax.tree_map(lambda x: x if isinstance(x, str) else None, my_data)
-    ```
-
-    See
-    https://jax.readthedocs.io/en/latest/pytrees.html#custom-pytrees-and-initialization
-    for details.
-    """
+    """A jax pytree compatible implementation of un-flattening Pydantic objects."""
     cls, data_fields, meta_fields, metas = aux_data
     kwargs = {
         **dict(zip(data_fields, children)),
         **dict(zip(meta_fields, metas)),
     }
-    # Bypass validation for speed and flexibility during JAX transformations
     return cls.model_construct(**kwargs)
 
 
-def register_pydantic_data(cls: type, meta_fields: List[str] | None = None) -> type:
-    """Register a pydantic.BaseModel class for jax pytree compatibility.
-
-    Args:
-        cls: The pydantic.BaseModel class to register.
-        meta_fields: Fields that should be part of aux_data rather becoming children.
-            Defaults to None.
-
-    Returns:
-        The registered class, to enable the function to be used as a decorator.
-    """
+def register_pydantic_data(cls: type, meta_fields: list[str] | None = None) -> type:
+    """Register a pydantic.BaseModel class for jax pytree compatibility."""
     jtu.register_pytree_with_keys(
         cls,
         lambda x: pydantic_flatten(x, meta_fields),
@@ -102,13 +68,12 @@ def register_pydantic_data(cls: type, meta_fields: List[str] | None = None) -> t
 
 
 PytreeT = TypeVar("PytreeT")
-LeafT = TypeVar("LeafT")
 
 
 @dataclasses.dataclass
 class _LeafInfo:
-    leaf: Union[NpOrJaxArray, float]
-    mask: Union[NpOrJaxArray, None]
+    leaf: NpOrJaxArray | float
+    mask: NpOrJaxArray | None
     is_scalar: bool
 
     @property
@@ -117,25 +82,19 @@ class _LeafInfo:
 
 
 class _UnravelFn:
-    """A picklable callable that reconstructs a pytree from a flat parameter vector.
+    """A picklable callable that reconstructs a pytree from a flat parameter vector."""
 
-    It stores all necessary info (the original pytree treedef and a list of per-leaf
-    info) to reassemble the structure.
-    """
-
-    _leaves_info: List[_LeafInfo]
+    _leaves_info: list[_LeafInfo]
     _treedef: jax.tree_util.PyTreeDef
 
     def __init__(
-        self,
-        leaves_info: List[_LeafInfo],
-        treedef: jax.tree_util.PyTreeDef,
+        self, leaves_info: list[_LeafInfo], treedef: jax.tree_util.PyTreeDef
     ) -> None:
         self._leaves_info = leaves_info
         self._treedef = treedef
 
     def __call__(self, flat: NpOrJaxArray) -> Any:
-        new_leaves: List[Union[NpOrJaxArray, float]] = []
+        new_leaves: list[NpOrJaxArray | float] = []
         pos = 0
         for leaf_info in self._leaves_info:
             if leaf_info.is_masked:
@@ -151,8 +110,9 @@ class _UnravelFn:
                     new_leaf = segment[0].item()
                 else:
                     # Replace the masked positions with the new parameters.
-                    # Note: we assume leaf is array-like if not scalar
-                    new_leaf = jnp.asarray(leaf_info.leaf).at[idx].set(segment)
+                    # Ensure leaf is array
+                    leaf_arr = jnp.asarray(leaf_info.leaf)
+                    new_leaf = leaf_arr.at[idx].set(segment)
                 new_leaves.append(new_leaf)
             else:
                 new_leaves.append(leaf_info.leaf)
@@ -166,85 +126,43 @@ class _UnravelFn:
 def mask_and_ravel(
     pytree: PytreeT,
     mask: PytreeT,
-) -> Tuple[NpOrJaxArray, Callable[[NpOrJaxArray], PytreeT]]:
-    """Ravel a pytree but only include entries where the corresponding mask is True.
-    Returns a 1D array and a picklable unravel function that reconstructs the pytree
-    by inserting new values into the masked locations while keeping other
-    entries unchanged.
-
-    Args:
-        pytree: The pytree to be flattened.
-        mask: A pytree of booleans with the same structure as `pytree`. True indicates
-            the entries to be flattened.
-
-    Returns:
-        A tuple of the flat array and the unravel function.
-    """
+) -> tuple[NpOrJaxArray, Callable[[NpOrJaxArray], PytreeT]]:
+    """Ravel a pytree but only include entries where the corresponding mask is True."""
 
     leaves, treedef = jax.tree_util.tree_flatten(pytree)
     mask_leaves, _ = jax.tree_util.tree_flatten(mask)
 
-    flat_segments: List[NpOrJaxArray] = []
-    leaves_info: List[_LeafInfo] = []
+    flat_segments: list[NpOrJaxArray] = []
+    leaves_info: list[_LeafInfo] = []
     for leaf, leaf_mask in zip(leaves, mask_leaves):
-        # Determine if the leaf is effectively a scalar
-        # We treat python float/int as scalar, and 0-d arrays as scalar if mask is scalar
-        is_leaf_array = hasattr(leaf, "shape") and leaf.shape != ()
-
-        # Check for boolean array mask (explicit array mask)
-        if (
-            isinstance(leaf_mask, (np.ndarray, jnp.ndarray))
-            and leaf_mask.dtype == bool
-            and leaf_mask.shape != ()
-        ) or (
-            hasattr(leaf_mask, "dtype")
-            and leaf_mask.dtype == jnp.bool_
-            and getattr(leaf_mask, "shape", ()) != ()
-        ):
+        if hasattr(leaf_mask, "dtype") and leaf_mask.dtype == jnp.bool_:
             selected = leaf[leaf_mask]
             flat_segments.append(jnp.atleast_1d(selected.ravel()))
             leaves_info.append(_LeafInfo(mask=leaf_mask, leaf=leaf, is_scalar=False))
-
-        # Scalar masks (int 0/1, float 0.0/1.0, bool True/False, or 0-d array)
-        else:
-            # Convert JAX scalar to python scalar for checking
-            if hasattr(leaf_mask, "item"):
-                mask_val = leaf_mask.item()
-            else:
-                mask_val = leaf_mask
-
-            if mask_val not in (0, 1, 0.0, 1.0, False, True):
-                raise ValueError(
-                    f"Unsupported mask value {leaf_mask} for leaf {leaf}. "
-                    "Scalar masks must be 0/1, False/True."
-                )
-
-            is_masked_in = bool(mask_val)
-            
-            if is_masked_in:
-                if is_leaf_array:
-                    # Scalar True mask on array leaf -> select all elements
-                    # Construct full boolean mask to ensure reconstruction consumes all elements
-                    full_mask = jnp.ones_like(leaf, dtype=bool)
-                    flat_segments.append(leaf.ravel())
-                    leaves_info.append(
-                        _LeafInfo(mask=full_mask, leaf=leaf, is_scalar=False)
-                    )
-                else:
-                    # Scalar True mask on scalar leaf
-                    flat_segments.append(jnp.atleast_1d(leaf))
-                    leaves_info.append(
-                        _LeafInfo(
-                            mask=jnp.array([True]), leaf=leaf, is_scalar=True
-                        )
-                    )
-            else:
-                # Mask is False/0 -> ignore leaf
+        elif isinstance(leaf_mask, float) or (hasattr(leaf_mask, "dtype") and jnp.issubdtype(leaf_mask.dtype, jnp.floating)):
+             # Float mask: 0.0 or 1.0
+            val = float(leaf_mask)
+            if val not in (0.0, 1.0):
+                raise ValueError("Only 0.0 and 1.0 are supported as float masks.")
+            is_scalar = True
+            if val == 1.0:
+                flat_segments.append(jnp.atleast_1d(leaf))
                 leaves_info.append(
-                    _LeafInfo(
-                        leaf=leaf, mask=None, is_scalar=not is_leaf_array
-                    )
+                    _LeafInfo(mask=jnp.array([True]), leaf=leaf, is_scalar=is_scalar)
                 )
+            else:
+                leaves_info.append(_LeafInfo(leaf=leaf, mask=None, is_scalar=is_scalar))
+        elif leaf_mask is True: # Handle boolean True/False if mask is not array
+             flat_segments.append(jnp.atleast_1d(leaf))
+             leaves_info.append(
+                 _LeafInfo(mask=jnp.array([True]), leaf=leaf, is_scalar=True)
+             )
+        elif leaf_mask is False:
+             leaves_info.append(_LeafInfo(leaf=leaf, mask=None, is_scalar=True))
+        else:
+            raise ValueError(
+                f"Unsupported mask type {type(leaf_mask)} for leaf {leaf}."
+            )
 
     if flat_segments:
         flat = jnp.concatenate(flat_segments)
