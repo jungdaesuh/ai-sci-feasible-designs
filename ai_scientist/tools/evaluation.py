@@ -1,4 +1,4 @@
-"""Physics tool wrappers for the ConStellaration AI Scientist."""
+"""Physics evaluation wrappers and caching logic."""
 
 from __future__ import annotations
 
@@ -7,16 +7,18 @@ import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 
 import numpy as np
-from pymoo.indicators import hv as pymoo_hv
 
-from ai_scientist import rag
-from ai_scientist import memory
 from constellaration import forward_model
 from constellaration.geometry import surface_rz_fourier
+
+from ai_scientist.tools.hypervolume import (
+    _hypervolume_minimization,
+    _objective_vector,
+    _P3_REFERENCE_POINT,
+)
 
 _DEFAULT_RELATIVE_TOLERANCE = 1e-2
 _CANONICAL_PRECISION = 1e-8
@@ -24,7 +26,6 @@ _DEFAULT_SCHEMA_VERSION = 1
 _DEFAULT_ROUNDING = 1e-6
 _EVALUATION_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _CACHE_STATS: Dict[str, Dict[str, int]] = defaultdict(lambda: {"hits": 0, "misses": 0})
-_P3_REFERENCE_POINT: Tuple[float, float] = (1.0, 20.0)
 
 
 @dataclass(frozen=True)
@@ -42,37 +43,6 @@ class BoundaryParams:
     """Container for surface parameters that may evolve in future waves."""
 
     params: Mapping[str, Any]
-
-
-@dataclass(frozen=True)
-class P3Summary:
-    """Compact summary of the per-cycle P3 pareto front and hypervolume."""
-
-    hv_score: float
-    reference_point: Tuple[float, float]
-    feasible_count: int
-    archive_size: int
-    pareto_entries: Tuple["ParetoEntry", ...]
-
-
-@dataclass(frozen=True)
-class ParetoEntry:
-    design_hash: str
-    seed: int
-    stage: str
-    gradient: float
-    aspect_ratio: float
-    objective: float
-    feasibility: float
-
-    def as_mapping(self) -> Mapping[str, float]:
-        return {
-            "seed": float(self.seed),
-            "gradient": self.gradient,
-            "aspect_ratio": self.aspect_ratio,
-            "objective": self.objective,
-            "feasibility": self.feasibility,
-        }
 
 
 def _quantize_float(value: float, *, precision: float = _CANONICAL_PRECISION) -> float:
@@ -163,34 +133,6 @@ def _coefficient_from_matrix(matrix: np.ndarray, m: int, n: int, schema_ntor: in
     if column < 0 or column >= matrix.shape[1]:
         return 0.0
     return float(matrix[m, column])
-
-
-def structured_flatten(
-    params: Mapping[str, Any] | BoundaryParams,
-    schema: FlattenSchema | None = None,
-) -> tuple[np.ndarray, FlattenSchema]:
-    """Flatten Fourier coefficients with deterministic ordering and schema metadata.
-
-    The layout is `[r_cos modes..., z_sin modes...]` with n ranging from `-ntor`
-    to `ntor` for each m in `[0, mpol]`. Missing coefficients are zero-padded and
-    values are rounded to the schema precision to stabilize hashes and caches.
-    """
-
-    params_map = _ensure_mapping(params)
-    active_schema = schema or _derive_schema_from_params(params_map)
-    rounding = active_schema.rounding
-
-    r_cos = np.asarray(params_map.get("r_cos", []), dtype=float)
-    z_sin = np.asarray(params_map.get("z_sin", []), dtype=float)
-
-    values: list[float] = []
-    for matrix in (r_cos, z_sin):
-        for m in range(active_schema.mpol + 1):
-            for n in range(-active_schema.ntor, active_schema.ntor + 1):
-                coefficient = _coefficient_from_matrix(matrix, m, n, active_schema.ntor)
-                values.append(_quantize_float(coefficient, precision=rounding))
-
-    return np.asarray(values, dtype=float), active_schema
 
 
 def _evaluate_cached_stage(
@@ -406,130 +348,6 @@ def _p3_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
     return _max_violation(margins)
 
 
-def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
-    gradient = float(metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0))
-    aspect = float(metrics.get("aspect_ratio", 1e9)) # Large value if aspect ratio is missing
-    return -gradient, aspect
-
-
-def _extract_p3_point(metrics: Mapping[str, Any]) -> Tuple[float, float]:
-    vector = _objective_vector(metrics)
-    return -vector[0], vector[1]
-
-
-def _dominates(a: Tuple[float, float], b: Tuple[float, float]) -> bool:
-    """Return True if objective a Pareto dominates b (higher gradient, lower aspect)."""
-
-    higher_gradient = a[0] >= b[0]
-    lower_aspect = a[1] <= b[1]
-    strict = a[0] > b[0] or a[1] < b[1]
-    return higher_gradient and lower_aspect and strict
-
-
-def _hypervolume_minimization(
-    vectors: Sequence[Tuple[float, float]],
-    reference_point: Tuple[float, float],
-) -> float:
-    if not vectors:
-        return 0.0
-    indicator = pymoo_hv.Hypervolume(ref_point=np.asarray(reference_point, dtype=float))
-    output = indicator(np.asarray(vectors, dtype=float))
-    return float(output if output is not None else 0.0)
-
-
-def summarize_p3_candidates(
-    candidates: Sequence[Mapping[str, Any] | dict[str, Any]],
-    *,
-    reference_point: Tuple[float, float] = _P3_REFERENCE_POINT,
-) -> P3Summary:
-    """Produce the hypervolume score and all non-dominated seeds for a candidate batch."""
-
-    @dataclass(frozen=True)
-    class _P3Entry:
-        gradient: float
-        aspect: float
-        seed: int
-        evaluation: Mapping[str, Any]
-        feasibility: float
-        design_hash: str
-        design_hash: str
-
-    entries: list[_P3Entry] = []
-    for candidate in candidates:
-        design_id = candidate.get("design_hash")
-        if design_id is None:
-            design_id = design_hash(candidate.get("params", {}))
-        design_id = str(design_id)
-        eval_metrics = candidate["evaluation"]["metrics"]
-        gradient, aspect = _extract_p3_point(eval_metrics)
-        seed = int(candidate.get("seed", -1))
-        feasibility = float(candidate["evaluation"]["feasibility"])
-        entries.append(
-            _P3Entry(
-                design_hash=design_id,
-                gradient=gradient,
-                aspect=aspect,
-                seed=seed,
-                evaluation=candidate["evaluation"],
-                feasibility=feasibility,
-            )
-        )
-
-    hv_vectors: list[Tuple[float, float]] = []
-    for entry in entries:
-        if entry.feasibility > _DEFAULT_RELATIVE_TOLERANCE:
-            continue
-        hv_vectors.append((-entry.gradient, entry.aspect))
-
-    pareto_entries: list[ParetoEntry] = []
-    for current_index, entry in enumerate(entries):
-        if entry.feasibility > _DEFAULT_RELATIVE_TOLERANCE:
-            continue
-        point = (entry.gradient, entry.aspect)
-        dominated = False
-        for other_index, other in enumerate(entries):
-            if other_index == current_index:
-                continue
-            if other.feasibility > _DEFAULT_RELATIVE_TOLERANCE:
-                continue
-            if _dominates((other.gradient, other.aspect), point):
-                dominated = True
-                break
-        if dominated:
-            continue
-        pareto_entries.append(
-            ParetoEntry(
-                design_hash=entry.design_hash,
-                seed=entry.seed,
-                stage=str(entry.evaluation.get("stage", "")),
-                gradient=entry.gradient,
-                aspect_ratio=entry.aspect,
-                objective=float(entry.evaluation["objective"]),
-                feasibility=entry.feasibility,
-            )
-        )
-
-    pareto_entries.sort(key=lambda item: (-item.gradient, item.aspect_ratio))
-    return P3Summary(
-        hv_score=_hypervolume_minimization(hv_vectors, reference_point),
-        reference_point=reference_point,
-        feasible_count=sum(
-            1 for entry in entries if entry.feasibility <= _DEFAULT_RELATIVE_TOLERANCE
-        ),
-        archive_size=len(pareto_entries),
-        pareto_entries=tuple(pareto_entries),
-    )
-
-
-def retrieve_rag(
-    query: str, *, k: int = 3, index_path: Path | str | None = None
-) -> list[dict[str, str]]:
-    """Expose RAG retrieval via the ai_scientist/rag_index.db index (Phase 3)."""
-
-    index = Path(index_path) if index_path is not None else rag.DEFAULT_INDEX_PATH
-    return rag.retrieve(query=query, k=k, index_path=index)
-
-
 def make_boundary_from_params(
     params: Mapping[str, Any] | BoundaryParams,
 ) -> surface_rz_fourier.SurfaceRZFourier:
@@ -553,45 +371,6 @@ def make_boundary_from_params(
         payload.setdefault("n_field_periods", int(params_map["nfp"]))
 
     return surface_rz_fourier.SurfaceRZFourier(**payload)
-
-
-def propose_boundary(
-    params: Mapping[str, Any] | BoundaryParams,
-    *,
-    perturbation_scale: float = 0.05,
-    seed: int | None = None,
-) -> dict[str, Any]:
-    """Perturb a given boundary parameter set with random noise."""
-    params_map = _ensure_mapping(params)
-    rng = np.random.default_rng(seed)
-    new_params: dict[str, Any] = {}
-    
-    for key, value in params_map.items():
-        if key in ("r_cos", "z_sin", "r_sin", "z_cos"):
-            if value is None:
-                new_params[key] = None
-                continue
-            arr = np.asarray(value, dtype=float)
-            noise = rng.normal(scale=perturbation_scale, size=arr.shape)
-            new_params[key] = (arr + noise).tolist()
-        else:
-            new_params[key] = value
-            
-    # Ensure symmetry constraints if flag is present
-    if new_params.get("is_stellarator_symmetric"):
-        if "r_cos" in new_params and new_params["r_cos"] is not None:
-            r_cos = np.asarray(new_params["r_cos"])
-            if r_cos.ndim > 1:
-                center_idx = r_cos.shape[1] // 2
-                if center_idx > 0:
-                    r_cos[0, :center_idx] = 0.0
-                new_params["r_cos"] = r_cos.tolist()
-        if "z_sin" in new_params and new_params["z_sin"] is not None:
-            z_sin = np.asarray(new_params["z_sin"])
-            z_sin[0, :] = 0.0
-            new_params["z_sin"] = z_sin.tolist()
-            
-    return new_params
 
 
 def evaluate_p1(
@@ -769,205 +548,6 @@ def evaluate_p3_set(
     }
 
 
-def normalized_constraint_distance_sampler(
-    base_designs: Sequence[Mapping[str, Sequence[float] | float]],
-    *,
-    normalized_distances: Sequence[float],
-    proposal_count: int,
-    jitter_scale: float = 0.01,
-    rng: np.random.Generator | None = None,
-    include_distances: bool = False,
-) -> list[Mapping[str, float | Sequence[float]]]:
-    """Constraint-aware sampler for Task X.6 (docs/TASKS_CODEX_MINI.md:233).
-
-    Designs with smaller normalized constraint distances are preferred so the curriculum
-    nudges proposals toward near-feasible regions.
-    """
-
-    if proposal_count <= 0:
-        return []
-
-    if rng is None:
-        rng = np.random.default_rng()
-
-    total_candidates = len(base_designs)
-    if total_candidates == 0:
-        return []
-
-    distances = np.asarray(normalized_distances, dtype=float)
-    if distances.shape[0] != total_candidates:
-        raise ValueError("normalized_distances must align with base_designs")
-
-    clipped = np.clip(distances, 0.0, 1.0)
-    weights = (1.0 - clipped) + 1e-3
-    weights_sum = float(np.sum(weights))
-    if weights_sum <= 0.0:
-        weights = np.ones_like(weights)
-        weights_sum = float(weights.size)
-
-    probabilities = (weights / weights_sum).astype(float)
-    chosen_indices = rng.choice(total_candidates, size=proposal_count, p=probabilities)
-    proposals: list[Mapping[str, float | Sequence[float]]] = []
-
-    for idx in chosen_indices:
-        candidate = base_designs[idx]
-        perturbed: dict[str, float | Sequence[float]] = {}
-        for key, value in candidate.items():
-            array = np.asarray(value, dtype=float)
-            jitter = rng.normal(scale=jitter_scale, size=array.shape)
-            proposal_array = array + jitter
-            if proposal_array.shape == ():
-                perturbed[key] = float(proposal_array)
-            else:
-                perturbed[key] = proposal_array.tolist()
-        if include_distances:
-            proposals.append(
-                {
-                    "params": perturbed,
-                    "normalized_constraint_distance": float(clipped[idx]),
-                }
-            )
-        else:
-            proposals.append(perturbed)
-
-    return proposals
-
-
-def recombine_designs(
-    parent_a: Mapping[str, Any] | BoundaryParams,
-    parent_b: Mapping[str, Any] | BoundaryParams,
-    *,
-    alpha: float | None = None,
-    seed: int | None = None,
-) -> dict[str, Any]:
-    """Perform geometric crossover between two parent designs via coefficient interpolation.
-    
-    Args:
-        parent_a: First parent boundary parameters.
-        parent_b: Second parent boundary parameters.
-        alpha: Interpolation weight (0.0 = parent_b, 1.0 = parent_a). 
-               If None, a random value in [0, 1] is chosen.
-        seed: Random seed for alpha generation if alpha is None.
-    
-    Returns:
-        A new parameter dictionary representing the interpolated boundary.
-    """
-    params_a = _ensure_mapping(parent_a)
-    params_b = _ensure_mapping(parent_b)
-    
-    rng = np.random.default_rng(seed)
-    mix_alpha = alpha if alpha is not None else rng.random()
-    
-    # Ensure we mix in Fourier space
-    # We need to align shapes. Assuming similar templates for now.
-    # TODO: Handle mismatching shapes by zero-padding?
-    # For now, assume they are compatible or truncation happens naturally.
-    
-    new_params: dict[str, Any] = {}
-    
-    # Keys to interpolate
-    keys = ["r_cos", "z_sin", "r_sin", "z_cos"]
-    
-    for key in keys:
-        val_a = np.asarray(params_a.get(key, []), dtype=float)
-        val_b = np.asarray(params_b.get(key, []), dtype=float)
-        
-        if val_a.size == 0 and val_b.size == 0:
-            continue
-        
-        # Handle potentially different shapes (padding)
-        shape_a = val_a.shape
-        shape_b = val_b.shape
-        
-        if shape_a != shape_b:
-            # Determine max shape
-            max_rows = max(shape_a[0] if len(shape_a) > 0 else 0, shape_b[0] if len(shape_b) > 0 else 0)
-            max_cols = max(shape_a[1] if len(shape_a) > 1 else 0, shape_b[1] if len(shape_b) > 1 else 0)
-            
-            target_shape = (max_rows, max_cols)
-            
-            # Pad A
-            pad_a = np.zeros(target_shape, dtype=float)
-            if val_a.size > 0:
-                pad_a[:shape_a[0], :shape_a[1]] = val_a
-            val_a = pad_a
-            
-            # Pad B
-            pad_b = np.zeros(target_shape, dtype=float)
-            if val_b.size > 0:
-                pad_b[:shape_b[0], :shape_b[1]] = val_b
-            val_b = pad_b
-            
-        # Interpolate
-        new_val = mix_alpha * val_a + (1.0 - mix_alpha) * val_b
-        new_params[key] = new_val.tolist()
-        
-    # Copy metadata from parent A (or B)
-    new_params["n_field_periods"] = params_a.get("n_field_periods", params_b.get("n_field_periods", 1))
-    new_params["is_stellarator_symmetric"] = params_a.get("is_stellarator_symmetric", True)
-    
-    return new_params
-
-
-def structured_unflatten(
-    flattened_vector: np.ndarray,
-    schema: FlattenSchema,
-) -> Mapping[str, Any]:
-    """Convert a flattened array of Fourier coefficients back to a dictionary of parameters.
-
-    Args:
-        flattened_vector: A 1D numpy array of Fourier coefficients.
-        schema: The FlattenSchema used to flatten the original parameters.
-
-    Returns:
-        A dictionary of parameters with 'r_cos', 'z_sin', etc.
-    """
-    params: dict[str, Any] = {}
-    
-    # Initialize matrices with zeros based on schema
-    r_cos_matrix = np.zeros((schema.mpol + 1, 2 * schema.ntor + 1), dtype=float)
-    z_sin_matrix = np.zeros((schema.mpol + 1, 2 * schema.ntor + 1), dtype=float)
-    
-    offset = 0
-    
-    # Fill r_cos
-    for m in range(schema.mpol + 1):
-        for n_idx in range(2 * schema.ntor + 1): # Corresponds to n from -ntor to +ntor
-            if offset < len(flattened_vector):
-                r_cos_matrix[m, n_idx] = flattened_vector[offset]
-                offset += 1
-            else:
-                break
-        if offset >= len(flattened_vector):
-            break
-            
-    # Fill z_sin
-    for m in range(schema.mpol + 1):
-        for n_idx in range(2 * schema.ntor + 1): # Corresponds to n from -ntor to +ntor
-            if offset < len(flattened_vector):
-                z_sin_matrix[m, n_idx] = flattened_vector[offset]
-                offset += 1
-            else:
-                break
-        if offset >= len(flattened_vector):
-            break
-
-    # Convert n_idx back to n value for mapping to original structure.
-    # The current structured_flatten maps (m,n) coefficients for n from -ntor to ntor.
-    # The matrix representation uses index 0 to 2*ntor for n from -ntor to ntor.
-    # So n_idx maps directly.
-    
-    params["r_cos"] = r_cos_matrix.tolist()
-    params["z_sin"] = z_sin_matrix.tolist()
-    
-    # Assuming n_field_periods and is_stellarator_symmetric are carried over from original.
-    # We will need to ensure these are set correctly when reconstructing.
-    # For now, this function only reconstructs the Fourier coefficients.
-    # Metadata like n_field_periods should be handled by the caller or passed through.
-
-    return params
-
-
 def get_cache_stats(stage: str) -> Mapping[str, int]:
     """Return hit/miss counts for a given stage."""
 
@@ -979,43 +559,3 @@ def clear_evaluation_cache() -> None:
 
     _EVALUATION_CACHE.clear()
     _CACHE_STATS.clear()
-
-
-def write_note(
-    content: str,
-    *,
-    filename: str | None = None,
-    out_dir: Path | str | None = None,
-    world_model: Any | None = None,
-    experiment_id: int,
-    cycle: int,
-    memory_db: str | Path | None = None,
-) -> str:
-    """Write a literature note to disk and, if context is provided, persist it in the world model."""
-
-    target_dir = Path(out_dir) if out_dir else Path("reports/notes")
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    if not filename:
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
-        filename = f"note_{digest}.md"
-
-    path = target_dir / filename
-    path.write_text(content, encoding="utf-8")
-
-    target_wm = world_model
-    owned = False
-    if target_wm is None and memory_db is not None:
-        target_wm = memory.WorldModel(memory_db)
-        owned = True
-    if target_wm is None:
-        raise ValueError("write_note requires world_model or memory_db for persistence.")
-    try:
-        target_wm.log_note(experiment_id=experiment_id, cycle=cycle, content=content)
-    except Exception as exc:  # pragma: no cover - safety for agent path
-        print(f"[write_note] failed to log note to world_model: {exc}")
-    finally:
-        if owned:
-            target_wm.close()
-
-    return f"Note saved to {path}: {content[:50]}..."

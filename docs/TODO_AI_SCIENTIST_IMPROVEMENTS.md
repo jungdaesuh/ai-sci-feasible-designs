@@ -57,7 +57,7 @@ This document consolidates all improvement opportunities for the `ai_scientist` 
   - `repository.py` - CRUD operations
   - `graph.py` - `PropertyGraph` class
 
-- [ ] **1.6 Split `tools.py` into submodule**
+- [x] **1.6 Split `tools.py` into submodule**
   - Create `ai_scientist/tools/` directory
   - `evaluation.py` - `evaluate_p3_set()`, physics wrappers
   - `design_manipulation.py` - `propose_boundary()`, `recombine_designs()`
