@@ -1,6 +1,11 @@
 from typing import Any, Mapping
 
-from ai_scientist import runner
+from ai_scientist import runner, config as ai_config
+from ai_scientist.fidelity_controller import FidelityController
+
+def _make_controller() -> FidelityController:
+    cfg = ai_config.load_experiment_config()
+    return FidelityController(cfg)
 
 
 def _entry(
@@ -38,7 +43,8 @@ def test_rank_candidates_prioritizes_nondominated_designs():
             _entry("hash-c", gradient=1.6, aspect=1.8, feasibility=0.0),
         ]
     }
-    ranked = runner._rank_candidates_for_promotion(
+    controller = _make_controller()
+    ranked = controller.get_promotion_candidates(
         entries, promote_limit=2, reference_point=runner.P3_REFERENCE_POINT
     )
     assert [entry["design_hash"] for entry in ranked] == ["hash-c", "hash-a"]
@@ -62,7 +68,8 @@ def test_rank_candidates_fills_from_infeasible_when_needed():
             ),
         ]
     }
-    ranked = runner._rank_candidates_for_promotion(
+    controller = _make_controller()
+    ranked = controller.get_promotion_candidates(
         entries, promote_limit=2, reference_point=runner.P3_REFERENCE_POINT
     )
     assert len(ranked) == 2

@@ -33,6 +33,7 @@ from ai_scientist import reporting
 from ai_scientist import tools
 from ai_scientist.budget_manager import BudgetController, BudgetSnapshot, CycleBudgetFeedback
 from ai_scientist.coordinator import Coordinator
+from ai_scientist.fidelity_controller import CycleSummary, FidelityController
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogateBundle, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
@@ -912,18 +913,10 @@ def _surrogate_rank_screen_candidates(
     return selected
 
 
-def _time_exceeded(start: float, limit_minutes: float) -> bool:
-    elapsed = time.perf_counter() - start
-    return elapsed >= limit_minutes * 60
 
 
-@dataclass
-class CycleSummary:
-    cycle: int
-    objective: float | None
-    feasibility: float | None
-    hv: float | None
-    stage: str
+
+
 
 
 def _stage_rank(stage: str | None, promote_stage: str) -> int:
@@ -1046,119 +1039,7 @@ def _latest_evaluations_by_design(
     return latest
 
 
-def _extract_objectives(entry: Mapping[str, Any], problem_type: str = "p3") -> tuple[float, float]:
-    metrics = entry["evaluation"]["metrics"]
-    
-    if problem_type == "p1":
-        # P1: minimize max_elongation.
-        # We treat "gradient" slot as -max_elongation (higher is better)
-        elong = float(metrics.get("max_elongation", 0.0))
-        return -elong, 0.0
 
-    # P3/P2 Check
-    if "minimum_normalized_magnetic_gradient_scale_length" in metrics:
-        gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
-        aspect = float(metrics.get("aspect_ratio", 0.0))
-        return gradient, aspect
-    
-    # Fallback if metrics missing for non-P1 (or legacy behavior)
-    elong = float(metrics.get("max_elongation", 0.0))
-    return -elong, 0.0
-
-
-def _objective_proxy(entry: Mapping[str, Any], problem_type: str = "p3") -> float:
-    gradient, aspect = _extract_objectives(entry, problem_type=problem_type)
-    return gradient - aspect
-
-
-def _crowding_distance(
-    entries_by_design: Mapping[str, Mapping[str, Any]],
-    problem_type: str = "p3",
-) -> dict[str, float]:
-    if not entries_by_design:
-        return {}
-    values: list[tuple[str, float, float]] = []
-    for design_hash, entry in entries_by_design.items():
-        gradient, aspect = _extract_objectives(entry, problem_type=problem_type)
-        values.append((design_hash, float(gradient), float(aspect)))
-    distances = {design_hash: 0.0 for design_hash in entries_by_design}
-    if len(values) <= 2:
-        for design_hash in distances:
-            distances[design_hash] = float("inf")
-        return distances
-    sorted_grad = sorted(values, key=lambda item: item[1], reverse=True)
-    grad_values = [item[1] for item in sorted_grad]
-    grad_span = max(max(grad_values) - min(grad_values), 1e-9)
-    distances[sorted_grad[0][0]] = float("inf")
-    distances[sorted_grad[-1][0]] = float("inf")
-    for pos in range(1, len(sorted_grad) - 1):
-        prev_val = sorted_grad[pos - 1][1]
-        next_val = sorted_grad[pos + 1][1]
-        distances[sorted_grad[pos][0]] += abs(next_val - prev_val) / grad_span
-
-    sorted_aspect = sorted(values, key=lambda item: item[2], reverse=False)
-    aspect_values = [item[2] for item in sorted_aspect]
-    aspect_span = max(max(aspect_values) - min(aspect_values), 1e-9)
-    distances[sorted_aspect[0][0]] = float("inf")
-    distances[sorted_aspect[-1][0]] = float("inf")
-    for pos in range(1, len(sorted_aspect) - 1):
-        prev_val = sorted_aspect[pos - 1][2]
-        next_val = sorted_aspect[pos + 1][2]
-        distances[sorted_aspect[pos][0]] += abs(next_val - prev_val) / aspect_span
-    return distances
-
-
-def _rank_candidates_for_promotion(
-    entries_by_design: Mapping[str, Mapping[str, Any]],
-    promote_limit: int,
-    reference_point: Tuple[float, float],
-    problem_type: str = "p3",
-) -> list[Mapping[str, Any]]:
-    if not entries_by_design:
-        return []
-    summary = tools.summarize_p3_candidates(
-        list(entries_by_design.values()), reference_point=reference_point
-    )
-    # Phase 5 HV/Objective (docs/AI_SCIENTIST_UNIFIED_ROADMAP.md §5):
-    # rank promotions by feasibility first, then objective proxy.
-    ordered_hashes = [entry.design_hash for entry in summary.pareto_entries]
-    ranked: list[Mapping[str, Any]] = sorted(
-        (
-            entries_by_design[h]
-            for h in ordered_hashes
-            if h in entries_by_design
-        ),
-        key=lambda entry: (
-            0.0 if _feasibility_value(entry) <= FEASIBILITY_CUTOFF else 1.0,
-            _feasibility_value(entry),
-            -_objective_proxy(entry, problem_type=problem_type),
-        ),
-    )
-    if len(ranked) >= promote_limit:
-        return ranked[:promote_limit]
-    remaining = {
-        design_hash: entry
-        for design_hash, entry in entries_by_design.items()
-        if design_hash not in {entry.design_hash for entry in summary.pareto_entries}
-    }
-    crowding = _crowding_distance(remaining, problem_type=problem_type)
-
-    def _sort_key(design_hash: str) -> tuple[float, float, float, float]:
-        entry = remaining[design_hash]
-        feas = _feasibility_value(entry)
-        feasible_flag = 0.0 if feas <= FEASIBILITY_CUTOFF else 1.0
-        return (
-            feasible_flag,
-            -crowding.get(design_hash, 0.0),
-            feas,
-            -_objective_proxy(entry, problem_type=problem_type),
-        )
-
-    for design_hash in sorted(remaining, key=_sort_key):
-        ranked.append(remaining[design_hash])
-        if len(ranked) >= promote_limit:
-            break
-    return ranked
 
 
 def _persist_pareto_archive(
@@ -1222,198 +1103,10 @@ def _persist_pareto_archive(
     return logged_hashes, metrics_by_hash
 
 
-def _relative_objective_improvement(
-    history: list[CycleSummary], lookback: int
-) -> float:
-    if len(history) <= lookback:
-        return 0.0
-    earlier = history[-lookback - 1].objective
-    latest = history[-1].objective
-    if earlier is None or latest is None:
-        return 0.0
-    diff = earlier - latest
-    denom = abs(earlier) if abs(earlier) > 1e-6 else 1.0
-    return float(diff / denom)
 
 
-def _should_transition_s1_to_s2(
-    history: list[CycleSummary], gate_cfg: ai_config.StageGateConfig
-) -> bool:
-    if not history:
-        return False
-    last = history[-1]
-    if last.feasibility is not None:
-        triggered = last.feasibility <= gate_cfg.s1_to_s2_feasibility_margin
-        print(
-            f"[runner][stage-gate] S1→S2 feasibility check: margin={last.feasibility:.5f} "
-            f"<= {gate_cfg.s1_to_s2_feasibility_margin:.5f} -> {triggered}"
-        )
-        if triggered:
-            return True
-    improvement = _relative_objective_improvement(
-        history, gate_cfg.s1_to_s2_lookback_cycles
-    )
-    triggered_improvement = improvement >= gate_cfg.s1_to_s2_objective_improvement
-    print(
-        f"[runner][stage-gate] S1→S2 objective improvement check: "
-        f"{improvement:.4f} >= {gate_cfg.s1_to_s2_objective_improvement:.4f} -> {triggered_improvement}"
-    )
-    return triggered_improvement
 
 
-def _should_transition_s2_to_s3(
-    history: list[CycleSummary],
-    gate_cfg: ai_config.StageGateConfig,
-    governance_cfg: ai_config.GovernanceConfig,
-    world_model: memory.WorldModel,
-    experiment_id: int,
-    current_cycle: int,
-    total_cycles: int,
-) -> bool:
-    avg_delta = world_model.average_recent_hv_delta(
-        experiment_id, governance_cfg.hv_lookback
-    )
-    if avg_delta is not None:
-        triggered_delta = avg_delta <= gate_cfg.s2_to_s3_hv_delta
-        print(
-            f"[runner][stage-gate] S2→S3 average HV delta over "
-            f"{governance_cfg.hv_lookback} cycles: {avg_delta:.4f} <= {gate_cfg.s2_to_s3_hv_delta:.4f} -> {triggered_delta}"
-        )
-        if triggered_delta:
-            return True
-    else:
-        print(
-            f"[runner][stage-gate] insufficient HV delta history ({len(history)} cycles) "
-            f"to evaluate lookback={governance_cfg.hv_lookback}; deferring promotion"
-        )
-    exhausted = current_cycle >= total_cycles
-    print(
-        f"[runner][stage-gate] S2→S3 budget check: cycle={current_cycle} >= total={total_cycles} -> {exhausted}"
-    )
-    return exhausted
-
-
-def _process_worker_initializer() -> None:
-    """Limit OpenMP threads inside process workers (Phase 5 observability safeguard)."""
-    os.environ["OMP_NUM_THREADS"] = "1"
-
-
-def _evaluate_stage(
-    candidates: Iterable[Mapping[str, Any]],
-    stage: str,
-    budgets: ai_config.BudgetConfig,
-    cycle_start: float,
-    evaluate_fn: ProblemEvaluator,
-    *,
-    sleep_per_eval: float = 0.0,
-) -> list[dict[str, Any]]:
-    """Evaluate candidates at a given fidelity, respecting wall-clock budget."""
-
-    results: list[dict[str, Any]] = []
-    wall_limit = budgets.wall_clock_minutes
-
-    if budgets.n_workers <= 1:
-        for candidate in candidates:
-            if _time_exceeded(cycle_start, wall_limit):
-                break
-            params = candidate["params"]
-            design_id = candidate.get("design_hash") or tools.design_hash(params)
-            try:
-                evaluation = evaluate_fn(params, stage=stage)
-                evaluation.setdefault("vmec_status", "ok")
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"[runner][stage-eval] Failed evaluation for design {design_id} "
-                    f"(seed={candidate['seed']} stage={stage}): {exc}"
-                )
-                evaluation = {
-                    "stage": stage,
-                    "feasibility": float("inf"),
-                    "max_violation": float("inf"),
-                    "objective": float("inf"),
-                    "is_feasible": False,
-                    "vmec_status": "exception",
-                    "metrics": {
-                        "minimum_normalized_magnetic_gradient_scale_length": 0.0,
-                        "aspect_ratio": float("inf"),
-                        "max_elongation": float("inf"),
-                        "constraint_margins": {},
-                        "max_violation": float("inf"),
-                    },
-                }
-            results.append(
-                {
-                    "params": params,
-                    "evaluation": evaluation,
-                    "seed": int(candidate["seed"]),
-                    "design_hash": design_id,
-                }
-            )
-            if sleep_per_eval > 0:
-                time.sleep(sleep_per_eval)
-        return results
-
-    future_payloads = {}
-    executor_cls = (
-        ThreadPoolExecutor if budgets.pool_type == "thread" else ProcessPoolExecutor
-    )
-    executor_kwargs: dict[str, Any] = {"max_workers": budgets.n_workers}
-    if executor_cls is ProcessPoolExecutor:
-        executor_kwargs["initializer"] = _process_worker_initializer
-    with executor_cls(**executor_kwargs) as executor:
-        for candidate in candidates:
-            if _time_exceeded(cycle_start, wall_limit):
-                break
-            design_id = candidate.get("design_hash")
-            future = executor.submit(evaluate_fn, candidate["params"], stage=stage)
-            future_payloads[future] = (candidate, design_id)
-
-        for future in as_completed(future_payloads):
-            candidate, design_id = future_payloads[future]
-            exc = future.exception()
-            if exc is not None:
-                design_hash = design_id or tools.design_hash(candidate["params"])
-                print(
-                    f"[runner][stage-eval] Failed evaluation for design {design_hash} "
-                    f"(seed={candidate['seed']} stage={stage}): {exc}"
-                )
-                failure_eval = {
-                    "stage": stage,
-                    "feasibility": float("inf"),
-                    "max_violation": float("inf"),
-                    "objective": float("inf"),
-                    "is_feasible": False,
-                    "vmec_status": "exception",
-                    "metrics": {
-                        "minimum_normalized_magnetic_gradient_scale_length": 0.0,
-                        "aspect_ratio": float("inf"),
-                        "max_elongation": float("inf"),
-                        "constraint_margins": {},
-                        "max_violation": float("inf"),
-                    },
-                }
-                results.append(
-                    {
-                        "params": candidate["params"],
-                        "evaluation": failure_eval,
-                        "seed": int(candidate["seed"]),
-                        "design_hash": design_hash,
-                    }
-                )
-                continue
-
-            results.append(
-                {
-                    "params": candidate["params"],
-                    "evaluation": {
-                        **future.result(),
-                        "vmec_status": future.result().get("vmec_status", "ok"),
-                    },
-                    "seed": int(candidate["seed"]),
-                    "design_hash": design_id or tools.design_hash(candidate["params"]),
-                }
-            )
-    return results
 
 
 def _cache_stats_log_path(report_dir: Path | str) -> Path:
@@ -1606,6 +1299,8 @@ def _run_cycle(
                 print(f"[runner][cycle={cycle_number}] Applying agent config overrides: {', '.join(overrides_log)}")
         except Exception as exc:
             print(f"[runner][cycle={cycle_number}] Failed to apply config overrides: {exc}")
+
+    fidelity_ctl = FidelityController(active_cfg)
 
     budget_snapshot = budget_controller.snapshot()
     active_budgets = replace(
@@ -2110,7 +1805,7 @@ def _run_cycle(
 
     screen_stage = active_cfg.fidelity_ladder.screen
     if candidates:
-        screen_results = _evaluate_stage(
+        screen_results = fidelity_ctl.evaluate_stage(
             candidates, 
             stage=screen_stage,
             budgets=active_budgets,
@@ -2149,11 +1844,10 @@ def _run_cycle(
         
         if sufficient_feasible:
             # Standard Pareto/Feasibility ranking
-            prioritized_screen = _rank_candidates_for_promotion(
+            prioritized_screen = fidelity_ctl.get_promotion_candidates(
                 screen_design_map,
                 active_budgets.promote_top_k,
                 P3_REFERENCE_POINT,
-                problem_type=cfg.problem,
             )
             to_promote = prioritized_screen[:promote_limit]
         else:
@@ -2175,7 +1869,7 @@ def _run_cycle(
     promote_stage = cfg.fidelity_ladder.promote
     promote_results: list[dict[str, Any]] = []
     if not screen_only and promote_limit > 0:
-        promote_results = _evaluate_stage(
+        promote_results = fidelity_ctl.evaluate_stage(
             to_promote,
             stage=promote_stage,
             budgets=active_budgets,
@@ -2698,10 +2392,10 @@ def run(
             governance_stage = last_stage
             
             # Check transitions based on restored history
-            if last_stage == "s1" and _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
+            if last_stage == "s1" and fidelity_ctl.should_transition_s1_to_s2(stage_history):
                 governance_stage = "s2"
-            elif last_stage == "s2" and _should_transition_s2_to_s3(
-                stage_history, cfg.stage_gates, cfg.governance, world_model, experiment_id, resume_cycle, cfg.cycles
+            elif last_stage == "s2" and fidelity_ctl.should_transition_s2_to_s3(
+                stage_history, world_model, experiment_id, resume_cycle
             ):
                 governance_stage = "s3"
                 
@@ -2852,20 +2546,17 @@ def run(
             
             next_stage = governance_stage
             if governance_stage == "s1":
-                if _should_transition_s1_to_s2(stage_history, cfg.stage_gates):
+                if fidelity_ctl.should_transition_s1_to_s2(stage_history):
                     next_stage = "s2"
                     print(
                         f"[runner][stage-gate] governance stage advanced to S2 after cycle {idx + 1}"
                     )
             elif governance_stage == "s2":
-                if _should_transition_s2_to_s3(
+                if fidelity_ctl.should_transition_s2_to_s3(
                     stage_history,
-                    cfg.stage_gates,
-                    cfg.governance,
                     world_model,
                     experiment_id,
                     idx + 1,
-                    cfg.cycles,
                 ):
                     next_stage = "s3"
                     print(
