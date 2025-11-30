@@ -38,7 +38,7 @@ This document consolidates all improvement opportunities for the `ai_scientist` 
   - Classes: `BudgetController`, `BudgetSnapshot`
   - References: `runner.py:_run_cycle` budget handling
 
-- [ ] **1.2 Extract `fidelity_controller.py` from `runner.py`**
+- [x] **1.2 Extract `fidelity_controller.py` from `runner.py`**
   - Move fidelity ladder logic, promotion decisions
   - File: `ai_scientist/fidelity_controller.py`
   - Functions: `_evaluate_stage`, promotion gating
