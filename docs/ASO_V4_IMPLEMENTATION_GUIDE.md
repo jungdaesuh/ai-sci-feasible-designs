@@ -1560,6 +1560,8 @@ if args.aso:
 
 **File: `tests/test_coordinator.py`**
 - [x] 5.7 Test `_generate_diagnostics()` extracts all ALM fields
+
+**File: `tests/test_aso_integration.py` (NEW)**
 - [x] 5.8 Integration test: 3-step ASO loop with mock problem
 
 ### Phase 6: Documentation (Priority 2)

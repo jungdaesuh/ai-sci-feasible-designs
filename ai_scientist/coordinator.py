@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field # Added
 from typing import Any, Dict, List, Optional
 import time # Added
+import numpy as np # Added
 import jax.numpy as jnp # Added
 from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState # Added
 from ai_scientist.optim.alm_bridge import ( # Added
@@ -508,12 +509,12 @@ class Coordinator:
         params_map = seed.get("params", seed)
 
         return surface_rz_fourier.SurfaceRZFourier(
-            r_cos=jnp.array(params_map["r_cos"]),
-            z_sin=jnp.array(params_map["z_sin"]),
+            r_cos=np.array(params_map["r_cos"]),
+            z_sin=np.array(params_map["z_sin"]),
             n_field_periods=int(params_map.get("n_field_periods", 1)),
             is_stellarator_symmetric=bool(params_map.get("is_stellarator_symmetric", True)),
-            r_sin=jnp.array(params_map["r_sin"]) if "r_sin" in params_map else None,
-            z_cos=jnp.array(params_map["z_cos"]) if "z_cos" in params_map else None,
+            r_sin=np.array(params_map["r_sin"]) if "r_sin" in params_map else None,
+            z_cos=np.array(params_map["z_cos"]) if "z_cos" in params_map else None,
         )
 
     def _get_problem(self, config):
