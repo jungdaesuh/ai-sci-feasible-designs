@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping, Tuple, Literal
 
 import yaml
 
@@ -206,6 +206,61 @@ class SurrogateConfig:
 
 
 @dataclass(frozen=True)
+class ALMConfig:
+    """ALM hyperparameters (mirrors constellaration settings)."""
+    # Per-iteration settings
+    penalty_parameters_increase_factor: float = 2.0
+    constraint_violation_tolerance_reduction_factor: float = 0.5
+    bounds_reduction_factor: float = 0.95
+    penalty_parameters_max: float = 1e8
+    bounds_min: float = 0.05
+
+    # Method-level settings
+    maxit: int = 25
+    penalty_parameters_initial: float = 1.0
+    bounds_initial: float = 2.0
+
+    # Oracle (Nevergrad) settings
+    oracle_budget_initial: int = 100
+    oracle_budget_increment: int = 26
+    oracle_budget_max: int = 200
+    oracle_num_workers: int = 4
+
+
+@dataclass(frozen=True)
+class ASOConfig:
+    """Configuration for Agent-Supervised Optimization loop."""
+    # Control mode
+    enabled: bool = False
+
+    # Supervision frequency
+    supervision_mode: Literal["every_step", "periodic", "event_triggered"] = "event_triggered"
+    supervision_interval: int = 5  # Steps between LLM calls (if periodic)
+
+    # Convergence detection
+    feasibility_threshold: float = 1e-3
+    stagnation_objective_threshold: float = 1e-5
+    stagnation_violation_threshold: float = 0.05
+    max_stagnation_steps: int = 5
+
+    # Constraint trend detection
+    violation_increase_threshold: float = 0.05
+    violation_decrease_threshold: float = 0.05
+
+    # Budget allocation
+    steps_per_supervision: int = 1
+
+    # Safety limits
+    max_constraint_weight: float = 1000.0
+    max_penalty_boost: float = 4.0
+
+    # Fallback behavior
+    llm_timeout_seconds: float = 10.0
+    llm_max_retries: int = 2
+    use_heuristic_fallback: bool = True
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     problem: str
     cycles: int
@@ -220,6 +275,8 @@ class ExperimentConfig:
     constraint_weights: ConstraintWeightsConfig
     generative: GenerativeConfig
     surrogate: SurrogateConfig = field(default_factory=SurrogateConfig)
+    alm: ALMConfig = field(default_factory=ALMConfig)
+    aso: ASOConfig = field(default_factory=ASOConfig)
     optimizer_backend: str = "nevergrad"
     experiment_tag: str = "default"
     initialization_strategy: str = "template"
@@ -433,6 +490,58 @@ def _surrogate_config_from_dict(
     )
 
 
+def _alm_config_from_dict(data: Mapping[str, Any] | None) -> ALMConfig:
+    config = data or {}
+    return ALMConfig(
+        penalty_parameters_increase_factor=float(
+            config.get("penalty_parameters_increase_factor", 2.0)
+        ),
+        constraint_violation_tolerance_reduction_factor=float(
+            config.get("constraint_violation_tolerance_reduction_factor", 0.5)
+        ),
+        bounds_reduction_factor=float(config.get("bounds_reduction_factor", 0.95)),
+        penalty_parameters_max=float(config.get("penalty_parameters_max", 1e8)),
+        bounds_min=float(config.get("bounds_min", 0.05)),
+        maxit=int(config.get("maxit", 25)),
+        penalty_parameters_initial=float(config.get("penalty_parameters_initial", 1.0)),
+        bounds_initial=float(config.get("bounds_initial", 2.0)),
+        oracle_budget_initial=int(config.get("oracle_budget_initial", 100)),
+        oracle_budget_increment=int(config.get("oracle_budget_increment", 26)),
+        oracle_budget_max=int(config.get("oracle_budget_max", 200)),
+        oracle_num_workers=int(config.get("oracle_num_workers", 4)),
+    )
+
+
+def _aso_config_from_dict(data: Mapping[str, Any] | None) -> ASOConfig:
+    config = data or {}
+    supervision_mode = str(config.get("supervision_mode", "event_triggered"))
+    return ASOConfig(
+        enabled=bool(config.get("enabled", False)),
+        supervision_mode=supervision_mode,  # type: ignore
+        supervision_interval=int(config.get("supervision_interval", 5)),
+        feasibility_threshold=float(config.get("feasibility_threshold", 1e-3)),
+        stagnation_objective_threshold=float(
+            config.get("stagnation_objective_threshold", 1e-5)
+        ),
+        stagnation_violation_threshold=float(
+            config.get("stagnation_violation_threshold", 0.05)
+        ),
+        max_stagnation_steps=int(config.get("max_stagnation_steps", 5)),
+        violation_increase_threshold=float(
+            config.get("violation_increase_threshold", 0.05)
+        ),
+        violation_decrease_threshold=float(
+            config.get("violation_decrease_threshold", 0.05)
+        ),
+        steps_per_supervision=int(config.get("steps_per_supervision", 1)),
+        max_constraint_weight=float(config.get("max_constraint_weight", 1000.0)),
+        max_penalty_boost=float(config.get("max_penalty_boost", 4.0)),
+        llm_timeout_seconds=float(config.get("llm_timeout_seconds", 10.0)),
+        llm_max_retries=int(config.get("llm_max_retries", 2)),
+        use_heuristic_fallback=bool(config.get("use_heuristic_fallback", True)),
+    )
+
+
 def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
     config_path = Path(path) if path is not None else DEFAULT_EXPERIMENT_CONFIG_PATH
     payload = load(config_path)
@@ -485,6 +594,8 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         ),
         generative=_generative_config_from_dict(payload.get("generative")),
         surrogate=surrogate_config,
+        alm=_alm_config_from_dict(payload.get("alm")),
+        aso=_aso_config_from_dict(payload.get("aso")),
         optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
         experiment_tag=str(payload.get("experiment_tag", "default")),
         initialization_strategy=str(payload.get("initialization_strategy", "template")),
