@@ -6,44 +6,47 @@ switching between Exploration (gathering new data/seeds) and Exploitation (optim
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field # Added
 from typing import Any, Dict, List, Optional
-import time # Added
-import numpy as np # Added
-import jax.numpy as jnp # Added
-from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState # Added
-from ai_scientist.optim.alm_bridge import ( # Added
-    ALMContext, # Added
-    ALMStepResult, # Added
-    create_alm_context, # Added
-    step_alm, # Added
-    state_to_boundary_params, # Added
-) # Added
+import time
+import numpy as np
+import jax.numpy as jnp
+import pydantic
+from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
+from ai_scientist.optim.alm_bridge import (
+    ALMContext,
+    create_alm_context,
+    step_alm,
+    state_to_boundary_params,
+)
 
 
 from ai_scientist import config as ai_config
 from ai_scientist import memory
-from ai_scientist.planner import PlanningAgent, OptimizerDiagnostics, OptimizationDirective, ConstraintDiagnostic, DirectiveAction # Modified PlanningAgent import to include other ASO types
+from ai_scientist.planner import PlanningAgent, OptimizerDiagnostics, OptimizationDirective, ConstraintDiagnostic, DirectiveAction
 from ai_scientist.workers import OptimizationWorker, ExplorationWorker, GeometerWorker
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel
 
 
-@dataclass # Added
-class TrajectoryState: # Added
-    """State for a single optimization trajectory.""" # Added
-    id: int # Added
-    seed: Dict[str, Any] # Added
-    alm_context: Optional[ALMContext] = None # Added
-    alm_state: Optional[AugmentedLagrangianState] = None # Added
-    history: List[AugmentedLagrangianState] = field(default_factory=list) # Added
-    evals_used: int = 0 # Added
-    steps: int = 0 # Added
-    status: str = "active" # Added
-    best_objective: float = float("inf") # Added
-    best_violation: float = float("inf") # Added
-    stagnation_count: int = 0 # Added
-    budget_used: int = 0 # Added
+class TrajectoryState(pydantic.BaseModel):
+    """State for a single optimization trajectory."""
+    model_config = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,  # Immutable like frozen dataclass
+    )
+
+    id: int
+    seed: Dict[str, Any]
+    alm_context: Optional[ALMContext] = None
+    alm_state: Optional[AugmentedLagrangianState] = None
+    history: List[AugmentedLagrangianState] = pydantic.Field(default_factory=list)
+    evals_used: int = 0
+    steps: int = 0
+    status: str = "active"
+    best_objective: float = float("inf")
+    best_violation: float = float("inf")
+    stagnation_count: int = 0
+    budget_used: int = 0
 
 class Coordinator:
     """
@@ -173,8 +176,6 @@ class Coordinator:
         ASO loop with real ALM state supervision.
         """
         config = initial_config or self.cfg
-        aso = config.aso
-        alm = config.alm
 
         # 1. Prepare seeds
         seeds = self._prepare_seeds(initial_seeds, cycle, 1)
@@ -215,16 +216,17 @@ class Coordinator:
         problem = self._get_problem(config)
         settings = self._build_optimization_settings(config)
 
-        traj.alm_context, traj.alm_state = create_alm_context(
+        alm_context, alm_state = create_alm_context(
             boundary=boundary,
             problem=problem,
             settings=settings,
         )
+        traj = traj.model_copy(update={"alm_context": alm_context, "alm_state": alm_state})
 
         oracle_budget = alm.oracle_budget_initial
 
         while traj.budget_used < eval_budget and traj.status == "active":
-            traj.steps += 1
+            traj = traj.model_copy(update={"steps": traj.steps + 1})
             step_start = time.perf_counter()
 
             # 1. Execute ALM step
@@ -235,15 +237,18 @@ class Coordinator:
                 num_workers=alm.oracle_num_workers,
             )
 
-            traj.alm_state = result.state
-            traj.budget_used += result.n_evals
-            traj.history.append(result.state)
+            new_history = traj.history + [result.state]
+            traj = traj.model_copy(update={
+                "alm_state": result.state,
+                "budget_used": traj.budget_used + result.n_evals,
+                "history": new_history
+            })
 
             # 2. Generate diagnostics from REAL ALM state
             diagnostics = self._generate_diagnostics(result.state, traj)
 
             # 3. Update trajectory tracking
-            self._update_trajectory_best(traj, diagnostics)
+            traj = self._update_trajectory_best(traj, diagnostics)
 
             # 4. Get directive (tiered supervision)
             llm_called = diagnostics.requires_llm_supervision(aso)
@@ -257,7 +262,8 @@ class Coordinator:
 
             # 6. Apply directive
             if directive.action == DirectiveAction.STOP:
-                traj.status = "converged" if diagnostics.status == "FEASIBLE_FOUND" else "stagnated"
+                status = "converged" if diagnostics.status == "FEASIBLE_FOUND" else "stagnated"
+                traj = traj.model_copy(update={"status": status})
                 print(f"[Coordinator] STOP: {directive.reasoning}")
                 # Extract final candidate
                 candidates.append({
@@ -282,20 +288,25 @@ class Coordinator:
                         "seed": traj.seed.get("seed", 0),
                     })
 
-                    traj.seed = new_seeds[0]
-                    traj.history = []
-                    traj.stagnation_count = 0
-                    boundary = self._seed_to_boundary(traj.seed)
-                    traj.alm_context, traj.alm_state = create_alm_context(
+                    boundary = self._seed_to_boundary(new_seeds[0])
+                    new_context, new_state = create_alm_context(
                         boundary=boundary,
                         problem=problem,
                         settings=settings,
                     )
+                    traj = traj.model_copy(update={
+                        "seed": new_seeds[0],
+                        "history": [],
+                        "stagnation_count": 0,
+                        "alm_context": new_context,
+                        "alm_state": new_state
+                    })
+                    
                     oracle_budget = alm.oracle_budget_initial
-                    print(f"[Coordinator] RESTART with new seed")
+                    print("[Coordinator] RESTART with new seed")
                 else:
-                    traj.status = "abandoned"
-                    print(f"[Coordinator] RESTART failed, no seeds")
+                    traj = traj.model_copy(update={"status": "abandoned"})
+                    print("[Coordinator] RESTART failed, no seeds")
                     break
                 continue
 
@@ -303,9 +314,11 @@ class Coordinator:
                 # Apply ALM overrides directly to state
                 if directive.alm_overrides and "penalty_parameters" in directive.alm_overrides:
                     new_penalties = jnp.array(directive.alm_overrides["penalty_parameters"])
-                    traj.alm_state = traj.alm_state.copy(
+                    # Use model_copy for AugmentedLagrangianState as well
+                    new_alm_state = traj.alm_state.model_copy(
                         update={"penalty_parameters": new_penalties}
                     )
+                    traj = traj.model_copy(update={"alm_state": new_alm_state})
                     print(f"[Coordinator] ADJUST penalties: {directive.reasoning}")
 
             # Increase oracle budget for next iteration
@@ -313,8 +326,8 @@ class Coordinator:
 
             # Auto-stop on excessive stagnation
             if traj.stagnation_count >= aso.max_stagnation_steps:
-                traj.status = "stagnated"
-                print(f"[Coordinator] Auto-STOP (stagnation limit)")
+                traj = traj.model_copy(update={"status": "stagnated"})
+                print("[Coordinator] Auto-STOP (stagnation limit)")
                 candidates.append({
                     "params": state_to_boundary_params(traj.alm_context, traj.alm_state),
                     "objective": result.objective,
@@ -416,20 +429,29 @@ class Coordinator:
             steps_since_improvement=traj.stagnation_count,
         )
 
-    def _update_trajectory_best(self, traj: TrajectoryState, diag: OptimizerDiagnostics):
+    def _update_trajectory_best(self, traj: TrajectoryState, diag: OptimizerDiagnostics) -> TrajectoryState:
         """Update best values and stagnation counter."""
+        updates = {}
         improved = False
-        if diag.max_violation < traj.best_violation:
-            traj.best_violation = diag.max_violation
+
+        current_best_violation = traj.best_violation
+        current_best_objective = traj.best_objective
+
+        if diag.max_violation < current_best_violation:
+            current_best_violation = diag.max_violation
+            updates["best_violation"] = current_best_violation
             improved = True
-        if diag.objective < traj.best_objective and diag.max_violation <= traj.best_violation:
-            traj.best_objective = diag.objective
+        if diag.objective < current_best_objective and diag.max_violation <= current_best_violation:
+            current_best_objective = diag.objective
+            updates["best_objective"] = current_best_objective
             improved = True
 
         if improved:
-            traj.stagnation_count = 0
+            updates["stagnation_count"] = 0
         else:
-            traj.stagnation_count += 1
+            updates["stagnation_count"] = traj.stagnation_count + 1
+        
+        return traj.model_copy(update=updates)
 
     def _log_telemetry(
         self,

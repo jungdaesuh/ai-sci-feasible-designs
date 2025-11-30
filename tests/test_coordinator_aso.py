@@ -46,15 +46,11 @@ class TestCoordinatorASO:
 
     def test_generate_diagnostics_extracts_all_fields(self, coordinator):
         """Task 5.7: Verify _generate_diagnostics extracts all ALM fields correctly."""
-        # Setup trajectory with history
-        traj = TrajectoryState(id=0, seed={})
-        
         # Previous state (for delta calculation)
         prev_state = create_mock_alm_state(
             objective=jnp.array(1.1),
             constraints=jnp.array([0.05, 0.0, 0.0]),
         )
-        traj.history.append(prev_state)
         
         # Current state
         current_state = create_mock_alm_state(
@@ -64,8 +60,14 @@ class TestCoordinatorASO:
             penalty_parameters=jnp.array([10.0, 1.0, 1.0]),
             bounds=jnp.ones(10) * 0.5
         )
-        traj.history.append(current_state)
-        traj.steps = 1
+        
+        # Setup trajectory with history
+        traj = TrajectoryState(
+            id=0, 
+            seed={}, 
+            history=[prev_state, current_state],
+            steps=1
+        )
         
         # Run generation
         diag = coordinator._generate_diagnostics(current_state, traj)
