@@ -1501,11 +1501,11 @@ if args.aso:
 ### Phase 1: Data Structures (Priority 0)
 
 **File: `ai_scientist/config.py`**
-- [ ] 1.1 Add `ALMConfig` dataclass (mirrors constellaration)
-- [ ] 1.2 Add `ASOConfig` dataclass
-- [ ] 1.3 Update `ExperimentConfig` with `alm` and `aso` fields
-- [ ] 1.4 Add `_alm_config_from_dict()` loader
-- [ ] 1.5 Add `_aso_config_from_dict()` loader
+- [x] 1.1 Add `ALMConfig` dataclass (mirrors constellaration)
+- [x] 1.2 Add `ASOConfig` dataclass
+- [x] 1.3 Update `ExperimentConfig` with `alm` and `aso` fields
+- [x] 1.4 Add `_alm_config_from_dict()` loader
+- [x] 1.5 Add `_aso_config_from_dict()` loader
 
 **File: `ai_scientist/planner.py`**
 - [ ] 1.6 Add `DirectiveAction` enum
