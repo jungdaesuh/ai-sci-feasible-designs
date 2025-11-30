@@ -165,7 +165,9 @@ class TestALMBridgeFunctionality:
             aspect_ratio_upper_bound=10.0,
         )
         
-        override_penalties = jnp.ones_like(state.penalty_parameters) * 100.0
+        # Override penalties to a high value (100.0 vs default 1.0)
+        override_value = 100.0
+        override_penalties = jnp.ones_like(state.penalty_parameters) * override_value
         
         result = step_alm(
             context=context,
@@ -176,3 +178,6 @@ class TestALMBridgeFunctionality:
         )
         
         assert isinstance(result, ALMStepResult)
+        # Verify the penalties in the result are at least as high as the override
+        # (ALM might increase them further, but shouldn't decrease them below override if violation persists)
+        assert jnp.all(result.state.penalty_parameters >= override_value)
