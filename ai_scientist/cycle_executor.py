@@ -1221,7 +1221,7 @@ class CycleExecutor:
                 if verbose:
                     print(f"[runner] SA-ALM: Verifying best candidate with true forward model (step {k}).")
                 (obj_new, constr_new), true_metrics = _objective_constraints(
-                    x_new, scale, unravel_and_unmask_fn, fm_settings, self.config.problem, predictor=sa_alm_predictor
+                    x_new, scale, unravel_and_unmask_fn, fm_settings, self.config.problem, predictor=None
                 )
                 verified_params_obj = unravel_and_unmask_fn(x_new * scale)
                 verified_params = {
