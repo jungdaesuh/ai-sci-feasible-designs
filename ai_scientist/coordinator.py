@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field # Added
 from typing import Any, Dict, List, Optional
+import time # Added
 import jax.numpy as jnp # Added
 from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState # Added
 from ai_scientist.optim.alm_bridge import ( # Added
@@ -78,6 +79,11 @@ class Coordinator:
         
         # State
         self.current_strategy = "HYBRID" # Default to doing both
+
+        # ASO Initialization
+        problem_key = (cfg.problem or "p3").lower()[:2]
+        self.constraint_names = self.CONSTRAINT_NAMES.get(problem_key, self.CONSTRAINT_NAMES["p3"])
+        self.telemetry: List[Dict[str, Any]] = []
 
 
     def decide_strategy(self, cycle: int, experiment_id: int) -> str:

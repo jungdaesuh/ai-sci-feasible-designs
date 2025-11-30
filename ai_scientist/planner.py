@@ -698,3 +698,140 @@ class PlanningAgent:
             config_overrides=config_overrides
         )
 
+    def _ensure_heuristic(self, aso_config: ASOConfig) -> HeuristicSupervisor:
+        if self.heuristic is None:
+            self.heuristic = HeuristicSupervisor(aso_config)
+        return self.heuristic
+
+    def supervise(
+        self,
+        diagnostics: OptimizerDiagnostics,
+        cycle: int,
+        aso_config: ASOConfig,
+    ) -> OptimizationDirective:
+        """
+        Tiered supervision: heuristic first, LLM on demand.
+
+        The key insight is that we now have REAL ALM state, so heuristics
+        can make much better decisions than with proxy diagnostics.
+        """
+        heuristic = self._ensure_heuristic(aso_config)
+
+        # Tier 1: Check if LLM needed
+        if not diagnostics.requires_llm_supervision(aso_config):
+            return heuristic.analyze(diagnostics)
+
+        # Tier 2: Try LLM with fallback
+        if aso_config.use_heuristic_fallback:
+            try:
+                return self._llm_supervise(diagnostics, cycle, aso_config)
+            except Exception as e:
+                print(f"[Planner] LLM supervision failed: {e}, using heuristic")
+                return heuristic.analyze(diagnostics)
+        else:
+            return self._llm_supervise(diagnostics, cycle, aso_config)
+
+    def _llm_supervise(
+        self,
+        diagnostics: OptimizerDiagnostics,
+        cycle: int,
+        aso_config: ASOConfig,
+    ) -> OptimizationDirective:
+        """LLM-based supervision with real ALM state context."""
+        # Retrieve relevant context if stagnating
+        rag_context = []
+        if diagnostics.status == "STAGNATION":
+            rag_context = self.retrieve_rag(
+                "Strategies for escaping local minima in stellarator ALM optimization",
+                k=2,
+            )
+
+        system_prompt = self._build_supervision_prompt(cycle, rag_context, diagnostics)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Current ALM diagnostics:\n{diagnostics.to_json()}"},
+        ]
+
+        provider = self.config.get_provider()
+
+        for attempt in range(aso_config.llm_max_retries):
+            try:
+                response = model_provider.invoke_chat_completion(
+                    provider,
+                    tool_call={"name": "supervise_optimization", "arguments": {}},
+                    messages=messages,
+                    model=self.planning_gate.provider_model,
+                )
+
+                if response.status_code != 200:
+                    raise RuntimeError(f"LLM returned {response.status_code}")
+
+                content = response.body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                return self._parse_directive(content, diagnostics)
+
+            except json.JSONDecodeError as e:
+                if attempt < aso_config.llm_max_retries - 1:
+                    messages.append({"role": "user", "content": f"Invalid JSON: {e}. Please output valid JSON."})
+                    continue
+                raise
+
+        raise RuntimeError("LLM supervision failed after retries")
+
+    def _build_supervision_prompt(self, cycle: int, rag_context: list, diagnostics: OptimizerDiagnostics) -> str:
+        rag_section = ""
+        if rag_context:
+            rag_section = f"\n\nRelevant knowledge:\n{json.dumps(rag_context, indent=2)}"
+
+        constraint_names = [c.name for c in diagnostics.constraint_diagnostics]
+
+        return f"""You are the ASO Supervisor for the AI Scientist (cycle {cycle}).
+
+You have access to REAL Augmented Lagrangian Method (ALM) state:
+- objective: Current objective function value
+- constraints: {constraint_names}
+- penalty_parameters: How strongly each constraint is being enforced
+- multipliers: Lagrange multipliers (learned constraint importance)
+- bounds_norm: Size of trust region (smaller = more focused search)
+
+ACTIONS:
+- CONTINUE: Proceed with current settings
+- ADJUST: Modify penalty_parameters to steer optimization
+- STOP: Terminate (converged or hopeless)
+- RESTART: Abandon trajectory, try new seed
+
+OUTPUT FORMAT (JSON):
+{{
+  "action": "CONTINUE | ADJUST | STOP | RESTART",
+  "alm_overrides": {{
+    "penalty_parameters": [p1, p2, ...]  // Optional: new penalties per constraint
+  }},
+  "reasoning": "brief explanation"
+}}
+
+ADJUSTMENT STRATEGY:
+- If a constraint has high violation but low penalty: increase that penalty
+- If stuck (small bounds_norm) with violations: try RESTART
+- If multiplier is high but violation persists: constraint may be infeasible
+{rag_section}
+
+Respond with ONLY valid JSON."""
+
+    def _parse_directive(self, content: str, diagnostics: OptimizerDiagnostics) -> OptimizationDirective:
+        """Parse LLM response into OptimizationDirective."""
+        json_str = content
+        if "```json" in content:
+            json_str = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            json_str = content.split("```")[1].split("```")[0].strip()
+
+        data = json.loads(json_str)
+        action = DirectiveAction(data.get("action", "CONTINUE"))
+
+        return OptimizationDirective(
+            action=action,
+            alm_overrides=data.get("alm_overrides"),
+            config_overrides=data.get("config_overrides"),
+            reasoning=data.get("reasoning", ""),
+            source=DirectiveSource.LLM,
+        )
+
