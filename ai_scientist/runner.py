@@ -2342,6 +2342,7 @@ def run(
         else cfg.planner.lower()
     )
     budget_controller = BudgetController(cfg)
+    fidelity_ctl = FidelityController(cfg)
     last_p3_summary: tools.P3Summary | None = None
     surrogate_model = _create_surrogate(cfg)
     generative_model = _create_generative_model(cfg)
