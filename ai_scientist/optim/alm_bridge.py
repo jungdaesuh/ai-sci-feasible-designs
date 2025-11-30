@@ -76,8 +76,8 @@ def create_alm_context(
     # Build mask for optimization
     mask = rz_fourier.build_mask(
         boundary,
-        max_poloidal_mode=settings.max_poloidal_mode,
-        max_toroidal_mode=settings.max_toroidal_mode,
+        max_poloidal_mode=boundary.max_poloidal_mode,
+        max_toroidal_mode=boundary.max_toroidal_mode,
     )
 
     # Flatten to optimization vector
