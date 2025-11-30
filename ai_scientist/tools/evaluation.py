@@ -305,13 +305,7 @@ def evaluate_p1(
     try:
         result = centralized_fm.forward_model(params_map, settings, use_cache=use_cache)
     except Exception as e:
-        return {
-            "stage": stage.lower(),
-            "error": str(e),
-            "objective": None,
-            "feasibility": float("inf"),
-            "score": 0.0,
-        }
+        return _penalized_result(stage=stage.lower(), maximize=False, penalty=1e9, error=str(e))
 
     metrics = result.metrics
     score = 0.0
@@ -348,13 +342,7 @@ def evaluate_p2(
     try:
         result = centralized_fm.forward_model(params_map, settings, use_cache=use_cache)
     except Exception as e:
-         return {
-            "stage": stage.lower(),
-            "error": str(e),
-            "objective": None,
-            "feasibility": float("inf"),
-            "score": 0.0,
-        }
+         return _penalized_result(stage=stage.lower(), maximize=True, penalty=-1e9, error=str(e))
 
     metrics = result.metrics
     score = _gradient_score(metrics)
@@ -388,13 +376,7 @@ def evaluate_p3(
     try:
         result = centralized_fm.forward_model(params_map, settings, use_cache=use_cache)
     except Exception as e:
-         return {
-            "stage": stage.lower(),
-            "error": str(e),
-            "objective": None,
-            "feasibility": float("inf"),
-            "score": 0.0,
-        }
+         return _penalized_result(stage=stage.lower(), maximize=False, penalty=1e9, error=str(e))
 
     metrics = result.metrics
     score = _gradient_score(metrics)
