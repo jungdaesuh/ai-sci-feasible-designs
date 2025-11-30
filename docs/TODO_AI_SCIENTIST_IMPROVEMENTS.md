@@ -164,11 +164,11 @@ class ConstellarationSettings:
 
 **Context:** `constellaration/utils/pytree.py` provides `mask_and_ravel()` for selective parameter extraction, enabling JAX optimization on subsets of Pydantic models.
 
-- [ ] **5.1 Port `mask_and_ravel()` utility**
+- [x] **5.1 Port `mask_and_ravel()` utility**
   - File: `ai_scientist/utils/pytree.py`
   - Enable selective flattening of boundary params for optimization
 
-- [ ] **5.2 Port `register_pydantic_data` decorator**
+- [x] **5.2 Port `register_pydantic_data` decorator**
   - Enable JAX pytree operations on Pydantic models
 
 - [ ] **5.3 Update `optim/differentiable.py` to use pytree utils**
