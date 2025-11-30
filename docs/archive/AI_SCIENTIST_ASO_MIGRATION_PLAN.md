@@ -1,3 +1,5 @@
+> **DEPRECATED:** This document is superseded by `ASO_V4_IMPLEMENTATION_GUIDE.md`
+
 # AI Scientist: ASO Migration & Refactoring Plan
 
 **Status:** Draft

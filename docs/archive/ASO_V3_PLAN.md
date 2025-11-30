@@ -1,3 +1,5 @@
+> **DEPRECATED:** This document is superseded by `ASO_V4_IMPLEMENTATION_GUIDE.md`
+
 # Agent-Supervised Optimization (ASO) V3 Plan
 
 **Status:** Proposed

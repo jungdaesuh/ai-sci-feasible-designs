@@ -59,3 +59,12 @@ Run the random-search baseline from the repo root via `python -m orchestration.r
 - [ ] Strict/high-fidelity attempt logged (converged or failure reason recorded, including residual trace if it failed).
 - [ ] Artifacts, logs, reports pushed under run-specific directories.
 - [ ] Context updated with new best boundary and next steps.
+
+## ASO Mode (Agent-Supervised Optimization)
+
+Enable with `--aso` flag:
+```bash
+python -m ai_scientist.runner --aso --experiment-id 1
+```
+
+ASO mode uses real ALM state for supervision decisions. See `ASO_V4_IMPLEMENTATION_GUIDE.md` for details.

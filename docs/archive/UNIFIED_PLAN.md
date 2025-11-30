@@ -1,3 +1,5 @@
+> **DEPRECATED:** This document is superseded by `ASO_V4_IMPLEMENTATION_GUIDE.md`
+
 This document is a living roadmap for unifying the semantic reasoning layer  
 (`ai_scientist` agents) with the numerical optimization layer (ALM + VMEC++)  
 into a single Neuro‑Symbolic feedback loop.

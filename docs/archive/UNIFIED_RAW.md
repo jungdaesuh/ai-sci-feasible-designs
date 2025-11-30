@@ -1,3 +1,5 @@
+> **DEPRECATED:** This document is superseded by `ASO_V4_IMPLEMENTATION_GUIDE.md`
+
 This is a comprehensive analysis and refactoring plan to unify the semantic reasoning (LLM Agents) and numerical optimization (Solvers) in your stellarator optimization codebase. The goal is to achieve Architectural Harmony through a continuous Neuro-Symbolic Feedback Loop.
 
 ## Architectural Analysis: The Neuro-Symbolic Feedback Loop
