@@ -1549,9 +1549,9 @@ if args.aso:
 ### Phase 5: Testing (Priority 1)
 
 **File: `tests/test_alm_bridge.py` (NEW)**
-- [ ] 5.1 Test `create_alm_context()` with P3 problem
-- [ ] 5.2 Test `step_alm()` executes and returns valid state
-- [ ] 5.3 Test penalty override is applied correctly
+- [x] 5.1 Test `create_alm_context()` with P3 problem
+- [x] 5.2 Test `step_alm()` executes and returns valid state
+- [x] 5.3 Test penalty override is applied correctly
 
 **File: `tests/test_planner.py`**
 - [ ] 5.4 Test `HeuristicSupervisor` STOP on FEASIBLE_FOUND
