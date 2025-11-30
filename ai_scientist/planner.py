@@ -752,6 +752,7 @@ class PlanningAgent:
             {"role": "user", "content": f"Current ALM diagnostics:\n{diagnostics.to_json()}"},
         ]
 
+        from ai_scientist import model_provider
         provider = self.config.get_provider()
 
         for attempt in range(aso_config.llm_max_retries):

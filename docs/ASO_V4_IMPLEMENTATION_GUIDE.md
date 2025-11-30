@@ -1517,13 +1517,13 @@ if args.aso:
 ### Phase 2: Supervision (Priority 0)
 
 **File: `ai_scientist/planner.py`**
-- [ ] 2.1 Add `HeuristicSupervisor` class
-- [ ] 2.2 Implement decision tree with penalty boost logic
-- [ ] 2.3 Add `_ensure_heuristic()` to `PlanningAgent`
-- [ ] 2.4 Add `supervise()` to `PlanningAgent`
-- [ ] 2.5 Add `_llm_supervise()` with ALM-aware prompt
-- [ ] 2.6 Add `_build_supervision_prompt()` with penalty guidance
-- [ ] 2.7 Add `_parse_directive()` supporting `alm_overrides`
+- [x] 2.1 Add `HeuristicSupervisor` class
+- [x] 2.2 Implement decision tree with penalty boost logic
+- [x] 2.3 Add `_ensure_heuristic()` to `PlanningAgent`
+- [x] 2.4 Add `supervise()` to `PlanningAgent`
+- [x] 2.5 Add `_llm_supervise()` with ALM-aware prompt
+- [x] 2.6 Add `_build_supervision_prompt()` with penalty guidance
+- [x] 2.7 Add `_parse_directive()` supporting `alm_overrides`
 
 ### Phase 3: Coordinator (Priority 1)
 
