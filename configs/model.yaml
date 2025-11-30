@@ -1,7 +1,7 @@
 model:
   base_url: http://127.0.0.1
-  instruct_model: "x-ai/grok-4.1-fast:free"
-  thinking_model: "x-ai/grok-4.1-fast:free"
+  instruct_model: "grok-planning-short-loop"
+  thinking_model: "grok-planning-full"
   request_timeout_seconds: 120
   rate_limit_per_minute: 240
   context_length: 256000 # Use a generic large context window, specific model limits can vary
