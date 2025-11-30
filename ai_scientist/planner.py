@@ -48,16 +48,6 @@ class OptimizationDirective(pydantic.BaseModel):
     confidence: float = 1.0
     source: DirectiveSource = DirectiveSource.HEURISTIC
 
-    def to_dict(self) -> dict:
-        return {
-            "action": self.action.value,
-            "config_overrides": dict(self.config_overrides) if self.config_overrides else None,
-            "alm_overrides": dict(self.alm_overrides) if self.alm_overrides else None,
-            "reasoning": self.reasoning,
-            "confidence": self.confidence,
-            "source": self.source.value,
-        }
-
 
 class ConstraintDiagnostic(pydantic.BaseModel):
     """Diagnostic for a single constraint (from real ALM state)."""
