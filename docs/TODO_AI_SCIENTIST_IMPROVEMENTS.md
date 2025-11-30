@@ -95,7 +95,7 @@ class AugmentedLagrangianState(pydantic.BaseModel):
   - File: `ai_scientist/planner.py`
   - Leverage Pydantic's `model_dump()` for serialization
 
-- [ ] **2.4 Add Pydantic pytree registration**
+- [x] **2.4 Add Pydantic pytree registration**
   - Port `constellaration/utils/pytree.py` patterns
   - Implement `register_pydantic_data` decorator
   - File: `ai_scientist/utils/pytree.py` (new)
