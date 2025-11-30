@@ -3220,6 +3220,8 @@ def main() -> None:
             experiment,
             budgets=replace(experiment.budgets, pool_type=cli.pool_type),
         )
+    if cli.aso:
+        experiment = replace(experiment, aso=replace(experiment.aso, enabled=True))
     if cli.slow:
         experiment = replace(
             experiment,

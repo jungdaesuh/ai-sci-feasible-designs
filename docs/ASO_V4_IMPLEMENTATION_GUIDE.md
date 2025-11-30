@@ -1536,15 +1536,15 @@ if args.aso:
 - [x] 3.6 Implement `_update_trajectory_best()`
 - [x] 3.7 Implement `_log_telemetry()` with full ALM state
 - [x] 3.8 Implement `_persist_telemetry()` to JSONL
-- [x] 3.9 Implement helper methods (`_seed_to_boundary`, etc.)
+- [x] 3.9 Implement helper methods (`_seed_to_boundary`, `_get_problem`, `_build_optimization_settings`)
 
 ### Phase 4: Runner Integration (Priority 1)
 
 **File: `ai_scientist/runner.py`**
-- [ ] 4.1 Add `--aso` CLI argument
-- [ ] 4.2 Update config initialization for ASO flag
-- [ ] 4.3 Update `_run_cycle()` to branch on `cfg.aso.enabled`
-- [ ] 4.4 Call `produce_candidates_aso()` in ASO path
+- [x] 4.1 Add `--aso` CLI argument
+- [x] 4.2 Update config initialization for ASO flag
+- [x] 4.3 Update `_run_cycle()` to branch on `cfg.aso.enabled`
+- [x] 4.4 Call `produce_candidates_aso()` in ASO path
 
 ### Phase 5: Testing (Priority 1)
 
