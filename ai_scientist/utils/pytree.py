@@ -135,6 +135,10 @@ def mask_and_ravel(
     flat_segments: list[NpOrJaxArray] = []
     leaves_info: list[_LeafInfo] = []
     for leaf, leaf_mask in zip(leaves, mask_leaves):
+        # Handle integer masks (0/1) as boolean
+        if isinstance(leaf_mask, int) or (hasattr(leaf_mask, "dtype") and jnp.issubdtype(leaf_mask.dtype, jnp.integer)):
+            leaf_mask = bool(leaf_mask) if isinstance(leaf_mask, int) else leaf_mask.astype(bool)
+
         if hasattr(leaf_mask, "dtype") and leaf_mask.dtype == jnp.bool_:
             selected = leaf[leaf_mask]
             flat_segments.append(jnp.atleast_1d(selected.ravel()))
@@ -152,11 +156,21 @@ def mask_and_ravel(
                 )
             else:
                 leaves_info.append(_LeafInfo(leaf=leaf, mask=None, is_scalar=is_scalar))
-        elif leaf_mask is True: # Handle boolean True/False if mask is not array
-             flat_segments.append(jnp.atleast_1d(leaf))
-             leaves_info.append(
-                 _LeafInfo(mask=jnp.array([True]), leaf=leaf, is_scalar=True)
-             )
+        elif leaf_mask is True:
+             # Handle scalar True. Check if leaf is array to avoid treating as scalar.
+             if isinstance(leaf, (np.ndarray, jnp.ndarray)) and leaf.ndim > 0:
+                 # Leaf is array, mask is scalar True -> mask everything
+                 full_mask = jnp.ones_like(leaf, dtype=bool)
+                 selected = leaf[full_mask]
+                 flat_segments.append(jnp.atleast_1d(selected.ravel()))
+                 leaves_info.append(
+                     _LeafInfo(mask=full_mask, leaf=leaf, is_scalar=False)
+                 )
+             else:
+                 flat_segments.append(jnp.atleast_1d(leaf))
+                 leaves_info.append(
+                     _LeafInfo(mask=jnp.array([True]), leaf=leaf, is_scalar=True)
+                 )
         elif leaf_mask is False:
              leaves_info.append(_LeafInfo(leaf=leaf, mask=None, is_scalar=True))
         else:
