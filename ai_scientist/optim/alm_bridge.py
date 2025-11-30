@@ -71,6 +71,7 @@ def _safe_objective_constraints(
     unravel_fn: Callable[[jnp.ndarray], rz_fourier.SurfaceRZFourier],
     settings: forward_model.ConstellarationSettings,
     aspect_ratio_upper_bound: float | None,
+    constraint_shape: tuple[int, ...],
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
 ]:
@@ -87,19 +88,11 @@ def _safe_objective_constraints(
         # But objective_constraints return signature is strict (tuple[jnp, jnp], metrics).
         # constellaration's objective_constraints handles its own exceptions and returns 
         # NAN_TO_HIGH_VALUE. We will trust it mostly, but wrap strictly for unhandled ones.
-        # If we want to match the guide exactly:
-        # The guide says: return (("ERROR", str(e), x.tolist()[:5]), None)
-        # But step_alm needs to handle that. Let's stick to a robust default return if it fails completely.
         NAN_VALUE = 1e6
         objective = jnp.array(NAN_VALUE)
-        # Assume roughly 6 constraints max for now, or better yet, try to infer from problem?
-        # Safe bet is to return error tuple if the caller is prepared to handle it.
-        # The guide's step_alm logic doesn't explicitly show the "ERROR" check in the loop, 
-        # but the "Risks and Mitigations" section suggests it.
-        # To be safe and compatible with existing constellaration types (jnp.ndarray),
-        # we'll return valid types but bad values.
         print(f"Evaluation failed: {e}")
-        return ((objective, jnp.ones(1) * NAN_VALUE), None)
+        # Use the passed shape to create the fallback constraints
+        return ((objective, jnp.ones(constraint_shape) * NAN_VALUE), None)
 
 
 def create_alm_context(
@@ -228,6 +221,9 @@ def step_alm(
 
     n_evals = 0
     last_metrics = None
+    
+    # Extract constraint shape for safe fallback
+    constraint_shape = state.constraints.shape
 
     mp_context = multiprocessing.get_context("forkserver")
 
@@ -255,6 +251,7 @@ def step_alm(
                     context.unravel_fn,
                     context.forward_settings,
                     context.aspect_ratio_upper_bound,
+                    constraint_shape,
                 )
                 running_evaluations.append((future, candidate))
                 rest_budget -= 1
