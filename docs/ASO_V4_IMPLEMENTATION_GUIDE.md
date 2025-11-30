@@ -1528,15 +1528,15 @@ if args.aso:
 ### Phase 3: Coordinator (Priority 1)
 
 **File: `ai_scientist/coordinator.py`**
-- [ ] 3.1 Add `TrajectoryState` dataclass with `alm_context`, `alm_state`
-- [ ] 3.2 Add `CONSTRAINT_NAMES` mapping
-- [ ] 3.3 Add `produce_candidates_aso()` entry point
-- [ ] 3.4 Implement `_run_trajectory_aso()` using `step_alm()`
-- [ ] 3.5 Implement `_generate_diagnostics()` from real ALM state
-- [ ] 3.6 Implement `_update_trajectory_best()`
-- [ ] 3.7 Implement `_log_telemetry()` with full ALM state
-- [ ] 3.8 Implement `_persist_telemetry()` to JSONL
-- [ ] 3.9 Implement helper methods (`_seed_to_boundary`, etc.)
+- [x] 3.1 Add `TrajectoryState` dataclass with `alm_context`, `alm_state`
+- [x] 3.2 Add `CONSTRAINT_NAMES` mapping
+- [x] 3.3 Add `produce_candidates_aso()` entry point
+- [x] 3.4 Implement `_run_trajectory_aso()` using `step_alm()`
+- [x] 3.5 Implement `_generate_diagnostics()` from real ALM state
+- [x] 3.6 Implement `_update_trajectory_best()`
+- [x] 3.7 Implement `_log_telemetry()` with full ALM state
+- [x] 3.8 Implement `_persist_telemetry()` to JSONL
+- [x] 3.9 Implement helper methods (`_seed_to_boundary`, etc.)
 
 ### Phase 4: Runner Integration (Priority 1)
 

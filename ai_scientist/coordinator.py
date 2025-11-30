@@ -477,45 +477,77 @@ class Coordinator:
 
         self.telemetry = []
 
-    # Helper methods (implement based on existing code)
+    # Helper methods
     def _prepare_seeds(self, initial_seeds, cycle, n_needed):
         """Prepare and validate seeds using ExplorationWorker + GeometerWorker."""
-        # This needs actual implementation later based on existing code.
-        # For now, return a placeholder.
         if initial_seeds:
             return initial_seeds
-        # Placeholder for actual seed generation
-        return [{"params": {"r_cos": [[1.0]], "z_sin": [[0.1]], "n_field_periods": 1, "is_stellarator_symmetric": True}}]
+
+        # Generate using Explore worker
+        # Generate a batch to ensure we have enough valid seeds
+        explore_ctx = {"n_samples": max(n_needed, 10), "cycle": cycle}
+        res = self.explore_worker.run(explore_ctx)
+        candidates = res.get("candidates", [])
+
+        # Filter with Geometer
+        if candidates:
+            geo_ctx = {"candidates": candidates}
+            geo_res = self.geo_worker.run(geo_ctx)
+            candidates = geo_res.get("candidates", [])
+
+        if not candidates:
+             return []
+
+        return candidates[:n_needed]
 
     def _seed_to_boundary(self, seed):
         """Convert seed dict to SurfaceRZFourier."""
-        # This needs actual implementation later.
-        # For now, return a dummy object.
-        class DummyBoundary:
-            def __init__(self, seed):
-                self.r_cos = jnp.array(seed["r_cos"])
-                self.z_sin = jnp.array(seed["z_sin"])
-                self.n_field_periods = seed["n_field_periods"]
-                self.is_stellarator_symmetric = seed["is_stellarator_symmetric"]
-        return DummyBoundary(seed)
+        from constellaration.geometry import surface_rz_fourier
+
+        # Handle both "seed" dict and direct params dict
+        params_map = seed.get("params", seed)
+
+        return surface_rz_fourier.SurfaceRZFourier(
+            r_cos=jnp.array(params_map["r_cos"]),
+            z_sin=jnp.array(params_map["z_sin"]),
+            n_field_periods=int(params_map.get("n_field_periods", 1)),
+            is_stellarator_symmetric=bool(params_map.get("is_stellarator_symmetric", True)),
+            r_sin=jnp.array(params_map["r_sin"]) if "r_sin" in params_map else None,
+            z_cos=jnp.array(params_map["z_cos"]) if "z_cos" in params_map else None,
+        )
 
     def _get_problem(self, config):
         """Get problem instance from config."""
-        # This needs actual implementation later.
-        # For now, return a dummy object.
-        from constellaration.problems import MHDStableQIStellarator
-        return MHDStableQIStellarator()
+        from constellaration import problems
+        problem_key = (config.problem or "p3").lower()
+
+        if problem_key.startswith("p1"):
+            return problems.GeometricalProblem()
+        elif problem_key.startswith("p2"):
+            return problems.SimpleToBuildStellarator()
+        else:
+            # P3 defaults (MHD Stable QI)
+            return problems.MHDStableQIStellarator()
 
     def _build_optimization_settings(self, config):
         """Build OptimizationSettings from config."""
-        # This needs actual implementation later.
-        # For now, return a dummy object.
-        from constellaration.optimization.settings import OptimizationSettings, AugmentedLagrangianMethodSettings, AugmentedLagrangianSettings, NevergradSettings
+        from constellaration.optimization.settings import (
+            OptimizationSettings,
+            AugmentedLagrangianMethodSettings,
+            NevergradSettings
+        )
+        from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianSettings
+        from constellaration.forward_model import ConstellarationSettings
+
+        # Determine forward model settings
+        # For ASO we default to high fidelity (P3/P2 style)
+        fm_settings = ConstellarationSettings.default_high_fidelity()
+
         return OptimizationSettings(
-            max_poloidal_mode=3,
-            max_toroidal_mode=5,
+            max_poloidal_mode=config.boundary_template.n_poloidal_modes,
+            max_toroidal_mode=config.boundary_template.n_toroidal_modes,
             infinity_norm_spectrum_scaling=0.0,
-            forward_model_settings=None, # Placeholder
+            forward_model_settings=fm_settings,
             optimizer_settings=AugmentedLagrangianMethodSettings(
                 maxit=config.alm.maxit,
                 penalty_parameters_initial=config.alm.penalty_parameters_initial,
@@ -532,6 +564,8 @@ class Coordinator:
                     budget_increment=config.alm.oracle_budget_increment,
                     budget_max=config.alm.oracle_budget_max,
                     num_workers=config.alm.oracle_num_workers,
+                    max_time=None,
+                    batch_mode=True,
                 ),
             )
         )
