@@ -187,38 +187,63 @@ def mask_and_ravel(
     flat_segments: List[NpOrJaxArray] = []
     leaves_info: List[_LeafInfo] = []
     for leaf, leaf_mask in zip(leaves, mask_leaves):
-        # Check for boolean array mask
-        if (isinstance(leaf_mask, (np.ndarray, jnp.ndarray)) and leaf_mask.dtype == bool) or \
-           (hasattr(leaf_mask, 'dtype') and leaf_mask.dtype == jnp.bool_):
+        # Determine if the leaf is effectively a scalar
+        # We treat python float/int as scalar, and 0-d arrays as scalar if mask is scalar
+        is_leaf_array = hasattr(leaf, "shape") and leaf.shape != ()
+
+        # Check for boolean array mask (explicit array mask)
+        if (
+            isinstance(leaf_mask, (np.ndarray, jnp.ndarray))
+            and leaf_mask.dtype == bool
+            and leaf_mask.shape != ()
+        ) or (
+            hasattr(leaf_mask, "dtype")
+            and leaf_mask.dtype == jnp.bool_
+            and getattr(leaf_mask, "shape", ()) != ()
+        ):
             selected = leaf[leaf_mask]
             flat_segments.append(jnp.atleast_1d(selected.ravel()))
             leaves_info.append(_LeafInfo(mask=leaf_mask, leaf=leaf, is_scalar=False))
-        elif isinstance(leaf_mask, (float, int)):
-             # Support 0/1 or 0.0/1.0 as scalar masks
-            if leaf_mask not in (0, 1, 0.0, 1.0):
-                raise ValueError("Only 0 and 1 are supported as scalar masks.")
-            is_scalar = True # Often scalars are floats in these contexts
-            if leaf_mask == 1:
-                flat_segments.append(jnp.atleast_1d(leaf))
-                leaves_info.append(
-                    _LeafInfo(mask=jnp.array([True]), leaf=leaf, is_scalar=is_scalar)
-                )
-            else:
-                leaves_info.append(_LeafInfo(leaf=leaf, mask=None, is_scalar=is_scalar))
+
+        # Scalar masks (int 0/1, float 0.0/1.0, bool True/False, or 0-d array)
         else:
-             # Handle JAX boolean scalar
-            if hasattr(leaf_mask, 'dtype') and leaf_mask.dtype == jnp.bool_ and leaf_mask.ndim == 0:
-                 is_scalar = True
-                 if leaf_mask:
-                     flat_segments.append(jnp.atleast_1d(leaf))
-                     leaves_info.append(
-                         _LeafInfo(mask=jnp.array([True]), leaf=leaf, is_scalar=is_scalar)
-                     )
-                 else:
-                     leaves_info.append(_LeafInfo(leaf=leaf, mask=None, is_scalar=is_scalar))
+            # Convert JAX scalar to python scalar for checking
+            if hasattr(leaf_mask, "item"):
+                mask_val = leaf_mask.item()
             else:
+                mask_val = leaf_mask
+
+            if mask_val not in (0, 1, 0.0, 1.0, False, True):
                 raise ValueError(
-                    f"Unsupported mask type {type(leaf_mask)} for leaf {leaf}. Value: {leaf_mask}"
+                    f"Unsupported mask value {leaf_mask} for leaf {leaf}. "
+                    "Scalar masks must be 0/1, False/True."
+                )
+
+            is_masked_in = bool(mask_val)
+            
+            if is_masked_in:
+                if is_leaf_array:
+                    # Scalar True mask on array leaf -> select all elements
+                    # Construct full boolean mask to ensure reconstruction consumes all elements
+                    full_mask = jnp.ones_like(leaf, dtype=bool)
+                    flat_segments.append(leaf.ravel())
+                    leaves_info.append(
+                        _LeafInfo(mask=full_mask, leaf=leaf, is_scalar=False)
+                    )
+                else:
+                    # Scalar True mask on scalar leaf
+                    flat_segments.append(jnp.atleast_1d(leaf))
+                    leaves_info.append(
+                        _LeafInfo(
+                            mask=jnp.array([True]), leaf=leaf, is_scalar=True
+                        )
+                    )
+            else:
+                # Mask is False/0 -> ignore leaf
+                leaves_info.append(
+                    _LeafInfo(
+                        leaf=leaf, mask=None, is_scalar=not is_leaf_array
+                    )
                 )
 
     if flat_segments:
