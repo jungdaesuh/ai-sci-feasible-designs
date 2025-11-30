@@ -43,7 +43,7 @@ This document consolidates all improvement opportunities for the `ai_scientist` 
   - File: `ai_scientist/fidelity_controller.py`
   - Functions: `_evaluate_stage`, promotion gating
 
-- [ ] **1.3 Extract `cycle_executor.py` from `runner.py`**
+- [x] **1.3 Extract `cycle_executor.py` from `runner.py`**
   - Move `_run_cycle` and cycle-level orchestration
   - File: `ai_scientist/cycle_executor.py`
 

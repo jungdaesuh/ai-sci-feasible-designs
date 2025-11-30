@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Mapping
 from unittest.mock import patch
 
-from ai_scientist import config as ai_config, memory, runner, tools
+from ai_scientist import config as ai_config, memory, runner, tools, cycle_executor
 from ai_scientist.budget_manager import BudgetController, CycleBudgetFeedback
 
 
@@ -90,7 +90,7 @@ def test_verify_best_claim_supported_when_seed_replay_matches():
             "hv": seed_value * 0.1,
         }
 
-    status = runner._verify_best_claim(
+    status = cycle_executor._verify_best_claim(
         world_model=world_model,
         experiment_id=1,
         cycle_number=1,
@@ -132,7 +132,7 @@ def test_verify_best_claim_refuted_when_metric_differs_beyond_tolerance():
             "hv": seed_value * 0.1,
         }
 
-    status = runner._verify_best_claim(
+    status = cycle_executor._verify_best_claim(
         world_model=world_model,
         experiment_id=2,
         cycle_number=1,
@@ -181,7 +181,7 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
         tools.clear_evaluation_cache()
         with memory.WorldModel(db_path) as world_model:
             experiment_id = world_model.start_experiment(
-                runner._serialize_experiment_config(
+                runner.serialize_experiment_config(
                     cfg, constellaration_sha=constellaration_sha
                 ),
                 git_sha,
@@ -189,26 +189,31 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
             )
             with (
                 patch(
-                    "ai_scientist.runner._problem_evaluator",
+                    "ai_scientist.cycle_executor._problem_evaluator",
                     return_value=_stub_runner_evaluator(),
                 ),
                 patch(
-                    "ai_scientist.runner._problem_tool_name",
+                    "ai_scientist.cycle_executor._problem_tool_name",
                     return_value="stub_tool",
                 ),
             ):
                 budget_controller = runner.BudgetController(cfg)
-                runner._run_cycle(
-                    cfg,
-                    cycle_index=0,
+                fidelity_controller = runner.FidelityController(cfg)
+                executor = cycle_executor.CycleExecutor(
+                    config=cfg,
                     world_model=world_model,
+                    planner=None,
+                    coordinator=None,
+                    budget_controller=budget_controller,
+                    fidelity_controller=fidelity_controller
+                )
+                executor.run_cycle(
+                    cycle_index=0,
                     experiment_id=experiment_id,
                     governance_stage="s1",
                     git_sha=git_sha,
                     constellaration_sha=constellaration_sha,
                     surrogate_model=runner.SurrogateBundle(),
-                    runtime=None,
-                    budget_controller=budget_controller,
                 )
         conn = sqlite3.connect(db_path)
         row = conn.execute(
