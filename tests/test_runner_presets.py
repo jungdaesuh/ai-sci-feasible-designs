@@ -54,25 +54,34 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
             experiment_id = wm.start_experiment({"problem": cfg.problem}, "stubsha")
             with (
                 patch(
-                    "ai_scientist.runner._problem_evaluator",
+                    "ai_scientist.cycle_executor._problem_evaluator",
                     return_value=_stub_evaluator(),
                 ),
                 patch(
-                    "ai_scientist.runner._problem_tool_name", return_value="evaluate_p3"
+                    "ai_scientist.cycle_executor._problem_tool_name", return_value="evaluate_p3"
                 ),
             ):
                 budget_controller = runner.BudgetController(cfg)
-                runner._run_cycle(
-                    cfg,
-                    cycle_index=0,
+                fidelity_controller = runner.FidelityController(cfg)
+                cycle_executor = runner.CycleExecutor(
+                    config=cfg,
                     world_model=wm,
+                    planner=None,
+                    coordinator=None,
+                    budget_controller=budget_controller,
+                    fidelity_controller=fidelity_controller
+                )
+                cycle_executor.run_cycle(
+                    cycle_index=0,
                     experiment_id=experiment_id,
                     governance_stage=expected_stage,
                     git_sha="deadbeef",
                     constellaration_sha="deadbeef",
                     surrogate_model=runner.SurrogateBundle(),
-                    runtime=activated,
-                    budget_controller=budget_controller,
+                    verbose=activated.verbose,
+                    slow=activated.slow,
+                    screen_only=activated.screen_only,
+                    log_cache_stats=activated.log_cache_stats,
                 )
             history = wm.stage_history(experiment_id)
             assert history, "Stage history should record at least one cycle"

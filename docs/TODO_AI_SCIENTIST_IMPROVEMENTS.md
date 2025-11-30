@@ -47,7 +47,7 @@ This document consolidates all improvement opportunities for the `ai_scientist` 
   - Move `_run_cycle` and cycle-level orchestration
   - File: `ai_scientist/cycle_executor.py`
 
-- [ ] **1.4 Create `experiment_runner.py` as thin orchestrator**
+- [x] **1.4 Create `experiment_runner.py` as thin orchestrator**
   - Keep only `run_experiment()` entry point that composes the above
   - File: `ai_scientist/experiment_runner.py`
 
