@@ -64,15 +64,20 @@ class P1Problem(Problem):
     def constraint_names(self) -> List[str]:
         return ["aspect_ratio", "average_triangularity", "edge_rotational_transform"]
 
+    # Constraint constants (exposed for prompts)
+    _aspect_ratio_upper_bound = 4.0
+    _average_triangularity_upper_bound = -0.5
+    _edge_rotational_transform_over_n_field_periods_lower_bound = 0.3
+
     def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
         # Constraints from constellaration.problems.GeometricalProblem
         # 1. aspect_ratio <= 4.0
         # 2. average_triangularity <= -0.5
         # 3. edge_rotational_transform_over_n_field_periods >= 0.3
         
-        ar_limit = 4.0
-        tri_limit = -0.5
-        iota_limit = 0.3
+        ar_limit = self._aspect_ratio_upper_bound
+        tri_limit = self._average_triangularity_upper_bound
+        iota_limit = self._edge_rotational_transform_over_n_field_periods_lower_bound
 
         ar = metrics.get("aspect_ratio", 0.0)
         tri = metrics.get("average_triangularity", 0.0)
@@ -106,6 +111,13 @@ class P2Problem(Problem):
             "max_elongation"
         ]
 
+    # Constraint constants (exposed for prompts)
+    _aspect_ratio_upper_bound = 10.0
+    _edge_rotational_transform_over_n_field_periods_lower_bound = 0.25
+    _log10_qi_upper_bound = -4.0
+    _edge_magnetic_mirror_ratio_upper_bound = 0.2
+    _max_elongation_upper_bound = 5.0
+
     def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
         # Constraints from constellaration.problems.SimpleToBuildQIStellarator
         # 1. aspect_ratio <= 10.0
@@ -114,11 +126,11 @@ class P2Problem(Problem):
         # 4. edge_magnetic_mirror_ratio <= 0.2
         # 5. max_elongation <= 5.0
 
-        ar_limit = 10.0
-        iota_limit = 0.25
-        qi_limit = -4.0
-        mirror_limit = 0.2
-        elong_limit = 5.0
+        ar_limit = self._aspect_ratio_upper_bound
+        iota_limit = self._edge_rotational_transform_over_n_field_periods_lower_bound
+        qi_limit = self._log10_qi_upper_bound
+        mirror_limit = self._edge_magnetic_mirror_ratio_upper_bound
+        elong_limit = self._max_elongation_upper_bound
 
         ar = metrics.get("aspect_ratio", 0.0)
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
@@ -159,6 +171,13 @@ class P3Problem(Problem):
             "vacuum_well"
         ]
 
+    # Constraint constants (exposed for prompts)
+    _edge_rotational_transform_over_n_field_periods_lower_bound = 0.25
+    _log10_qi_upper_bound = -3.5
+    _edge_magnetic_mirror_ratio_upper_bound = 0.25
+    _flux_compression_in_regions_of_bad_curvature_upper_bound = 0.9
+    _vacuum_well_lower_bound = 0.0
+
     def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
         # Constraints from constellaration.problems.MHDStableQIStellarator
         # 1. edge_rotational_transform_over_n_field_periods >= 0.25
@@ -167,11 +186,11 @@ class P3Problem(Problem):
         # 4. flux_compression_in_regions_of_bad_curvature <= 0.9
         # 5. vacuum_well >= 0.0
 
-        iota_limit = 0.25
-        qi_limit = -3.5
-        mirror_limit = 0.25
-        flux_limit = 0.9
-        well_limit = 0.0
+        iota_limit = self._edge_rotational_transform_over_n_field_periods_lower_bound
+        qi_limit = self._log10_qi_upper_bound
+        mirror_limit = self._edge_magnetic_mirror_ratio_upper_bound
+        flux_limit = self._flux_compression_in_regions_of_bad_curvature_upper_bound
+        well_limit = self._vacuum_well_lower_bound
         well_norm = max(1e-1, well_limit) # From constellaration code
 
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
