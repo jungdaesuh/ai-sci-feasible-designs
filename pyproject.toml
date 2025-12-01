@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+ignore = ["E402", "F722", "F821"]
+
+[tool.ruff.per-file-ignores]
+"ai_scientist/optim/surrogate_v2.py" = ["F722", "F821"]
+"ai_scientist/optim/geometry.py" = ["F722", "F821"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false
+reportUnboundVariable = false
+reportOptionalMemberAccess = false
+reportOptionalSubscript = false
