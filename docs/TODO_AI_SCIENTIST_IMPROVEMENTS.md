@@ -145,7 +145,7 @@ class ConstellarationSettings:
         )
 ```
 
-- [ ] **4.1 Add factory methods to `ExperimentConfig`**
+- [x] **4.1 Add factory methods to `ExperimentConfig`**
   - File: `ai_scientist/config.py`
   - Methods: `p3_high_fidelity()`, `p3_quick_validation()`, `p3_aso_enabled()`
 

@@ -286,6 +286,88 @@ class ExperimentConfig:
     reporting: Mapping[str, Any] = field(default_factory=dict)
     run_overrides: Mapping[str, Any] = field(default_factory=dict)
     planner: str = "deterministic"
+
+    @staticmethod
+    def p3_high_fidelity() -> "ExperimentConfig":
+        """Production config for P3 with high fidelity physics."""
+        # Load defaults to fill required fields
+        defaults = load_experiment_config()
+        return ExperimentConfig(
+            problem="p3",
+            cycles=10,
+            random_seed=defaults.random_seed,
+            budgets=BudgetConfig(
+                screen_evals_per_cycle=50,
+                promote_top_k=5,
+                max_high_fidelity_evals_per_cycle=3,
+                wall_clock_minutes=defaults.budgets.wall_clock_minutes,
+                n_workers=defaults.budgets.n_workers,
+                pool_type=defaults.budgets.pool_type,
+            ),
+            adaptive_budgets=defaults.adaptive_budgets,
+            fidelity_ladder=defaults.fidelity_ladder,
+            boundary_template=defaults.boundary_template,
+            stage_gates=defaults.stage_gates,
+            governance=defaults.governance,
+            proposal_mix=defaults.proposal_mix,
+            constraint_weights=defaults.constraint_weights,
+            generative=defaults.generative,
+            surrogate=SurrogateConfig(backend="neural_operator"),
+            aso=ASOConfig(enabled=True, supervision_mode="event_triggered"),
+        )
+
+    @staticmethod
+    def p3_quick_validation() -> "ExperimentConfig":
+        """Fast config for testing/CI."""
+        # Load defaults to fill required fields
+        defaults = load_experiment_config()
+        return ExperimentConfig(
+            problem="p3",
+            cycles=2,
+            random_seed=defaults.random_seed,
+            budgets=BudgetConfig(
+                screen_evals_per_cycle=5,
+                promote_top_k=2,
+                max_high_fidelity_evals_per_cycle=1,
+                wall_clock_minutes=defaults.budgets.wall_clock_minutes,
+                n_workers=defaults.budgets.n_workers,
+                pool_type=defaults.budgets.pool_type,
+            ),
+            adaptive_budgets=defaults.adaptive_budgets,
+            fidelity_ladder=defaults.fidelity_ladder,
+            boundary_template=defaults.boundary_template,
+            stage_gates=defaults.stage_gates,
+            governance=defaults.governance,
+            proposal_mix=defaults.proposal_mix,
+            constraint_weights=defaults.constraint_weights,
+            generative=defaults.generative,
+            aso=ASOConfig(enabled=False),
+        )
+
+    @staticmethod
+    def p3_aso_enabled() -> "ExperimentConfig":
+        """Config with Agent-Supervised Optimization."""
+        # Load defaults to fill required fields
+        defaults = load_experiment_config()
+        return ExperimentConfig(
+            problem="p3",
+            cycles=5,
+            random_seed=defaults.random_seed,
+            budgets=defaults.budgets,
+            adaptive_budgets=defaults.adaptive_budgets,
+            fidelity_ladder=defaults.fidelity_ladder,
+            boundary_template=defaults.boundary_template,
+            stage_gates=defaults.stage_gates,
+            governance=defaults.governance,
+            proposal_mix=defaults.proposal_mix,
+            constraint_weights=defaults.constraint_weights,
+            generative=defaults.generative,
+            aso=ASOConfig(
+                enabled=True,
+                supervision_mode="event_triggered",
+                max_stagnation_steps=5,
+            ),
+        )
     
     @property
     def surrogate_backend(self) -> str:
