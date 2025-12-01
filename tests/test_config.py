@@ -1,17 +1,67 @@
 """Tests for ExperimentConfig factory methods."""
 
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+import pytest
 
-# Mock heavy dependencies to avoid ImportError due to broken environment (libtorch)
-sys.modules["ai_scientist.experiment_runner"] = MagicMock()
-sys.modules["ai_scientist.forward_model"] = MagicMock()
+@pytest.fixture
+def config_module():
+    """
+    Fixture that mocks heavy dependencies and imports ai_scientist.config.
+    Restores state after test to avoid polluting global sys.modules.
+    """
+    # Create dummy classes for types used in annotations to satisfy jaxtyping/isinstance checks
+    class MockTensor:
+        pass
+    
+    class MockArray:
+        pass
 
-from ai_scientist.config import ExperimentConfig
+    mock_torch = MagicMock()
+    mock_torch.Tensor = MockTensor
+    
+    mock_jax = MagicMock()
+    mock_jax.Array = MockArray
+    
+    mock_jax_numpy = MagicMock()
+    mock_jax_numpy.ndarray = MockArray
+    mock_jax.numpy = mock_jax_numpy
+
+    mock_modules = {
+        "torch": mock_torch,
+        "torch.nn": MagicMock(),
+        "torch.nn.functional": MagicMock(),
+        "torch.optim": MagicMock(),
+        "torch.distributions": MagicMock(),
+        "torch.utils": MagicMock(),
+        "torch.utils.data": MagicMock(),
+        "vmecpp": MagicMock(),
+        "jax": mock_jax,
+        "jaxlib": MagicMock(),
+        "jax.numpy": mock_jax_numpy,
+        "jax.tree_util": MagicMock(),
+        "ai_scientist.coordinator": MagicMock(),
+        "ai_scientist.forward_model": MagicMock(),
+        "ai_scientist.optim.surrogate_v2": MagicMock(),
+        # Mock experiment_runner because ai_scientist/__init__.py imports it
+        "ai_scientist.experiment_runner": MagicMock(),
+    }
+
+    with patch.dict(sys.modules, mock_modules):
+        # Force re-import of config to ensure it doesn't use cached broken modules
+        if "ai_scientist.config" in sys.modules:
+            del sys.modules["ai_scientist.config"]
+        
+        import ai_scientist.config
+        yield ai_scientist.config
+        
+        if "ai_scientist.config" in sys.modules:
+            del sys.modules["ai_scientist.config"]
 
 
-def test_p3_high_fidelity_factory():
+def test_p3_high_fidelity_factory(config_module):
     """Verify p3_high_fidelity factory method returns correct config."""
+    ExperimentConfig = config_module.ExperimentConfig
     config = ExperimentConfig.p3_high_fidelity()
     
     assert config.problem == "p3"
@@ -26,8 +76,9 @@ def test_p3_high_fidelity_factory():
     assert config.budgets.max_high_fidelity_evals_per_cycle == 3
 
 
-def test_p3_quick_validation_factory():
+def test_p3_quick_validation_factory(config_module):
     """Verify p3_quick_validation factory method returns correct config."""
+    ExperimentConfig = config_module.ExperimentConfig
     config = ExperimentConfig.p3_quick_validation()
     
     assert config.problem == "p3"
@@ -40,8 +91,9 @@ def test_p3_quick_validation_factory():
     assert config.budgets.max_high_fidelity_evals_per_cycle == 1
 
 
-def test_p3_aso_enabled_factory():
+def test_p3_aso_enabled_factory(config_module):
     """Verify p3_aso_enabled factory method returns correct config."""
+    ExperimentConfig = config_module.ExperimentConfig
     config = ExperimentConfig.p3_aso_enabled()
     
     assert config.problem == "p3"
@@ -53,10 +105,11 @@ def test_p3_aso_enabled_factory():
     assert config.aso.max_stagnation_steps == 5
 
 
-def test_surrogate_preservation():
+def test_surrogate_preservation(config_module):
     """Verify that factory methods preserve surrogate settings from defaults."""
     from unittest.mock import patch
-    from ai_scientist.config import SurrogateConfig
+    SurrogateConfig = config_module.SurrogateConfig
+    ExperimentConfig = config_module.ExperimentConfig
 
     # Create a mock default config with non-default surrogate settings
     mock_surrogate = SurrogateConfig(
@@ -99,9 +152,9 @@ def test_surrogate_preservation():
         assert config_aso.surrogate.n_ensembles == 5
 
 
-def test_aso_config_factories():
+def test_aso_config_factories(config_module):
     """Verify ASOConfig factory methods."""
-    from ai_scientist.config import ASOConfig
+    ASOConfig = config_module.ASOConfig
 
     # Default event triggered
     config = ASOConfig.default_event_triggered()
@@ -121,9 +174,9 @@ def test_aso_config_factories():
     assert config.enabled is False
 
 
-def test_alm_config_factories():
+def test_alm_config_factories(config_module):
     """Verify ALMConfig factory methods."""
-    from ai_scientist.config import ALMConfig
+    ALMConfig = config_module.ALMConfig
 
     # Default
     config = ALMConfig.default()
