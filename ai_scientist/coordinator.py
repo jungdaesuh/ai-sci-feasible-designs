@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import time
 import numpy as np
 import jax.numpy as jnp
+from jaxtyping import Float
 import pydantic
 from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
 from ai_scientist.optim.alm_bridge import (
@@ -341,7 +342,13 @@ class Coordinator:
         alm_state: AugmentedLagrangianState,
         traj: TrajectoryState,
     ) -> OptimizerDiagnostics:
-        """Generate rich diagnostics from REAL ALM state."""
+        """Generate rich diagnostics from REAL ALM state.
+        
+        Args:
+            alm_state: State containing:
+                - constraints: Float[jnp.ndarray, "n_constraints"]
+                - multipliers: Float[jnp.ndarray, "n_constraints"]
+        """
         aso = self.cfg.aso
         prev = traj.history[-2] if len(traj.history) >= 2 else None
 

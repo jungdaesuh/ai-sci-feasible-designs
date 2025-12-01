@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from jaxtyping import Float, Int
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -89,7 +90,14 @@ class StellaratorNeuralOp(nn.Module):
         self.head_mhd = nn.Linear(hidden_dim, 1)
         self.head_qi = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, 
+        x: Float[torch.Tensor, "batch input_dim"]
+    ) -> tuple[
+        Float[torch.Tensor, "batch"], 
+        Float[torch.Tensor, "batch"], 
+        Float[torch.Tensor, "batch"]
+    ]:
         """
         Args:
             x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1) + 1)
@@ -395,8 +403,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
     def predict_torch(
         self, 
-        x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x: Float[torch.Tensor, "batch input_dim"]
+    ) -> tuple[
+        Float[torch.Tensor, "batch"], Float[torch.Tensor, "batch"], 
+        Float[torch.Tensor, "batch"], Float[torch.Tensor, "batch"], 
+        Float[torch.Tensor, "batch"], Float[torch.Tensor, "batch"]
+    ]:
         """Differentiable prediction for optimization loop (Mean + Std).
         
         Returns:

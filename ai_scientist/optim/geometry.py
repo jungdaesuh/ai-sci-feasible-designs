@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Tuple
 
 import numpy as np
+from jaxtyping import Float
 import torch
 
 # Attempt to import SurfaceRZFourier for type hinting, but keep it optional
@@ -22,12 +23,16 @@ except ImportError:
 
 
 def fourier_to_real_space(
-    r_cos: np.ndarray | torch.Tensor,
-    z_sin: np.ndarray | torch.Tensor,
+    r_cos: Float[np.ndarray, "mpol_plus_1 two_ntor_plus_1"] | Float[torch.Tensor, "mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[np.ndarray, "mpol_plus_1 two_ntor_plus_1"] | Float[torch.Tensor, "mpol_plus_1 two_ntor_plus_1"],
     n_theta: int = 32,
     n_zeta: int = 32,
     n_field_periods: int = 1,
-) -> Tuple[np.ndarray | torch.Tensor, np.ndarray | torch.Tensor, np.ndarray | torch.Tensor]:
+) -> Tuple[
+    Float[np.ndarray, "n_theta n_zeta_total"] | Float[torch.Tensor, "n_theta n_zeta_total"], 
+    Float[np.ndarray, "n_theta n_zeta_total"] | Float[torch.Tensor, "n_theta n_zeta_total"], 
+    Float[np.ndarray, "n_theta n_zeta_total"] | Float[torch.Tensor, "n_theta n_zeta_total"]
+]:
     """
     Convert Fourier coefficients (R_cos, Z_sin) to real-space coordinates (R, Z, Phi).
     
@@ -121,12 +126,16 @@ def fourier_to_real_space(
 
 
 def batch_fourier_to_real_space(
-    r_cos: torch.Tensor,
-    z_sin: torch.Tensor,
-    n_field_periods: int | torch.Tensor,
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    n_field_periods: int | Float[torch.Tensor, "batch"],
     n_theta: int = 32,
     n_zeta: int = 32,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[
+    Float[torch.Tensor, "batch n_theta n_zeta_total"], 
+    Float[torch.Tensor, "batch n_theta n_zeta_total"], 
+    Float[torch.Tensor, "batch n_theta n_zeta_total"]
+]:
     """
     Batched version of fourier_to_real_space for PyTorch.
     
@@ -202,10 +211,14 @@ def batch_fourier_to_real_space(
 
 
 def to_cartesian(
-    R: np.ndarray | torch.Tensor, 
-    Z: np.ndarray | torch.Tensor, 
-    Phi: np.ndarray | torch.Tensor
-) -> Tuple[np.ndarray | torch.Tensor, np.ndarray | torch.Tensor, np.ndarray | torch.Tensor]:
+    R: Float[np.ndarray, "..."] | Float[torch.Tensor, "..."], 
+    Z: Float[np.ndarray, "..."] | Float[torch.Tensor, "..."], 
+    Phi: Float[np.ndarray, "..."] | Float[torch.Tensor, "..."]
+) -> Tuple[
+    Float[np.ndarray, "..."] | Float[torch.Tensor, "..."], 
+    Float[np.ndarray, "..."] | Float[torch.Tensor, "..."], 
+    Float[np.ndarray, "..."] | Float[torch.Tensor, "..."]
+]:
     """Convert Cylindrical (R, Z, Phi) to Cartesian (X, Y, Z)."""
     is_torch = isinstance(R, torch.Tensor)
     if is_torch:
@@ -222,13 +235,13 @@ def to_cartesian(
 
 
 def surface_to_point_cloud(
-    r_cos: np.ndarray | torch.Tensor,
-    z_sin: np.ndarray | torch.Tensor,
+    r_cos: Float[np.ndarray, "mpol_plus_1 two_ntor_plus_1"] | Float[torch.Tensor, "mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[np.ndarray, "mpol_plus_1 two_ntor_plus_1"] | Float[torch.Tensor, "mpol_plus_1 two_ntor_plus_1"],
     n_field_periods: int,
     n_theta: int = 32,
     n_zeta: int = 32,
     as_tensor: bool = True
-) -> torch.Tensor | np.ndarray:
+) -> Float[torch.Tensor, "n_points 3"] | Float[np.ndarray, "n_points 3"]:
     """
     High-level utility to convert coefficients directly to a (N, 3) point cloud.
     
@@ -263,12 +276,12 @@ def surface_to_point_cloud(
 # -----------------------------------------------------------------------------
 
 def _compute_derivatives(
-    r_cos: torch.Tensor,
-    z_sin: torch.Tensor,
-    n_field_periods: int | torch.Tensor,
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    n_field_periods: int | Float[torch.Tensor, "batch"],
     n_theta: int = 64,
     n_zeta: int = 64,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Float[torch.Tensor, "batch n_theta n_zeta"]]:
     """
     Compute surface derivatives R_theta, R_zeta, Z_theta, Z_zeta, etc.
     
@@ -383,12 +396,12 @@ def _compute_derivatives(
 
 
 def elongation(
-    r_cos: torch.Tensor, 
-    z_sin: torch.Tensor, 
-    n_field_periods: int | torch.Tensor,
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    n_field_periods: int | Float[torch.Tensor, "batch"],
     n_theta: int = 64,
     n_zeta: int = 64
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch"]:
     """
     Compute the maximum elongation of poloidal cross-sections.
     
@@ -436,12 +449,12 @@ def elongation(
 
 
 def aspect_ratio(
-    r_cos: torch.Tensor, 
-    z_sin: torch.Tensor, 
-    n_field_periods: int | torch.Tensor,
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    n_field_periods: int | Float[torch.Tensor, "batch"],
     n_theta: int = 64,
     n_zeta: int = 64
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch"]:
     """
     Compute Aspect Ratio = R_major / r_minor_eff.
     
@@ -474,12 +487,12 @@ def aspect_ratio(
 
 
 def mean_curvature(
-    r_cos: torch.Tensor, 
-    z_sin: torch.Tensor, 
-    n_field_periods: int | torch.Tensor,
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    n_field_periods: int | Float[torch.Tensor, "batch"],
     n_theta: int = 64,
     n_zeta: int = 64
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch"]:
     """
     Compute the Mean Curvature (H) of the surface.
     
@@ -533,12 +546,12 @@ def mean_curvature(
 
 
 def surface_area(
-    r_cos: torch.Tensor, 
-    z_sin: torch.Tensor, 
-    n_field_periods: int | torch.Tensor,
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"], 
+    n_field_periods: int | Float[torch.Tensor, "batch"],
     n_theta: int = 64,
     n_zeta: int = 64
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch"]:
     """
     Compute total surface area.
     """

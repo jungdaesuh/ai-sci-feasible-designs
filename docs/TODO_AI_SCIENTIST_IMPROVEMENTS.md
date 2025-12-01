@@ -222,16 +222,16 @@ def gradient_descent_on_inputs(
     ...
 ```
 
-- [ ] **7.1 Add jaxtyping to `optim/surrogate_v2.py`**
+- [x] **7.1 Add jaxtyping to `optim/surrogate_v2.py`**
   - Annotate model inputs/outputs with shapes
 
-- [ ] **7.2 Add jaxtyping to `optim/geometry.py`**
+- [x] **7.2 Add jaxtyping to `optim/geometry.py`**
   - Annotate Fourier ↔ real-space conversions
 
-- [ ] **7.3 Add jaxtyping to `optim/alm_bridge.py`**
+- [x] **7.3 Add jaxtyping to `optim/alm_bridge.py`**
   - Annotate ALM state arrays
 
-- [ ] **7.4 Add jaxtyping to `coordinator.py`**
+- [x] **7.4 Add jaxtyping to `coordinator.py`**
   - Annotate diagnostic arrays
 
 ---

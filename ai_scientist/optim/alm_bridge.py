@@ -13,6 +13,7 @@ from concurrent import futures
 import time
 
 import jax.numpy as jnp
+from jaxtyping import Float
 import numpy as np
 import nevergrad
 
@@ -128,8 +129,8 @@ def step_alm(
     state: AugmentedLagrangianState,
     budget: int,
     *,
-    penalty_override: Optional[jnp.ndarray] = None,
-    bounds_override: Optional[jnp.ndarray] = None,
+    penalty_override: Optional[Float[jnp.ndarray, "n_constraints"]] = None,
+    bounds_override: Optional[Float[jnp.ndarray, "n_params"]] = None,
     num_workers: int = 4,
 ) -> ALMStepResult:
     """

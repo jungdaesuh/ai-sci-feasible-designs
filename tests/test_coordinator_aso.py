@@ -1,6 +1,7 @@
 import sys
 import pytest
 from unittest.mock import MagicMock, patch
+import importlib
 
 # Mock dependencies to avoid environment issues
 sys.modules["vmecpp"] = MagicMock()
@@ -16,6 +17,7 @@ sys.modules["constellaration.geometry"] = MagicMock()
 sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
 sys.modules["constellaration.optimization"] = MagicMock()
 sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
+sys.modules["constellaration.optimization.augmented_lagrangian"].AugmentedLagrangianState = MagicMock
 sys.modules["constellaration.optimization.settings"] = MagicMock()
 sys.modules["constellaration.utils"] = MagicMock()
 sys.modules["constellaration.utils.pytree"] = MagicMock()
@@ -24,6 +26,12 @@ sys.modules["constellaration.initial_guess"] = MagicMock()
 
 import jax.numpy as jnp
 import numpy as np
+
+# Reload coordinator to ensure it picks up the mocked dependencies
+if "ai_scientist.coordinator" in sys.modules:
+    import ai_scientist.coordinator
+    importlib.reload(ai_scientist.coordinator)
+
 from ai_scientist.coordinator import Coordinator, TrajectoryState
 from ai_scientist.planner import OptimizerDiagnostics, DirectiveAction, OptimizationDirective, DirectiveSource
 from ai_scientist.config import ASOConfig, ExperimentConfig, ALMConfig
