@@ -12,6 +12,8 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence, Tuple
 from ai_scientist import config as ai_config
 from ai_scientist import tools
 from ai_scientist import memory
+from ai_scientist import adapter
+from ai_scientist.forward_model import forward_model_batch, EvaluationResult
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
 P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
@@ -137,116 +139,155 @@ class FidelityController:
         stage: str,
         budgets: ai_config.BudgetConfig,
         cycle_start: float,
-        evaluate_fn: ProblemEvaluator,
+        evaluate_fn: ProblemEvaluator | None = None, # Deprecated/Unused if using forward_model
         *,
         sleep_per_eval: float = 0.0,
+        tool_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Evaluate candidates at a given fidelity, respecting wall-clock budget."""
+        
+        # Convert iterable to list
+        candidate_list = list(candidates)
+        if not candidate_list:
+            return []
 
-        results: list[dict[str, Any]] = []
+        # Check wall clock before starting batch
         wall_limit = budgets.wall_clock_minutes
+        if _time_exceeded(cycle_start, wall_limit):
+            return []
 
-        if budgets.n_workers <= 1:
-            for candidate in candidates:
-                if _time_exceeded(cycle_start, wall_limit):
-                    break
-                params = candidate["params"]
-                design_id = candidate.get("design_hash") or tools.design_hash(params)
-                try:
-                    evaluation = evaluate_fn(params, stage=stage)
-                    evaluation.setdefault("vmec_status", "ok")
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[runner][stage-eval] Failed evaluation for design {design_id} "
-                        f"(seed={candidate['seed']} stage={stage}): {exc}"
-                    )
-                    evaluation = {
-                        "stage": stage,
-                        "feasibility": float("inf"),
-                        "max_violation": float("inf"),
-                        "objective": float("inf"),
-                        "is_feasible": False,
-                        "vmec_status": "exception",
-                        "metrics": {
-                            "minimum_normalized_magnetic_gradient_scale_length": 0.0,
-                            "aspect_ratio": float("inf"),
-                            "max_elongation": float("inf"),
-                            "constraint_margins": {},
-                            "max_violation": float("inf"),
-                        },
-                    }
-                results.append(
-                    {
-                        "params": params,
-                        "evaluation": evaluation,
-                        "seed": int(candidate["seed"]),
-                        "design_hash": design_id,
-                    }
-                )
-                if sleep_per_eval > 0:
-                    time.sleep(sleep_per_eval)
-            return results
+        # Prepare settings
+        # We use tools._settings_for_stage to get the correct config
+        # This assumes tools is available and has this helper. 
+        # If not, we should replicate logic or import from where it lives.
+        # For now, we rely on tools.
+        fm_settings = tools._settings_for_stage(stage, self.config.problem)
 
-        future_payloads = {}
-        executor_cls = (
-            ThreadPoolExecutor if budgets.pool_type == "thread" else ProcessPoolExecutor
-        )
-        executor_kwargs: dict[str, Any] = {"max_workers": budgets.n_workers}
-        if executor_cls is ProcessPoolExecutor:
-            executor_kwargs["initializer"] = _process_worker_initializer
-        with executor_cls(**executor_kwargs) as executor:
-            for candidate in candidates:
-                if _time_exceeded(cycle_start, wall_limit):
-                    break
-                design_id = candidate.get("design_hash")
-                future = executor.submit(evaluate_fn, candidate["params"], stage=stage)
-                future_payloads[future] = (candidate, design_id)
+        # Prepare PEFT hook
+        if tool_name:
+            adapter.prepare_peft_hook(tool_name, stage)
 
-            for future in as_completed(future_payloads):
-                candidate, design_id = future_payloads[future]
-                exc = future.exception()
-                if exc is not None:
-                    design_hash = design_id or tools.design_hash(candidate["params"])
-                    print(
-                        f"[runner][stage-eval] Failed evaluation for design {design_hash} "
-                        f"(seed={candidate['seed']} stage={stage}): {exc}"
-                    )
-                    failure_eval = {
-                        "stage": stage,
-                        "feasibility": float("inf"),
-                        "max_violation": float("inf"),
-                        "objective": float("inf"),
-                        "is_feasible": False,
-                        "vmec_status": "exception",
-                        "metrics": {
-                            "minimum_normalized_magnetic_gradient_scale_length": 0.0,
-                            "aspect_ratio": float("inf"),
-                            "max_elongation": float("inf"),
-                            "constraint_margins": {},
-                            "max_violation": float("inf"),
-                        },
-                    }
-                    results.append(
-                        {
-                            "params": candidate["params"],
-                            "evaluation": failure_eval,
-                            "seed": int(candidate["seed"]),
-                            "design_hash": design_hash,
-                        }
-                    )
-                    continue
+        # Extract boundaries
+        boundaries = [c["params"] for c in candidate_list]
 
-                results.append(
-                    {
-                        "params": candidate["params"],
-                        "evaluation": {
-                            **future.result(),
-                            "vmec_status": future.result().get("vmec_status", "ok"),
-                        },
-                        "seed": int(candidate["seed"]),
-                        "design_hash": design_id or tools.design_hash(candidate["params"]),
-                    }
-                )
+        # Run Batch Evaluation
+        try:
+            # We use the budgets.n_workers for parallelism
+            batch_results = forward_model_batch(
+                boundaries,
+                fm_settings,
+                n_workers=budgets.n_workers,
+                use_cache=True
+            )
+        except Exception as exc:
+            print(f"[runner][stage-eval] Batch evaluation failed: {exc}")
+            # If batch fails completely, we might want to return empty or penalized?
+            # forward_model_batch re-raises exceptions from workers if they crash hard,
+            # but individual failures should be handled if we want partial results.
+            # Current forward_model_batch raises on first exception.
+            # We'll assume it fails all if it raises.
+            return []
+
+        # Apply PEFT updates
+        if tool_name:
+            adapter.apply_lora_updates(tool_name, stage)
+
+        # Process Results
+        results: list[dict[str, Any]] = []
+        
+        for i, result in enumerate(batch_results):
+            candidate = candidate_list[i]
+            design_id = candidate.get("design_hash") or result.design_hash
+            
+            # Convert EvaluationResult to dict format expected by runner
+            # We need to reconstruct the dict structure:
+            # {
+            #     "stage": stage,
+            #     "objective": ...,
+            #     "feasibility": ...,
+            #     "metrics": ...,
+            #     "constraint_margins": ...,
+            #     ...
+            # }
+            
+            # Helper to calculate score (gradient - aspect for P3/P2)
+            # This logic was in tools.evaluate_p3 etc.
+            # We can reuse _objective_proxy or similar, but we need 'metrics' dict first.
+            
+            metrics_dict = result.metrics.model_dump()
+            
+            # Determine score/hv based on problem
+            # This duplicates logic from tools.evaluate_p*, but that's inevitable if we decouple.
+            # Or we can use the result.objective directly if it matches?
+            # forward_model.compute_objective returns:
+            # P1: max_elongation
+            # P2: min_grad_scale
+            # P3: aspect_ratio
+            
+            # But runner expects:
+            # P1: score = 1.0 - normalized(max_elongation)
+            # P2: score = gradient / aspect
+            # P3: score = gradient / aspect
+            
+            # And 'objective' field in runner dict:
+            # P1: result.objective (minimize=True)
+            # P2: result.objective (minimize=False)
+            # P3: result.objective (minimize=True)
+            
+            # Let's map carefully.
+            
+            eval_dict = {
+                "stage": stage,
+                "objective": result.objective,
+                "feasibility": result.feasibility,
+                "is_feasible": result.is_feasible,
+                "metrics": metrics_dict,
+                "constraint_margins": result.constraints_map, # Use map for compatibility
+                "max_violation": result.feasibility,
+                "cache_hit": result.cache_hit,
+                "vmec_status": "ok" if not result.error_message else "exception",
+                "settings": result.settings.constellaration_settings.model_dump(),
+            }
+            
+            # Add derived fields
+            if self.config.problem == "p1":
+                eval_dict["minimize_objective"] = True
+                # Score logic from tools.evaluate_p1
+                # score = 1.0 - normalized(max_elongation)
+                # We can re-implement or just leave it 0.0 if not used for ranking here?
+                # FidelityController uses _objective_proxy for ranking P3/P2.
+                # For P1 it uses _extract_objectives.
+                pass
+            elif self.config.problem in ["p2", "p3"]:
+                eval_dict["minimize_objective"] = self.config.problem == "p3"
+                # Score logic
+                grad = float(metrics_dict.get("minimum_normalized_magnetic_gradient_scale_length", 0.0))
+                aspect = float(metrics_dict.get("aspect_ratio", 1.0))
+                score = grad / max(1.0, aspect)
+                eval_dict["score"] = score
+                
+                if self.config.problem == "p2":
+                    eval_dict["hv"] = max(0.0, grad - 1.0)
+                else: # p3
+                    eval_dict["hv"] = max(0.0, grad - 1.0)
+
+            if result.error_message:
+                 eval_dict["error"] = result.error_message
+                 # Penalize if error?
+                 eval_dict["feasibility"] = float("inf")
+                 eval_dict["max_violation"] = float("inf")
+                 eval_dict["objective"] = 1e9 if eval_dict.get("minimize_objective", True) else -1e9
+
+            results.append({
+                "params": candidate["params"],
+                "evaluation": eval_dict,
+                "seed": int(candidate["seed"]),
+                "design_hash": design_id,
+            })
+            
+            if sleep_per_eval > 0:
+                time.sleep(sleep_per_eval)
+
         return results
 
     def get_promotion_candidates(

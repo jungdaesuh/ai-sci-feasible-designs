@@ -299,6 +299,8 @@ def evaluate_p1(
     use_cache: bool = True,
 ) -> Dict[str, Any]:
     """Run a P1-style evaluation using centralized forward model."""
+    import warnings
+    warnings.warn("evaluate_p1 is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
     params_map = _ensure_mapping(boundary_params)
     settings = _settings_for_stage(stage, "p1", skip_qi=True)
     
@@ -336,6 +338,8 @@ def evaluate_p2(
     use_cache: bool = True,
 ) -> Dict[str, Any]:
     """Run a high-fidelity evaluator for the P2 (QI) problem."""
+    import warnings
+    warnings.warn("evaluate_p2 is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
     params_map = _ensure_mapping(boundary_params)
     settings = _settings_for_stage(stage, "p2")
     
@@ -370,6 +374,8 @@ def evaluate_p3(
     use_cache: bool = True,
 ) -> Dict[str, Any]:
     """Run a high-fidelity evaluator for the P3 (multi-objective) problem."""
+    import warnings
+    warnings.warn("evaluate_p3 is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
     params_map = _ensure_mapping(boundary_params)
     settings = _settings_for_stage(stage, "p3")
 
@@ -407,6 +413,8 @@ def evaluate_p3_set(
     reference_point: Tuple[float, float] = _P3_REFERENCE_POINT,
 ) -> Dict[str, Any]:
     """Evaluate a batch of P3 boundaries and compute the set-level hypervolume."""
+    import warnings
+    warnings.warn("evaluate_p3_set is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
 
     stage_lower = stage.lower()
     if not boundary_specs:

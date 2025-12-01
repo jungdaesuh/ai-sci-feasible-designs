@@ -417,8 +417,9 @@ class CycleExecutor:
                 stage=screen_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=evaluate_fn,
+                evaluate_fn=None, # Deprecated
                 sleep_per_eval=sleep_per_eval,
+                tool_name=tool_name,
             )
         else:
             screen_results = []
@@ -478,8 +479,9 @@ class CycleExecutor:
                 stage=promote_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=evaluate_fn,
+                evaluate_fn=None, # Deprecated
                 sleep_per_eval=sleep_per_eval,
+                tool_name=tool_name,
             )
             promote_cache_stats = tools.get_cache_stats(promote_stage)
             if log_cache_stats:
