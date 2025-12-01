@@ -1,4 +1,5 @@
 import warnings
+
 import pytest
 
 
@@ -14,10 +15,10 @@ def pytest_collection_modifyitems(config, items):
                 )
             )
 
+
 # Silence noisy PendingDeprecationWarning from numpy.matlib inside simsopt dependency.
 warnings.filterwarnings(
     "ignore",
     message="Importing from numpy.matlib is deprecated",
     category=PendingDeprecationWarning,
 )
-

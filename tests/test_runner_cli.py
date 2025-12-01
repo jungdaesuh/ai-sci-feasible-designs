@@ -1,6 +1,8 @@
 import sys
 from unittest.mock import MagicMock, patch
+
 import pytest
+
 
 @pytest.fixture
 def runner_module():
@@ -8,19 +10,20 @@ def runner_module():
     Fixture that mocks heavy dependencies and imports ai_scientist.runner.
     Restores state after test to avoid polluting global sys.modules.
     """
+
     # Create dummy classes for types used in annotations to satisfy jaxtyping/isinstance checks
     class MockTensor:
         pass
-    
+
     class MockArray:
         pass
 
     mock_torch = MagicMock()
     mock_torch.Tensor = MockTensor
-    
+
     mock_jax = MagicMock()
     mock_jax.Array = MockArray
-    
+
     mock_jax_numpy = MagicMock()
     mock_jax_numpy.ndarray = MockArray
     mock_jax.numpy = mock_jax_numpy
@@ -48,10 +51,11 @@ def runner_module():
         # We must remove it from sys.modules if it exists to force re-import with mocks
         if "ai_scientist.runner" in sys.modules:
             del sys.modules["ai_scientist.runner"]
-        
+
         import ai_scientist.runner
+
         yield ai_scientist.runner
-        
+
         # Cleanup: remove the mocked runner so subsequent tests don't use it
         if "ai_scientist.runner" in sys.modules:
             del sys.modules["ai_scientist.runner"]
@@ -70,7 +74,9 @@ def test_parse_args_errors_when_screen_and_promote_both_set(runner_module) -> No
     assert excinfo.value.code == 2
 
 
-def test_main_exits_when_screen_flag_conflicts_with_promote_preset(runner_module, monkeypatch) -> None:
+def test_main_exits_when_screen_flag_conflicts_with_promote_preset(
+    runner_module, monkeypatch
+) -> None:
     monkeypatch.setattr(
         sys, "argv", ["runner", "--screen", "--run-preset", "promote_only"]
     )

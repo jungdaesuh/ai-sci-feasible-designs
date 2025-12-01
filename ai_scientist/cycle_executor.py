@@ -12,38 +12,36 @@ from __future__ import annotations
 import json
 import math
 import os
-import sys
 import platform
-import time
+import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, Set, Tuple
 
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 
 from ai_scientist import adapter
 from ai_scientist import config as ai_config
 from ai_scientist import memory
 from ai_scientist import planner as ai_planner
-from ai_scientist import reporting
-from ai_scientist import tools
+from ai_scientist import reporting, tools
 from ai_scientist.budget_manager import BudgetController, BudgetSnapshot
 from ai_scientist.coordinator import Coordinator
 from ai_scientist.fidelity_controller import FidelityController
+from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
 from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
-
 from constellaration import forward_model
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
-    AugmentedLagrangianState,
     AugmentedLagrangianSettings,
+    AugmentedLagrangianState,
     augmented_lagrangian_function,
     update_augmented_lagrangian_state,
 )
@@ -61,6 +59,7 @@ NAN_TO_HIGH_VALUE = 10.0
 @dataclass
 class CycleResult:
     """Outcome of a single execution cycle."""
+
     cycle_index: int
     candidates_evaluated: int
     candidates_promoted: int
@@ -79,7 +78,8 @@ class ProblemEvaluator(Protocol):
         *,
         stage: str,
         use_cache: bool = True,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        ...
 
 
 class WorldModelLike(Protocol):
@@ -99,7 +99,8 @@ class WorldModelLike(Protocol):
         repro_cmd: str,
         created_at: str | None = None,
         commit: bool = True,
-    ) -> int: ...
+    ) -> int:
+        ...
 
 
 _PROBLEM_EVALUATORS: dict[str, tuple[str, ProblemEvaluator]] = {
@@ -118,6 +119,7 @@ def _problem_evaluator(problem: str) -> ProblemEvaluator:
             % (problem, ", ".join(sorted(_PROBLEM_EVALUATORS)))
         ) from exc
 
+
 def _problem_tool_name(problem: str) -> str:
     try:
         return _PROBLEM_EVALUATORS[problem][0]
@@ -126,6 +128,7 @@ def _problem_tool_name(problem: str) -> str:
             "Problem '%s' is not supported; choose one of %s."
             % (problem, ", ".join(sorted(_PROBLEM_EVALUATORS)))
         ) from exc
+
 
 def serialize_experiment_config(
     cfg: ai_config.ExperimentConfig, constellaration_sha: str | None = None
@@ -205,7 +208,11 @@ class CycleExecutor:
                 if current_overrides:
                     temp_overrides = dict(current_overrides)
                     for key, value in self.config.run_overrides.items():
-                        if isinstance(value, Mapping) and key in temp_overrides and isinstance(temp_overrides[key], Mapping):
+                        if (
+                            isinstance(value, Mapping)
+                            and key in temp_overrides
+                            and isinstance(temp_overrides[key], Mapping)
+                        ):
                             temp_overrides[key] = {**temp_overrides[key], **value}
                         else:
                             temp_overrides[key] = value
@@ -213,9 +220,13 @@ class CycleExecutor:
                 else:
                     current_overrides = self.config.run_overrides
                 if verbose:
-                    print(f"[runner][cycle={cycle_number}] Applying config-defined run_overrides: {self.config.run_overrides}")
+                    print(
+                        f"[runner][cycle={cycle_number}] Applying config-defined run_overrides: {self.config.run_overrides}"
+                    )
             except Exception as exc:
-                print(f"[runner][cycle={cycle_number}] Failed to apply run_overrides from config: {exc}")
+                print(
+                    f"[runner][cycle={cycle_number}] Failed to apply run_overrides from config: {exc}"
+                )
 
         # Apply agent-driven config overrides
         active_cfg = self.config
@@ -226,18 +237,29 @@ class CycleExecutor:
             try:
                 overrides_log = []
                 if "proposal_mix" in current_overrides:
-                    new_mix = replace(active_cfg.proposal_mix, **current_overrides["proposal_mix"])
+                    new_mix = replace(
+                        active_cfg.proposal_mix, **current_overrides["proposal_mix"]
+                    )
                     active_cfg = replace(active_cfg, proposal_mix=new_mix)
-                    overrides_log.append(f"proposal_mix={current_overrides['proposal_mix']}")
+                    overrides_log.append(
+                        f"proposal_mix={current_overrides['proposal_mix']}"
+                    )
                 if "budgets" in current_overrides:
-                    new_budgets = replace(active_cfg.budgets, **current_overrides["budgets"])
+                    new_budgets = replace(
+                        active_cfg.budgets, **current_overrides["budgets"]
+                    )
                     active_cfg = replace(active_cfg, budgets=new_budgets)
                     overrides_log.append(f"budgets={current_overrides['budgets']}")
                 if "constraint_weights" in current_overrides:
-                    new_weights = replace(active_cfg.constraint_weights, **current_overrides["constraint_weights"])
+                    new_weights = replace(
+                        active_cfg.constraint_weights,
+                        **current_overrides["constraint_weights"],
+                    )
                     active_cfg = replace(active_cfg, constraint_weights=new_weights)
-                    overrides_log.append(f"constraint_weights={current_overrides['constraint_weights']}")
-                
+                    overrides_log.append(
+                        f"constraint_weights={current_overrides['constraint_weights']}"
+                    )
+
                 if "optimizer" in current_overrides:
                     optimizer_mode = str(current_overrides["optimizer"]).lower()
                     overrides_log.append(f"optimizer={optimizer_mode}")
@@ -245,14 +267,22 @@ class CycleExecutor:
                     alm_settings_overrides = current_overrides["alm_settings"]
                     overrides_log.append(f"alm_settings={alm_settings_overrides}")
                 if "initialization_strategy" in current_overrides:
-                    new_init_strategy = str(current_overrides["initialization_strategy"])
-                    active_cfg = replace(active_cfg, initialization_strategy=new_init_strategy)
+                    new_init_strategy = str(
+                        current_overrides["initialization_strategy"]
+                    )
+                    active_cfg = replace(
+                        active_cfg, initialization_strategy=new_init_strategy
+                    )
                     overrides_log.append(f"initialization_strategy={new_init_strategy}")
 
                 if overrides_log:
-                    print(f"[runner][cycle={cycle_number}] Applying agent config overrides: {', '.join(overrides_log)}")
+                    print(
+                        f"[runner][cycle={cycle_number}] Applying agent config overrides: {', '.join(overrides_log)}"
+                    )
             except Exception as exc:
-                print(f"[runner][cycle={cycle_number}] Failed to apply config overrides: {exc}")
+                print(
+                    f"[runner][cycle={cycle_number}] Failed to apply config overrides: {exc}"
+                )
 
         # Create local fidelity controller with active config
         fidelity_ctl = FidelityController(active_cfg)
@@ -264,12 +294,14 @@ class CycleExecutor:
             promote_top_k=budget_snapshot.promote_top_k,
             max_high_fidelity_evals_per_cycle=budget_snapshot.max_high_fidelity_evals_per_cycle,
         )
-        
+
         # Re-apply agent overrides if they exist
         if current_overrides and "budgets" in current_overrides:
             active_budgets = replace(active_budgets, **current_overrides["budgets"])
             if verbose:
-                print(f"[runner] Agent forced budget overrides: {current_overrides['budgets']}")
+                print(
+                    f"[runner] Agent forced budget overrides: {current_overrides['budgets']}"
+                )
 
         if active_cfg.adaptive_budgets.enabled and verbose:
             print(
@@ -286,30 +318,32 @@ class CycleExecutor:
 
         if generative_model:
             gen_history = self.world_model.surrogate_training_data(
-                target="hv" if self.config.problem == "p3" else "objective", 
-                problem=self.config.problem
+                target="hv" if self.config.problem == "p3" else "objective",
+                problem=self.config.problem,
             )
             if gen_history:
                 generative_model.fit([item[0] for item in gen_history])
 
         candidate_pool: list[Mapping[str, Any]] = []
-        
+
         # Initialize Coordinator (Phase 5)
         # If one was passed in __init__, we might need to update it or use a new one if config changed.
-        # Since Coordinator takes `active_cfg` and `planner` (which might depend on things), 
+        # Since Coordinator takes `active_cfg` and `planner` (which might depend on things),
         # and `runner.py` logic was creating it fresh:
         coordinator = Coordinator(
-            active_cfg, 
-            self.world_model, 
-            planner=ai_planner.PlanningAgent(), # Default planner
-            surrogate=surrogate_model if isinstance(surrogate_model, NeuralOperatorSurrogate) else None, 
-            generative_model=generative_model
+            active_cfg,
+            self.world_model,
+            planner=ai_planner.PlanningAgent(),  # Default planner
+            surrogate=surrogate_model
+            if isinstance(surrogate_model, NeuralOperatorSurrogate)
+            else None,
+            generative_model=generative_model,
         )
 
         if active_cfg.aso.enabled:
             if verbose:
                 print(f"[runner][cycle={cycle_number}] ASO mode with real ALM state.")
-            
+
             initial_seeds = []
             if suggested_params:
                 initial_seeds = suggested_params
@@ -326,19 +360,23 @@ class CycleExecutor:
 
         elif self.config.optimizer_backend == "gradient_descent":
             if verbose:
-                print(f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active (Phase 5 Coordinator).")
-            
+                print(
+                    f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active (Phase 5 Coordinator)."
+                )
+
             candidate_pool = coordinator.produce_candidates(
                 cycle=cycle_number,
                 experiment_id=experiment_id,
                 n_candidates=pool_size,
-                template=active_cfg.boundary_template
+                template=active_cfg.boundary_template,
             )
 
             if not candidate_pool:
                 if verbose:
-                    print(f"[runner][cycle={cycle_number}] Coordinator produced no candidates. Falling back to legacy sampler.")
-                
+                    print(
+                        f"[runner][cycle={cycle_number}] Coordinator produced no candidates. Falling back to legacy sampler."
+                    )
+
                 candidate_pool, _, _, _ = _propose_p3_candidates_for_cycle(
                     cfg=active_cfg,
                     cycle_index=cycle_index,
@@ -349,7 +387,7 @@ class CycleExecutor:
                     generative_model=generative_model,
                     suggested_params=suggested_params,
                 )
-            
+
             candidates = _surrogate_rank_screen_candidates(
                 active_cfg,
                 active_budgets.screen_evals_per_cycle,
@@ -360,7 +398,9 @@ class CycleExecutor:
                 verbose=verbose,
             )
 
-        elif (optimizer_mode == "alm" or optimizer_mode == "sa-alm") or (self.config.optimizer_backend in ["alm", "sa-alm"]):
+        elif (optimizer_mode == "alm" or optimizer_mode == "sa-alm") or (
+            self.config.optimizer_backend in ["alm", "sa-alm"]
+        ):
             # ALM Execution Branch (legacy)
             candidates = self._run_alm_optimization(
                 active_cfg,
@@ -373,10 +413,10 @@ class CycleExecutor:
                 active_budgets,
                 cycle_number,
                 verbose,
-                cycle_start
+                cycle_start,
             )
             candidate_pool = candidates
-        
+
         elif pool_size <= 0:
             if verbose:
                 print(
@@ -385,7 +425,12 @@ class CycleExecutor:
             candidate_pool = []
             candidates = []
         else:
-            candidate_pool, sampler_count, random_count, vae_count = _propose_p3_candidates_for_cycle(
+            (
+                candidate_pool,
+                sampler_count,
+                random_count,
+                vae_count,
+            ) = _propose_p3_candidates_for_cycle(
                 active_cfg,
                 cycle_index,
                 self.world_model,
@@ -413,11 +458,11 @@ class CycleExecutor:
         screen_stage = active_cfg.fidelity_ladder.screen
         if candidates:
             screen_results = fidelity_ctl.evaluate_stage(
-                candidates, 
+                candidates,
                 stage=screen_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=None, # Deprecated
+                evaluate_fn=None,  # Deprecated
                 sleep_per_eval=sleep_per_eval,
                 tool_name=tool_name,
             )
@@ -429,28 +474,31 @@ class CycleExecutor:
             screen_stage, stats=screen_cache_stats
         )
         if log_cache_stats:
-            _maybe_log_cache_stats(self.config, cycle_index, screen_stage, screen_cache_stats)
+            _maybe_log_cache_stats(
+                self.config, cycle_index, screen_stage, screen_cache_stats
+            )
 
         screen_design_map = _latest_evaluations_by_design(screen_results, screen_stage)
         screen_summary = tools.summarize_p3_candidates(
             list(screen_design_map.values()), reference_point=P3_REFERENCE_POINT
         )
-        
+
         # Adaptive Promotion Logic
         sufficient_feasible = (
-            screen_summary.feasible_count >= self.config.governance.min_feasible_for_promotion
+            screen_summary.feasible_count
+            >= self.config.governance.min_feasible_for_promotion
         )
-        
+
         promote_limit = 0
         to_promote: list[Mapping[str, Any]] = []
-        
+
         if screen_design_map:
             promote_limit = min(
                 active_budgets.promote_top_k,
                 active_budgets.max_high_fidelity_evals_per_cycle,
                 len(screen_design_map),
             )
-            
+
             if sufficient_feasible:
                 prioritized_screen = fidelity_ctl.get_promotion_candidates(
                     screen_design_map,
@@ -465,12 +513,14 @@ class CycleExecutor:
                     )
                 sorted_by_violation = sorted(
                     screen_design_map.values(),
-                    key=lambda entry: float(entry["evaluation"].get("max_violation", float("inf")))
+                    key=lambda entry: float(
+                        entry["evaluation"].get("max_violation", float("inf"))
+                    ),
                 )
                 to_promote = sorted_by_violation[:promote_limit]
                 for candidate in to_promote:
                     candidate["promotion_reason"] = "restoration"
-                
+
         promote_stage = self.config.fidelity_ladder.promote
         promote_results: list[dict[str, Any]] = []
         if not screen_only and promote_limit > 0:
@@ -479,13 +529,15 @@ class CycleExecutor:
                 stage=promote_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=None, # Deprecated
+                evaluate_fn=None,  # Deprecated
                 sleep_per_eval=sleep_per_eval,
                 tool_name=tool_name,
             )
             promote_cache_stats = tools.get_cache_stats(promote_stage)
             if log_cache_stats:
-                _maybe_log_cache_stats(self.config, cycle_index, promote_stage, promote_cache_stats)
+                _maybe_log_cache_stats(
+                    self.config, cycle_index, promote_stage, promote_cache_stats
+                )
         elif screen_only and verbose:
             print("[runner] screen-only flag active; skipping promotion evaluations.")
 
@@ -509,13 +561,25 @@ class CycleExecutor:
                 cycle=cycle_number,
                 stage=governance_stage,
             )
-            return CycleResult(cycle_index, len(screen_results), len(promote_results), None, None, 0.0, None, None, None)
+            return CycleResult(
+                cycle_index,
+                len(screen_results),
+                len(promote_results),
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+            )
 
         p3_summary = tools.summarize_p3_candidates(
             list(latest_by_design.values()), reference_point=P3_REFERENCE_POINT
         )
         total_designs = len(latest_by_design)
-        feasibility_rate = float(p3_summary.feasible_count) / float(max(1, total_designs))
+        feasibility_rate = float(p3_summary.feasible_count) / float(
+            max(1, total_designs)
+        )
         vmec_failure_rate = _vmec_failure_rate(aggregated)
         hv_display = (
             f"{p3_summary.hv_score:.6f}" if p3_summary.feasible_count > 0 else "n/a"
@@ -533,7 +597,7 @@ class CycleExecutor:
             cache_hit_rate=cache_hit_rate,
             budget_snapshot=active_budgets,
         )
-        
+
         if self.config.reporting.get("prometheus_export_enabled", False):
             prom_path = Path(self.config.reporting_dir) / "metrics.prom"
             reporting.export_metrics_to_prometheus_textfile(
@@ -562,10 +626,14 @@ class CycleExecutor:
         best_eval["design_hash"] = best_entry.get("design_hash", "")
         cycle_duration = time.perf_counter() - cycle_start
         best_seed = int(best_entry.get("seed", self.config.random_seed))
-        previous_baseline = self.world_model.previous_best_hv(experiment_id, cycle_number)
+        previous_baseline = self.world_model.previous_best_hv(
+            experiment_id, cycle_number
+        )
         current_hv = float(p3_summary.hv_score)
         hv_delta = (
-            current_hv - previous_baseline if previous_baseline is not None else current_hv
+            current_hv - previous_baseline
+            if previous_baseline is not None
+            else current_hv
         )
         self.budget_controller.adjust_for_cycle(
             hv_delta=hv_delta,
@@ -575,12 +643,16 @@ class CycleExecutor:
         best_metrics_id: int | None = None
         logged_hashes: Set[str] = set()
         config_snapshot = dict(
-            serialize_experiment_config(self.config, constellaration_sha=constellaration_sha)
+            serialize_experiment_config(
+                self.config, constellaration_sha=constellaration_sha
+            )
         )
         config_snapshot["cycle_seed"] = best_seed
         adapter_version = adapter.current_adapter_version(
             tool_name, self.config.fidelity_ladder.promote
-        ) or adapter.current_adapter_version(tool_name, self.config.fidelity_ladder.screen)
+        ) or adapter.current_adapter_version(
+            tool_name, self.config.fidelity_ladder.screen
+        )
         config_snapshot["adapter_version"] = adapter_version
         cycle_json = {
             "experiment_id": experiment_id,
@@ -635,7 +707,9 @@ class CycleExecutor:
                 cycle_number=cycle_number,
                 hv_score=p3_summary.hv_score,
                 reference_point=p3_summary.reference_point,
-                pareto_entries=[entry.as_mapping() for entry in p3_summary.pareto_entries],
+                pareto_entries=[
+                    entry.as_mapping() for entry in p3_summary.pareto_entries
+                ],
                 n_feasible=p3_summary.feasible_count,
                 n_archive=p3_summary.archive_size,
                 hv_lookback=self.config.governance.hv_lookback,
@@ -674,21 +748,21 @@ class CycleExecutor:
                 seed=best_seed,
                 commit=False,
             )
-        
+
         if best_metrics_id is None:
             best_metrics_id = metrics_by_hash.get(best_entry.get("design_hash", ""))
-        
+
         cycle_json_path.parent.mkdir(parents=True, exist_ok=True)
         cycle_json_path.write_text(json.dumps(cycle_json, indent=2), encoding="utf-8")
-        
-        # Generate reproduction command (assuming args will be filled by user or stored context, 
+
+        # Generate reproduction command (assuming args will be filled by user or stored context,
         # but here we construct a best effort command since we don't have full CLI args in this class)
         repro_command = (
             f"python -m ai_scientist.runner --config {self.config.source_config} --problem {self.config.problem} "
             f"--cycles {self.config.cycles} --eval-budget {active_budgets.screen_evals_per_cycle} "
             f"--workers {active_budgets.n_workers} --pool-type {active_budgets.pool_type}"
         )
-        
+
         env_block = (
             f"- Python: {sys.version.splitlines()[0]}\n"
             f"- Platform: {platform.platform()}\n"
@@ -706,7 +780,7 @@ class CycleExecutor:
             )
         else:
             pareto_lines = "- none (pareto front empty)"
-        
+
         if pareto_entries:
             replay_entry = pareto_entries[0]
             reproduction_snippet = (
@@ -728,7 +802,7 @@ class CycleExecutor:
             reproduction_snippet = (
                 "No Pareto archive entries available to replay this cycle.\n"
             )
-        
+
         stage_label = best_eval.get("stage") or self.config.fidelity_ladder.promote
         statement_status = _verify_best_claim(
             world_model=self.world_model,
@@ -744,7 +818,7 @@ class CycleExecutor:
             stage=stage_label,
             metrics_id=best_metrics_id,
         )
-        
+
         tool_input = {"params": best_entry["params"], "stage": stage_label}
         tool_input_hash = memory.hash_payload(tool_input)
         preference_pairs_path = adaptation_helpers.append_preference_pair(
@@ -784,7 +858,7 @@ class CycleExecutor:
                 "design_hash": best_entry.get("design_hash", ""),
             },
         )
-        
+
         preference_pairs_anchor = _repo_relative(preference_pairs_path)
         p3_summary_anchor = _repo_relative(p3_summary_path)
         trajectory_anchor = _repo_relative(trajectory_path)
@@ -878,13 +952,17 @@ class CycleExecutor:
         rag_citations = (
             property_graph_summary.get("citations") if property_graph_summary else None
         )
-        adaptation_figures = reporting.collect_adaptation_figures(self.config.reporting_dir)
+        adaptation_figures = reporting.collect_adaptation_figures(
+            self.config.reporting_dir
+        )
         anchor_candidates = (
             ("preference_pairs", preference_pairs_anchor),
             ("p3_summary", p3_summary_anchor),
             ("trajectory", trajectory_anchor),
         )
-        positioning_artifacts = {name: anchor for name, anchor in anchor_candidates if anchor is not None}
+        positioning_artifacts = {
+            name: anchor for name, anchor in anchor_candidates if anchor is not None
+        }
         if not positioning_artifacts:
             positioning_artifacts = None
         references = [
@@ -931,8 +1009,10 @@ class CycleExecutor:
         )
 
         title = f"{self.config.problem}_cycle_{cycle_index + 1}"
-        report_path = reporting.write_report(title, content, out_dir=self.config.reporting_dir)
-        
+        report_path = reporting.write_report(
+            title, content, out_dir=self.config.reporting_dir
+        )
+
         return CycleResult(
             cycle_index=cycle_index,
             candidates_evaluated=len(screen_results),
@@ -942,7 +1022,7 @@ class CycleExecutor:
             feasibility_rate=feasibility_rate,
             report_path=report_path,
             best_eval=best_eval,
-            p3_summary=p3_summary
+            p3_summary=p3_summary,
         )
 
     def _run_alm_optimization(
@@ -957,12 +1037,14 @@ class CycleExecutor:
         active_budgets,
         cycle_number,
         verbose,
-        cycle_start
+        cycle_start,
     ) -> list[Mapping[str, Any]]:
         """Extracted ALM optimization logic."""
         if verbose:
-             print(f"[runner][cycle={cycle_number}] {optimizer_mode if optimizer_mode != 'default' else self.config.optimizer_backend} optimizer mode active (LEGACY ALM path).")
-        
+            print(
+                f"[runner][cycle={cycle_number}] {optimizer_mode if optimizer_mode != 'default' else self.config.optimizer_backend} optimizer mode active (LEGACY ALM path)."
+            )
+
         initial_params_map: Mapping[str, Any]
         if suggested_params and suggested_params[0]:
             initial_params_map = suggested_params[0]
@@ -970,17 +1052,21 @@ class CycleExecutor:
             if active_cfg.initialization_strategy == "nae":
                 if verbose:
                     print("[runner] Using NAE for initial ALM design.")
-                initial_params_map = _generate_nae_candidate_params(active_cfg.boundary_template)
+                initial_params_map = _generate_nae_candidate_params(
+                    active_cfg.boundary_template
+                )
             else:
                 if verbose:
                     print("[runner] Using template for initial ALM design.")
-                initial_params_map = _build_template_params_for_alm(active_cfg.boundary_template)
-            
+                initial_params_map = _build_template_params_for_alm(
+                    active_cfg.boundary_template
+                )
+
         boundary_obj = tools.make_boundary_from_params(initial_params_map)
-        
+
         max_poloidal = active_cfg.boundary_template.n_poloidal_modes - 1
         max_toroidal = (active_cfg.boundary_template.n_toroidal_modes - 1) // 2
-        
+
         boundary_obj = surface_module.set_max_mode_numbers(
             surface=boundary_obj,
             max_poloidal_mode=max_poloidal,
@@ -997,21 +1083,23 @@ class CycleExecutor:
             pytree=boundary_obj,
             mask=mask,
         )
-        
+
         scale = surface_module.compute_infinity_norm_spectrum_scaling_fun(
             poloidal_modes=boundary_obj.poloidal_modes.flatten(),
             toroidal_modes=boundary_obj.toroidal_modes.flatten(),
             alpha=0.5,
         ).reshape(boundary_obj.poloidal_modes.shape)
         scale = jnp.array(np.concatenate([scale[mask.r_cos], scale[mask.z_sin]]))
-        
+
         x0 = jnp.array(initial_guess) / scale
 
         fm_settings = tools._settings_for_stage(active_cfg.fidelity_ladder.promote)
-        
+
         alm_settings_obj = AugmentedLagrangianSettings(**alm_settings_overrides)
 
-        sa_alm_predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]] | None = None
+        sa_alm_predictor: Callable[
+            [Mapping[str, Any]], Tuple[float, Sequence[float]]
+        ] | None = None
         if optimizer_mode == "sa-alm" or self.config.optimizer_backend == "sa-alm":
             problem = (self.config.problem or "").lower()
             target_column = "hv" if problem == "p3" else "objective"
@@ -1036,59 +1124,83 @@ class CycleExecutor:
                             backend_type="neural_operator_ensemble",
                             training_samples=len(history),
                             model_hash=f"ensemble_n{surrogate_model._n_ensembles}_c{cycle_number}",
-                            weights_path="memory_only", 
-                            commit=True
+                            weights_path="memory_only",
+                            commit=True,
                         )
-            
-            def surrogate_predictor(params: Mapping[str, Any]) -> Tuple[float, Sequence[float]]:
+
+            def surrogate_predictor(
+                params: Mapping[str, Any],
+            ) -> Tuple[float, Sequence[float]]:
                 dummy_candidate = {"candidate_params": params}
-                predicted_list = surrogate_model.rank_candidates([dummy_candidate], minimize_objective=False)
+                predicted_list = surrogate_model.rank_candidates(
+                    [dummy_candidate], minimize_objective=False
+                )
                 predicted = predicted_list[0]
-                
-                mhd = predicted.predicted_mhd if predicted.predicted_mhd is not None else 0.0
-                qi = predicted.predicted_qi if predicted.predicted_qi is not None else 1.0
-                
+
+                mhd = (
+                    predicted.predicted_mhd
+                    if predicted.predicted_mhd is not None
+                    else 0.0
+                )
+                qi = (
+                    predicted.predicted_qi
+                    if predicted.predicted_qi is not None
+                    else 1.0
+                )
+
                 if predicted.predicted_elongation is not None:
                     elongation = predicted.predicted_elongation
                 else:
                     try:
                         import torch
+
                         from ai_scientist.optim import geometry
-                        
+
                         r_cos_list = params.get("r_cos")
                         z_sin_list = params.get("z_sin")
                         nfp = params.get("n_field_periods", 1)
-                        
+
                         if r_cos_list is not None and z_sin_list is not None:
-                            r_cos_t = torch.tensor(r_cos_list, dtype=torch.float32).unsqueeze(0)
-                            z_sin_t = torch.tensor(z_sin_list, dtype=torch.float32).unsqueeze(0)
-                            elongation = float(geometry.elongation(r_cos_t, z_sin_t, nfp).item())
+                            r_cos_t = torch.tensor(
+                                r_cos_list, dtype=torch.float32
+                            ).unsqueeze(0)
+                            z_sin_t = torch.tensor(
+                                z_sin_list, dtype=torch.float32
+                            ).unsqueeze(0)
+                            elongation = float(
+                                geometry.elongation(r_cos_t, z_sin_t, nfp).item()
+                            )
                         else:
                             elongation = 1.0
                     except Exception:
                         elongation = 1.0
-                
+
                 p_key = (self.config.problem or "").lower()
-                
+
                 if p_key.startswith("p1"):
-                     predicted_alm_constraints = [0.0, 0.0, 0.0]
+                    predicted_alm_constraints = [0.0, 0.0, 0.0]
                 elif p_key.startswith("p2"):
-                     c_elo = max(0.0, elongation - 5.0)
-                     qi_log = math.log10(qi) if qi > 0 else 10.0
-                     c_qi = max(0.0, qi_log - (-4.0))
-                     predicted_alm_constraints = [0.0, 0.0, 0.0, c_elo, c_qi]
+                    c_elo = max(0.0, elongation - 5.0)
+                    qi_log = math.log10(qi) if qi > 0 else 10.0
+                    c_qi = max(0.0, qi_log - (-4.0))
+                    predicted_alm_constraints = [0.0, 0.0, 0.0, c_elo, c_qi]
                 else:
-                     c_mhd = max(0.0, -mhd)
-                     qi_log = math.log10(qi) if qi > 0 else 10.0
-                     c_qi = max(0.0, qi_log - (-3.5))
-                     predicted_alm_constraints = [0.0, 0.0, c_mhd, 0.0, c_qi]
-                
+                    c_mhd = max(0.0, -mhd)
+                    qi_log = math.log10(qi) if qi > 0 else 10.0
+                    c_qi = max(0.0, qi_log - (-3.5))
+                    predicted_alm_constraints = [0.0, 0.0, c_mhd, 0.0, c_qi]
+
                 return float(predicted.predicted_objective), predicted_alm_constraints
 
             sa_alm_predictor = surrogate_predictor
-            
+
         (initial_objective, initial_constraints), _ = _objective_constraints(
-            x0, scale, unravel_and_unmask_fn, fm_settings, self.config.problem, predictor=sa_alm_predictor
+            x0,
+            scale,
+            unravel_and_unmask_fn,
+            fm_settings,
+            self.config.problem,
+            predictor=sa_alm_predictor,
         )
 
         state = AugmentedLagrangianState(
@@ -1099,24 +1211,45 @@ class CycleExecutor:
             constraints=initial_constraints,
             bounds=jnp.ones_like(x0) * 0.1,
         )
-        
+
         alm_candidates: list[Mapping[str, Any]] = []
         budget_per_step = 8
         num_alm_steps = max(1, active_budgets.screen_evals_per_cycle // budget_per_step)
-        
+
         p_key = (self.config.problem or "").lower()
         if p_key.startswith("p1"):
-            constraint_names = ["aspect_ratio", "average_triangularity", "edge_rotational_transform"]
+            constraint_names = [
+                "aspect_ratio",
+                "average_triangularity",
+                "edge_rotational_transform",
+            ]
         elif p_key.startswith("p2"):
-            constraint_names = ["aspect_ratio", "edge_rotational_transform", "edge_magnetic_mirror_ratio", "max_elongation", "qi_log10"]
+            constraint_names = [
+                "aspect_ratio",
+                "edge_rotational_transform",
+                "edge_magnetic_mirror_ratio",
+                "max_elongation",
+                "qi_log10",
+            ]
         else:
-            constraint_names = ["edge_rotational_transform", "edge_magnetic_mirror_ratio", "vacuum_well", "flux_compression", "qi_log10"]
-        
+            constraint_names = [
+                "edge_rotational_transform",
+                "edge_magnetic_mirror_ratio",
+                "vacuum_well",
+                "flux_compression",
+                "qi_log10",
+            ]
+
         import nevergrad
 
         for k in range(num_alm_steps):
-            if self.config.surrogate.backend == "neural_operator" and isinstance(surrogate_model, NeuralOperatorSurrogate) and surrogate_model._trained:
+            if (
+                self.config.surrogate.backend == "neural_operator"
+                and isinstance(surrogate_model, NeuralOperatorSurrogate)
+                and surrogate_model._trained
+            ):
                 from ai_scientist.optim import differentiable
+
                 alm_state_dict = {
                     "multipliers": np.array(state.multipliers),
                     "penalty_parameters": np.array(state.penalty_parameters),
@@ -1130,9 +1263,14 @@ class CycleExecutor:
                     steps=budget_per_step,
                 )
                 x_new = jnp.array(x_new_np)
-                
+
                 (obj_new, constr_new), metrics = _objective_constraints(
-                    x_new, scale, unravel_and_unmask_fn, fm_settings, self.config.problem, predictor=sa_alm_predictor
+                    x_new,
+                    scale,
+                    unravel_and_unmask_fn,
+                    fm_settings,
+                    self.config.problem,
+                    predictor=sa_alm_predictor,
                 )
                 cand_boundary = unravel_and_unmask_fn(jnp.asarray(x_new * scale))
                 cand_params = {
@@ -1146,19 +1284,23 @@ class CycleExecutor:
                     max_viol = tools._max_violation(p3_margins)
                 else:
                     max_viol = float(jnp.max(constr_new))
-                
-                alm_candidates.append({
-                    "seed": self.config.random_seed + cycle_index * 10000 + len(alm_candidates),
-                    "params": cand_params,
-                    "design_hash": tools.design_hash(cand_params),
-                    "constraint_distance": max_viol,
-                    "source": "sa-alm_diff",
-                    "evaluation": {
-                        "metrics": metrics.model_dump() if metrics else {},
-                        "feasibility": max_viol,
-                        "stage": active_cfg.fidelity_ladder.promote
+
+                alm_candidates.append(
+                    {
+                        "seed": self.config.random_seed
+                        + cycle_index * 10000
+                        + len(alm_candidates),
+                        "params": cand_params,
+                        "design_hash": tools.design_hash(cand_params),
+                        "constraint_distance": max_viol,
+                        "source": "sa-alm_diff",
+                        "evaluation": {
+                            "metrics": metrics.model_dump() if metrics else {},
+                            "feasibility": max_viol,
+                            "stage": active_cfg.fidelity_ladder.promote,
+                        },
                     }
-                })
+                )
 
             else:
                 parametrization = nevergrad.p.Array(
@@ -1166,71 +1308,88 @@ class CycleExecutor:
                     lower=np.array(state.x - state.bounds),
                     upper=np.array(state.x + state.bounds),
                 )
-                
+
                 oracle = nevergrad.optimizers.NGOpt(
                     parametrization=parametrization,
                     budget=budget_per_step,
                     num_workers=1,
                 )
                 oracle.suggest(np.array(state.x))
-                
+
                 for _ in range(budget_per_step):
                     candidate = oracle.ask()
-                    
+
                     (obj, constr), metrics = _objective_constraints(
                         jnp.array(candidate.value),
                         scale,
                         unravel_and_unmask_fn,
                         fm_settings,
                         self.config.problem,
-                        predictor=sa_alm_predictor
+                        predictor=sa_alm_predictor,
                     )
-                    
-                    cand_boundary = unravel_and_unmask_fn(jnp.asarray(candidate.value * scale))
+
+                    cand_boundary = unravel_and_unmask_fn(
+                        jnp.asarray(candidate.value * scale)
+                    )
                     cand_params = {
                         "r_cos": np.array(cand_boundary.r_cos).tolist(),
                         "z_sin": np.array(cand_boundary.z_sin).tolist(),
                         "n_field_periods": cand_boundary.n_field_periods,
                         "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
                     }
-                    
+
                     if metrics:
                         p3_margins = tools.compute_constraint_margins(metrics, "p3")
                         max_viol = tools._max_violation(p3_margins)
-                    else: 
+                    else:
                         max_viol = float(jnp.max(constr))
-                    
-                    alm_candidates.append({
-                        "seed": self.config.random_seed + cycle_index * 10000 + len(alm_candidates),
-                        "params": cand_params,
-                        "design_hash": tools.design_hash(cand_params),
-                        "constraint_distance": max_viol,
-                        "source": optimizer_mode, 
-                        "evaluation": { 
-                            "metrics": metrics.model_dump() if metrics else {},
-                            "feasibility": max_viol, 
-                            "stage": active_cfg.fidelity_ladder.promote
-                        } 
-                    })
+
+                    alm_candidates.append(
+                        {
+                            "seed": self.config.random_seed
+                            + cycle_index * 10000
+                            + len(alm_candidates),
+                            "params": cand_params,
+                            "design_hash": tools.design_hash(cand_params),
+                            "constraint_distance": max_viol,
+                            "source": optimizer_mode,
+                            "evaluation": {
+                                "metrics": metrics.model_dump() if metrics else {},
+                                "feasibility": max_viol,
+                                "stage": active_cfg.fidelity_ladder.promote,
+                            },
+                        }
+                    )
 
                     loss = augmented_lagrangian_function(obj, constr, state).item()
                     oracle.tell(candidate, loss)
-                
+
                 recommendation = oracle.provide_recommendation()
                 x_new = jnp.array(recommendation.value)
-            
-            if (optimizer_mode == "sa-alm" or self.config.optimizer_backend == "sa-alm") and k % 2 == 0:
+
+            if (
+                optimizer_mode == "sa-alm" or self.config.optimizer_backend == "sa-alm"
+            ) and k % 2 == 0:
                 if verbose:
-                    print(f"[runner] SA-ALM: Verifying best candidate with true forward model (step {k}).")
+                    print(
+                        f"[runner] SA-ALM: Verifying best candidate with true forward model (step {k})."
+                    )
                 (obj_new, constr_new), true_metrics = _objective_constraints(
-                    x_new, scale, unravel_and_unmask_fn, fm_settings, self.config.problem, predictor=None
+                    x_new,
+                    scale,
+                    unravel_and_unmask_fn,
+                    fm_settings,
+                    self.config.problem,
+                    predictor=None,
                 )
                 verified_params_obj = unravel_and_unmask_fn(x_new * scale)
                 verified_params = {
                     "r_cos": np.asarray(verified_params_obj.r_cos).tolist(),
                     "z_sin": np.asarray(verified_params_obj.z_sin).tolist(),
                     "n_field_periods": initial_params_map.get("n_field_periods", 1),
-                    "is_stellarator_symmetric": initial_params_map.get("is_stellarator_symmetric", True),
+                    "is_stellarator_symmetric": initial_params_map.get(
+                        "is_stellarator_symmetric", True
+                    ),
                 }
 
                 if true_metrics:
@@ -1258,7 +1417,12 @@ class CycleExecutor:
                 )
             else:
                 (obj_new, constr_new), _ = _objective_constraints(
-                    x_new, scale, unravel_and_unmask_fn, fm_settings, self.config.problem, predictor=sa_alm_predictor
+                    x_new,
+                    scale,
+                    unravel_and_unmask_fn,
+                    fm_settings,
+                    self.config.problem,
+                    predictor=sa_alm_predictor,
                 )
                 state = update_augmented_lagrangian_state(
                     x=x_new,
@@ -1267,7 +1431,7 @@ class CycleExecutor:
                     state=state,
                     settings=alm_settings_obj,
                 )
-            
+
             for i, c_name in enumerate(constraint_names):
                 self.world_model.log_alm_state(
                     experiment_id=experiment_id,
@@ -1277,13 +1441,14 @@ class CycleExecutor:
                     multiplier_value=float(state.multipliers[i]),
                     penalty_parameter=float(state.penalty_parameters[i]),
                     violation_magnitude=float(state.constraints[i]),
-                    commit=True
+                    commit=True,
                 )
 
         return list(alm_candidates)
 
 
 # --- Helpers moved from runner.py ---
+
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
     resolved = path.resolve()
@@ -1294,7 +1459,7 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
             if not raw:
                 raise ValueError(f"Seed file {path} is an empty list.")
             raw = raw[0]
-            
+
         payload: dict[str, Any] = {
             "r_cos": np.asarray(raw["r_cos"], dtype=float),
             "z_sin": np.asarray(raw["z_sin"], dtype=float),
@@ -1304,12 +1469,8 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
             "z_cos": np.asarray(raw["z_cos"], dtype=float)
             if raw.get("z_cos") is not None
             else None,
-            "n_field_periods": int(
-                raw.get("n_field_periods") or raw.get("nfp") or 1
-            ),
-            "is_stellarator_symmetric": bool(
-                raw.get("is_stellarator_symmetric", True)
-            ),
+            "n_field_periods": int(raw.get("n_field_periods") or raw.get("nfp") or 1),
+            "is_stellarator_symmetric": bool(raw.get("is_stellarator_symmetric", True)),
         }
         _BOUNDARY_SEED_CACHE[resolved] = payload
         cached = payload
@@ -1320,7 +1481,7 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
 
 
 def _build_template_params_for_alm(
-    template: ai_config.BoundaryTemplateConfig
+    template: ai_config.BoundaryTemplateConfig,
 ) -> Mapping[str, Any]:
     n_poloidal = template.n_poloidal_modes
     n_toroidal = template.n_toroidal_modes
@@ -1332,9 +1493,7 @@ def _build_template_params_for_alm(
         z_row = []
         for tor in range(n_toroidal):
             r_val = (
-                template.base_major_radius
-                if pol == 0 and tor == center_idx
-                else 0.0
+                template.base_major_radius if pol == 0 and tor == center_idx else 0.0
             )
             z_val = (
                 template.base_minor_radius
@@ -1366,8 +1525,8 @@ def _generate_nae_candidate_params(
         rotational_transform=rotational_transform,
         mirror_ratio=mirror_ratio,
         n_field_periods=template.n_field_periods,
-        max_poloidal_mode=template.n_poloidal_modes -1,
-        max_toroidal_mode=template.n_toroidal_modes -1,
+        max_poloidal_mode=template.n_poloidal_modes - 1,
+        max_toroidal_mode=template.n_toroidal_modes - 1,
     )
     return {
         "r_cos": np.asarray(nae_boundary.r_cos).tolist(),
@@ -1383,23 +1542,30 @@ def _objective_constraints(
     unravel_and_unmask_fn: Any,
     settings: forward_model.ConstellarationSettings,
     problem_type: str,
-    predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]] | None = None,
+    predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]]
+    | None = None,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
 ]:
     boundary_obj = unravel_and_unmask_fn(jnp.asarray(x * scale))
-    
+
     boundary_params = {
         "r_cos": np.asarray(boundary_obj.r_cos).tolist(),
         "z_sin": np.asarray(boundary_obj.z_sin).tolist(),
         "n_field_periods": boundary_obj.n_field_periods,
         "is_stellarator_symmetric": boundary_obj.is_stellarator_symmetric,
     }
-    
+
     if predictor:
         predicted_objective, predicted_constraints = predictor(boundary_params)
-        return ((jnp.asarray(predicted_objective, dtype=jnp.float32), jnp.asarray(predicted_constraints, dtype=jnp.float32)), None)
-        
+        return (
+            (
+                jnp.asarray(predicted_objective, dtype=jnp.float32),
+                jnp.asarray(predicted_constraints, dtype=jnp.float32),
+            ),
+            None,
+        )
+
     with tempfile.TemporaryDirectory() as _:
         metrics = None
         try:
@@ -1409,7 +1575,7 @@ def _objective_constraints(
             )
         except Exception as _:
             pass
-        
+
         if metrics is None:
             objective = jnp.array(NAN_TO_HIGH_VALUE)
             p_key = (problem_type or "").lower()
@@ -1420,10 +1586,10 @@ def _objective_constraints(
             constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
         else:
             if problem_type.lower().startswith("p1"):
-                 objective = jnp.array(metrics.max_elongation)
+                objective = jnp.array(metrics.max_elongation)
             else:
-                 objective = jnp.array(metrics.aspect_ratio)
-            
+                objective = jnp.array(metrics.aspect_ratio)
+
             margins = tools.compute_constraint_margins(metrics, problem_type)
             constraints = jnp.array(list(margins.values()))
 
@@ -1536,10 +1702,10 @@ def _propose_p3_candidates_for_cycle(
                     "source": "agent_suggestion",
                 }
             )
-    
+
     remaining_candidates = max(0, total_candidates - len(agent_results))
     if remaining_candidates == 0:
-         return agent_results, 0, 0, 0
+        return agent_results, 0, 0, 0
 
     gen_results: list[Mapping[str, Any]] = []
     if generative_model and generative_model._trained:
@@ -1551,12 +1717,14 @@ def _propose_p3_candidates_for_cycle(
                     "aspect_ratio": 8.0,
                     "minimum_normalized_magnetic_gradient_scale_length": 20.0,
                     "max_elongation": 1.5,
-                    "edge_rotational_transform_over_n_field_periods": 0.4
+                    "edge_rotational_transform_over_n_field_periods": 0.4,
                 }
-                gen_results = generative_model.sample(gen_target, target_metrics=target_metrics, seed=seed_base)
+                gen_results = generative_model.sample(
+                    gen_target, target_metrics=target_metrics, seed=seed_base
+                )
             else:
                 gen_results = generative_model.sample(gen_target, seed=seed_base)
-    
+
     remaining_candidates = max(0, remaining_candidates - len(gen_results))
 
     mix = cfg.proposal_mix
@@ -1614,7 +1782,9 @@ def _propose_p3_candidates_for_cycle(
             break
         if isinstance(params, Mapping) and "params" in params:
             payload = params.get("params", {})
-            constraint_distance = float(params.get("normalized_constraint_distance", 0.0))
+            constraint_distance = float(
+                params.get("normalized_constraint_distance", 0.0)
+            )
         else:
             payload = params
             constraint_distance = 0.0
@@ -1637,13 +1807,15 @@ def _propose_p3_candidates_for_cycle(
             break
 
     random_results: list[Mapping[str, Any]] = []
-    
+
     if cfg.proposal_mix.sampler_type == "near_axis":
         try:
             sampler = NearAxisSampler(cfg.boundary_template)
             random_results = sampler.generate(remaining_seeds)
         except Exception as exc:
-            print(f"[runner] NearAxisSampler failed: {exc}; falling back to standard random")
+            print(
+                f"[runner] NearAxisSampler failed: {exc}; falling back to standard random"
+            )
             random_results = []
 
     used_seeds = {c["seed"] for c in random_results}
@@ -1683,7 +1855,6 @@ def _surrogate_rank_screen_candidates(
     cycle: int = 0,
     verbose: bool = False,
 ) -> list[Mapping[str, Any]]:
-
     if not candidates or screen_budget <= 0:
         return candidates
 
@@ -1696,7 +1867,7 @@ def _surrogate_rank_screen_candidates(
     )
     global _LAST_SURROGATE_FIT_SEC
     _LAST_SURROGATE_FIT_SEC = 0.0
-    
+
     recent_feasibility = 0.0
     if history:
         recent_window = history[-50:]
@@ -1741,21 +1912,23 @@ def _surrogate_rank_screen_candidates(
         exploration_ratio=cfg.proposal_mix.exploration_ratio,
     )
 
-    restoration_active = (len(history) > 10 and recent_feasibility < 0.05)
-    
+    restoration_active = len(history) > 10 and recent_feasibility < 0.05
+
     if restoration_active:
         if verbose:
-            print(f"[runner][restoration] Feasibility rate {recent_feasibility:.1%}; switching to restoration ranking.")
-        
+            print(
+                f"[runner][restoration] Feasibility rate {recent_feasibility:.1%}; switching to restoration ranking."
+            )
+
         weights = cfg.constraint_weights
-        
+
         def _predicted_violation(pred: SurrogatePrediction) -> float:
             mhd_val = pred.predicted_mhd if pred.predicted_mhd is not None else 0.0
             mhd_viol = max(0.0, -mhd_val) * weights.mhd
-            
+
             qi_val = pred.predicted_qi if pred.predicted_qi is not None else 1.0
             qi_viol = max(0.0, qi_val) * weights.qi
-            
+
             if pred.predicted_elongation is not None:
                 elo_val = pred.predicted_elongation
             else:
@@ -1764,28 +1937,34 @@ def _surrogate_rank_screen_candidates(
                 if idx >= 0:
                     try:
                         import torch
+
                         from ai_scientist.optim import geometry
+
                         cand_params = candidates[idx]["params"]
                         r_cos_list = cand_params.get("r_cos")
                         z_sin_list = cand_params.get("z_sin")
                         nfp = cand_params.get("n_field_periods", 1)
-                        
+
                         if r_cos_list is not None and z_sin_list is not None:
-                             r_cos_t = torch.tensor(r_cos_list, dtype=torch.float32).unsqueeze(0)
-                             z_sin_t = torch.tensor(z_sin_list, dtype=torch.float32).unsqueeze(0)
-                             elo_val = float(geometry.elongation(r_cos_t, z_sin_t, nfp).item())
+                            r_cos_t = torch.tensor(
+                                r_cos_list, dtype=torch.float32
+                            ).unsqueeze(0)
+                            z_sin_t = torch.tensor(
+                                z_sin_list, dtype=torch.float32
+                            ).unsqueeze(0)
+                            elo_val = float(
+                                geometry.elongation(r_cos_t, z_sin_t, nfp).item()
+                            )
                     except Exception:
                         pass
-            
+
             elo_viol = max(0.0, elo_val) * weights.elongation
             return mhd_viol + qi_viol + elo_viol
 
         ranked_predictions.sort(key=_predicted_violation)
-    
+
     elif cfg.problem.lower() == "p2":
-        prob_threshold = max(
-            0.0, min(1.0, cfg.adaptive_budgets.feasibility_target)
-        )
+        prob_threshold = max(0.0, min(1.0, cfg.adaptive_budgets.feasibility_target))
         filtered_predictions = [
             prediction
             for prediction in ranked_predictions
@@ -1970,7 +2149,7 @@ def _persist_pareto_archive(
         logged_hashes.add(design_hash)
         metrics_by_hash[design_hash] = metrics_id
         settings_json = json.dumps(
-            evaluation.get("settings", {}), separators=( ",", ":")
+            evaluation.get("settings", {}), separators=(",", ":")
         )
         archive_rows.append(
             {
@@ -2019,7 +2198,7 @@ def _maybe_log_cache_stats(
     log_path = _cache_stats_log_path(cfg.reporting_dir)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, separators=( ",", ":")) + "\n")
+        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
 def _vmec_failure_rate(results: Sequence[Mapping[str, Any]]) -> float:
@@ -2062,7 +2241,7 @@ def _log_observability_metrics(
     path = _observability_log_path(cfg.reporting_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, separators=( ",", ":")) + "\n")
+        handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
 def _repo_relative(path: Path) -> str | None:

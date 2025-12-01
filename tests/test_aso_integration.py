@@ -1,21 +1,21 @@
-import pytest
 import shutil
-import yaml
-import jax.numpy as jnp
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from ai_scientist.coordinator import Coordinator
-from ai_scientist.config import ExperimentConfig, load_experiment_config
-from ai_scientist.model_provider import ChatResponse
-from constellaration.geometry.surface_rz_fourier import SurfaceRZFourier
+import jax.numpy as jnp
+import pytest
+import yaml
+
 from ai_scientist import memory
+from ai_scientist.config import load_experiment_config
+from ai_scientist.coordinator import Coordinator
+from ai_scientist.model_provider import ChatResponse
 from ai_scientist.planner import (
     DirectiveAction,
     DirectiveSource,
     OptimizationDirective,
     PlanningAgent,
 )
+
 
 @pytest.mark.slow
 @pytest.mark.integration
@@ -42,7 +42,7 @@ class TestASOIntegration:
             "experiment_tag": "aso_integration_test",
             "boundary_template": {
                 "n_poloidal_modes": 2,
-                "n_toroidal_modes": 3, # Must be odd
+                "n_toroidal_modes": 3,  # Must be odd
                 "n_field_periods": 1,
                 "base_major_radius": 1.0,
                 "base_minor_radius": 0.2,
@@ -69,7 +69,7 @@ class TestASOIntegration:
                 "maxit": 3,
                 "penalty_parameters_initial": 1.0,
                 "bounds_initial": 2.0,
-                "oracle_budget_initial": 2, # Small for testing
+                "oracle_budget_initial": 2,  # Small for testing
                 "oracle_budget_increment": 1,
                 "oracle_budget_max": 5,
                 "oracle_num_workers": 1,
@@ -98,31 +98,34 @@ class TestASOIntegration:
                 "prometheus_export_enabled": False,
             },
         }
-        
+
         config_path = self.tmp_path / "test_config.yaml"
         with open(config_path, "w") as f:
             yaml.dump(config_dict, f)
-            
+
         return load_experiment_config(config_path)
 
     def _create_mock_seed(self):
         # A simple torus seed with correct shapes (2 poloidal, 3 toroidal)
         # shape: (2, 3)
-        r_cos = jnp.array([
-            [0.0, 1.0, 0.0], # m=0, n=0 is index 1 (middle) if n_toroidal=3 (-1, 0, 1)
-            [0.0, 0.2, 0.0]  # m=1, n=0
-        ])
-        z_sin = jnp.array([
-            [0.0, 0.0, 0.0],
-            [0.0, 0.2, 0.0]
-        ])
-        
+        r_cos = jnp.array(
+            [
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                ],  # m=0, n=0 is index 1 (middle) if n_toroidal=3 (-1, 0, 1)
+                [0.0, 0.2, 0.0],  # m=1, n=0
+            ]
+        )
+        z_sin = jnp.array([[0.0, 0.0, 0.0], [0.0, 0.2, 0.0]])
+
         return {
             "params": {
                 "r_cos": r_cos,
                 "z_sin": z_sin,
                 "n_field_periods": 1,
-                "is_stellarator_symmetric": True
+                "is_stellarator_symmetric": True,
             }
         }
 
@@ -134,7 +137,7 @@ class TestASOIntegration:
                     {
                         "message": {
                             "content": (
-                                '```json\n{\"action\": \"CONTINUE\", \"reasoning\": \"Test continues.\"}\n```'
+                                '```json\n{"action": "CONTINUE", "reasoning": "Test continues."}\n```'
                             )
                         }
                     }
@@ -160,15 +163,19 @@ class TestASOIntegration:
         mock_planning_agent = MagicMock(spec=PlanningAgent)
         # Always continue
         mock_planning_agent.supervise.return_value = OptimizationDirective(
-            action=DirectiveAction.CONTINUE, reasoning="Mock continue", source=DirectiveSource.HEURISTIC
+            action=DirectiveAction.CONTINUE,
+            reasoning="Mock continue",
+            source=DirectiveSource.HEURISTIC,
         )
 
         mock_invoke_chat_completion_func = self._create_mock_invoke_chat_completion()
 
-        with patch("ai_scientist.coordinator.step_alm") as mock_step_alm, \
-             patch("ai_scientist.coordinator.create_alm_context") as mock_create_alm_context, \
-             patch("ai_scientist.model_provider.invoke_chat_completion", new=mock_invoke_chat_completion_func):
-            
+        with patch("ai_scientist.coordinator.step_alm") as mock_step_alm, patch(
+            "ai_scientist.coordinator.create_alm_context"
+        ) as mock_create_alm_context, patch(
+            "ai_scientist.model_provider.invoke_chat_completion",
+            new=mock_invoke_chat_completion_func,
+        ):
             # Setup mock ALM context/state
             mock_state = MagicMock()
             mock_state.objective = 0.5
@@ -179,16 +186,16 @@ class TestASOIntegration:
             mock_state.copy.return_value = mock_state
 
             mock_context = MagicMock()
-            
+
             mock_create_alm_context.return_value = (mock_context, mock_state)
 
             # Setup mock step result
             mock_result = MagicMock()
             mock_result.state = mock_state
-            mock_result.objective = 0.4 # improving
+            mock_result.objective = 0.4  # improving
             mock_result.max_violation = 0.09
             mock_result.n_evals = 1
-            
+
             mock_step_alm.return_value = mock_result
 
             coordinator = Coordinator(config, mock_world_model, mock_planning_agent)
@@ -196,16 +203,23 @@ class TestASOIntegration:
             # 4. Call produce_candidates_aso with small budget
             # Mock supervisor to stop eventually
             mock_planning_agent.supervise.side_effect = [
-                OptimizationDirective(action=DirectiveAction.CONTINUE, reasoning="Go 1"),
-                OptimizationDirective(action=DirectiveAction.CONTINUE, reasoning="Go 2"),
-                OptimizationDirective(action=DirectiveAction.STOP, reasoning="Done")
+                OptimizationDirective(
+                    action=DirectiveAction.CONTINUE, reasoning="Go 1"
+                ),
+                OptimizationDirective(
+                    action=DirectiveAction.CONTINUE, reasoning="Go 2"
+                ),
+                OptimizationDirective(action=DirectiveAction.STOP, reasoning="Done"),
             ]
-            
+
             # Reset coordinator with side_effect
             coordinator = Coordinator(config, mock_world_model, mock_planning_agent)
             candidates = coordinator.produce_candidates_aso(
-                cycle=0, experiment_id=0, eval_budget=5, template=config.boundary_template,
-                initial_seeds=initial_seeds
+                cycle=0,
+                experiment_id=0,
+                eval_budget=5,
+                template=config.boundary_template,
+                initial_seeds=initial_seeds,
             )
 
             assert len(candidates) == 1
@@ -224,15 +238,17 @@ class TestASOIntegration:
 
         mock_world_model = MagicMock(spec=memory.WorldModel)
         mock_planning_agent = MagicMock(spec=PlanningAgent)
-        
+
         # STOP immediately
         mock_planning_agent.supervise.return_value = OptimizationDirective(
-            action=DirectiveAction.STOP, reasoning="Stop now", source=DirectiveSource.HEURISTIC
+            action=DirectiveAction.STOP,
+            reasoning="Stop now",
+            source=DirectiveSource.HEURISTIC,
         )
 
-        with patch("ai_scientist.coordinator.step_alm") as mock_step_alm, \
-             patch("ai_scientist.coordinator.create_alm_context") as mock_create_alm_context:
-
+        with patch("ai_scientist.coordinator.step_alm") as mock_step_alm, patch(
+            "ai_scientist.coordinator.create_alm_context"
+        ) as mock_create_alm_context:
             mock_state = MagicMock()
             mock_state.constraints = jnp.array([0.1])
             mock_state.multipliers = jnp.array([1.0])
@@ -251,8 +267,11 @@ class TestASOIntegration:
             coordinator = Coordinator(config, mock_world_model, mock_planning_agent)
 
             candidates = coordinator.produce_candidates_aso(
-                cycle=0, experiment_id=1, eval_budget=10, template=config.boundary_template,
-                initial_seeds=initial_seeds
+                cycle=0,
+                experiment_id=1,
+                eval_budget=10,
+                template=config.boundary_template,
+                initial_seeds=initial_seeds,
             )
 
             # Should stop after 1 step

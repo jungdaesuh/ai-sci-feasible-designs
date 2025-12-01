@@ -85,7 +85,7 @@ def _build_adapter_payload(
     return {
         "tool": tool,
         "stage": stage,
-    "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "preference_pair_count": len(entries),
         "dataset_path": dataset_path.as_posix(),
         "statuses": statuses,

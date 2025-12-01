@@ -31,6 +31,7 @@ def test_openrouter_chat_request_includes_extra_headers() -> None:
     assert request.headers.get("HTTP-Referer") == "https://openrouter.ai/docs"
     assert request.headers.get("X-Title") == "ConStellaration Grok"
 
+
 def test_streamlake_falls_back_to_placeholder_token() -> None:
     config = load_model_config()
     provider = config.get_provider("streamlake")

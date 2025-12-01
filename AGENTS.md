@@ -132,7 +132,7 @@ cd constellaration
 pip install .
 
 # Install VMEC++ (The Oracle) - Critical for evaluation
-# Note: This often requires compiling C++/Fortran code. 
+# Note: This often requires compiling C++/Fortran code.
 # If pre-built wheels aren't available, look for the Docker container provided by Proxima.
 ```
 
@@ -194,7 +194,7 @@ from datasets import load_dataset
 ds = load_dataset("proxima-fusion/constellaration", "default")
 # Example: Get a starting boundary
 row = ds['train'][0]
-boundary_coeffs = row['boundary.json'] 
+boundary_coeffs = row['boundary.json']
 ```
 
 ## 7\. Immediate Actions for Agent

@@ -7,13 +7,14 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Mapping
 
 import numpy as np
-import os
 import pydantic
+
 from constellaration import forward_model as constellaration_forward
 from constellaration.geometry import surface_rz_fourier
 
@@ -49,13 +50,11 @@ def _process_worker_initializer() -> None:
 
 class ForwardModelSettings(pydantic.BaseModel):
     """Configuration for the forward model evaluation."""
-    
+
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
     constellaration_settings: constellaration_forward.ConstellarationSettings = (
-        pydantic.Field(
-            default_factory=constellaration_forward.ConstellarationSettings
-        )
+        pydantic.Field(default_factory=constellaration_forward.ConstellarationSettings)
     )
     problem: str = "p3"  # p1, p2, p3, etc.
     stage: str = "unknown"
@@ -105,14 +104,14 @@ class EvaluationResult(pydantic.BaseModel):
     def dominates(self, other: "EvaluationResult") -> bool:
         """
         Check if this result dominates another.
-        
+
         Assumes minimization for feasibility (0 is best).
         For objective, direction depends on problem, so this checks
         feasibility dominance only and equality on objective.
         """
         if self.feasibility > other.feasibility:
             return False
-        # This is incomplete without objective direction, 
+        # This is incomplete without objective direction,
         # strictly returning False to avoid incorrect optimization.
         return False
 
@@ -152,10 +151,10 @@ def compute_design_hash(
     """Compute a canonical hash for the design parameters."""
     # Simplify params to ensure consistent hashing
     # We focus on the geometric coefficients
-    
+
     r_cos = np.asarray(params.get("r_cos", []), dtype=float)
     z_sin = np.asarray(params.get("z_sin", []), dtype=float)
-    
+
     # Determine dimensions for schema
     mpol_candidates = []
     ntor_candidates = []
@@ -176,7 +175,7 @@ def compute_design_hash(
         "rounding": rounding,
         "params": params,
     }
-    
+
     normalized = _canonicalize_value(payload, precision=rounding)
     digest = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(digest.encode("utf-8")).hexdigest()
@@ -189,9 +188,7 @@ def make_boundary_from_params(
     payload: dict[str, Any] = {
         "r_cos": np.asarray(params["r_cos"], dtype=float),
         "z_sin": np.asarray(params["z_sin"], dtype=float),
-        "is_stellarator_symmetric": bool(
-            params.get("is_stellarator_symmetric", True)
-        ),
+        "is_stellarator_symmetric": bool(params.get("is_stellarator_symmetric", True)),
         "n_field_periods": int(params.get("n_field_periods", 1)),
     }
 
@@ -219,12 +216,14 @@ def compute_constraint_margins(
     problem: str,
 ) -> Dict[str, float]:
     """Compute margins for constraints based on the problem definition.
-    
+
     Positive margin indicates violation.
     """
-    metrics_map = metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
+    metrics_map = (
+        metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
+    )
     problem_key = problem.lower()
-    
+
     def _log10_margin(target: float) -> float:
         return _log10_or_large(metrics_map.get("qi")) - target
 
@@ -233,32 +232,44 @@ def compute_constraint_margins(
     if problem_key.startswith("p1"):
         margins = {
             "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 4.0,
-            "average_triangularity": float(metrics_map.get("average_triangularity", float("nan"))) - (-0.5),
+            "average_triangularity": float(
+                metrics_map.get("average_triangularity", float("nan"))
+            )
+            - (-0.5),
             "edge_rotational_transform": 0.3
-            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            - float(
+                metrics_map.get(
+                    "edge_rotational_transform_over_n_field_periods", float("nan")
+                )
+            ),
         }
     elif problem_key.startswith("p2"):
         margins = {
             "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 10.0,
             "edge_rotational_transform": 0.25
-            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            - float(
+                metrics_map.get(
+                    "edge_rotational_transform_over_n_field_periods", float("nan")
+                )
+            ),
             "edge_magnetic_mirror_ratio": float(
                 metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
             )
             - 0.2,
-            "max_elongation": float(metrics_map.get("max_elongation", float("nan"))) - 5.0,
+            "max_elongation": float(metrics_map.get("max_elongation", float("nan")))
+            - 5.0,
             "qi_log10": _log10_margin(-4.0),
         }
-    else: # Default to P3 logic
+    else:  # Default to P3 logic
         flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
-        flux_margin = (
-            float(flux_value) - 0.9
-            if flux_value is not None
-            else 0.0
-        )
+        flux_margin = float(flux_value) - 0.9 if flux_value is not None else 0.0
         margins = {
             "edge_rotational_transform": 0.25
-            - float(metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))),
+            - float(
+                metrics_map.get(
+                    "edge_rotational_transform_over_n_field_periods", float("nan")
+                )
+            ),
             "edge_magnetic_mirror_ratio": float(
                 metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
             )
@@ -277,12 +288,12 @@ def compute_objective(
 ) -> float:
     """Compute the primary objective function value."""
     problem_key = problem.lower()
-    
+
     if problem_key.startswith("p1"):
         return float(metrics.max_elongation)
     elif problem_key.startswith("p2"):
         return float(metrics.minimum_normalized_magnetic_gradient_scale_length)
-    else: # P3
+    else:  # P3
         return float(metrics.aspect_ratio)
 
 
@@ -311,24 +322,26 @@ def forward_model(
     - Result packaging
     """
     start_time = time.time()
-    
+
     # 1. Compute Design Hash
     d_hash = compute_design_hash(boundary)
-    
+
     # 2. Check Cache
     # We key the cache by hash AND problem settings to avoid collisions if settings change
     # But for simplicity and strict adherence to design hash, we might just use design hash if settings are standard.
     # However, different settings produce different metrics.
     # We'll construct a cache key that includes relevant settings.
-    
+
     # For now, we use a simplified key strategy: hash + problem + settings_hash
     settings_dict = settings.model_dump()
     # Canonicalize to handle numpy arrays and floats
     canonical_settings = _canonicalize_value(settings_dict, precision=_DEFAULT_ROUNDING)
-    settings_json = json.dumps(canonical_settings, sort_keys=True, separators=(",", ":"))
+    settings_json = json.dumps(
+        canonical_settings, sort_keys=True, separators=(",", ":")
+    )
     settings_hash = hashlib.sha256(settings_json.encode("utf-8")).hexdigest()
     cache_key = f"{d_hash}:{settings_hash}"
-    
+
     if use_cache and cache_key in _EVALUATION_CACHE:
         _CACHE_STATS["hits"] += 1
         result = _EVALUATION_CACHE[cache_key]
@@ -362,7 +375,7 @@ def forward_model(
     objective = compute_objective(metrics, settings.problem)
     constraints_map = compute_constraint_margins(metrics, settings.problem)
     feasibility = max_violation(constraints_map)
-    is_feasible = feasibility <= 1e-2 # Tolerance
+    is_feasible = feasibility <= 1e-2  # Tolerance
 
     evaluation_time = time.time() - start_time
 
@@ -399,13 +412,13 @@ def forward_model_batch(
 ) -> List[EvaluationResult]:
     """Parallel batch evaluation."""
     results: List[EvaluationResult] = [None] * len(boundaries)
-    
+
     executor_cls = (
-        concurrent.futures.ThreadPoolExecutor 
-        if pool_type == "thread" 
+        concurrent.futures.ThreadPoolExecutor
+        if pool_type == "thread"
         else concurrent.futures.ProcessPoolExecutor
     )
-    
+
     executor_kwargs: Dict[str, Any] = {"max_workers": n_workers}
     if executor_cls is concurrent.futures.ProcessPoolExecutor:
         executor_kwargs["initializer"] = _process_worker_initializer
@@ -413,14 +426,11 @@ def forward_model_batch(
     with executor_cls(**executor_kwargs) as executor:
         future_to_idx = {
             executor.submit(
-                forward_model, 
-                boundary=b, 
-                settings=settings, 
-                use_cache=use_cache
+                forward_model, boundary=b, settings=settings, use_cache=use_cache
             ): i
             for i, b in enumerate(boundaries)
         }
-        
+
         for future in concurrent.futures.as_completed(future_to_idx):
             idx = future_to_idx[future]
             try:
@@ -433,7 +443,7 @@ def forward_model_batch(
                 # Since we don't have the boundary here easily (it's in boundaries[idx]),
                 # we can use a placeholder hash or recompute it if needed.
                 # But EvaluationResult requires metrics.
-                
+
                 # Create dummy metrics
                 dummy_metrics = constellaration_forward.ConstellarationMetrics(
                     aspect_ratio=float("inf"),
@@ -461,13 +471,13 @@ def forward_model_batch(
                     quasisymmetry_error=float("inf"),
                     beta=0.0,
                 )
-                
+
                 # Determine penalty direction based on problem
                 # This duplicates logic from _penalized_result in tools/evaluation.py
                 # But we are in forward_model.py now.
                 maximize = settings.problem.lower().startswith("p2")
                 penalty = -1e9 if maximize else 1e9
-                
+
                 results[idx] = EvaluationResult(
                     metrics=dummy_metrics,
                     objective=penalty,
@@ -476,12 +486,12 @@ def forward_model_batch(
                     feasibility=float("inf"),
                     is_feasible=False,
                     cache_hit=False,
-                    design_hash="error", # Placeholder
+                    design_hash="error",  # Placeholder
                     evaluation_time_sec=0.0,
                     settings=settings,
                     fidelity=settings.fidelity,
                     equilibrium_converged=False,
                     error_message=str(exc),
                 )
-                
+
     return results

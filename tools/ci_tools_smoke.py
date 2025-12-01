@@ -5,15 +5,15 @@ Docs: docs/MASTER_PLAN_AI_SCIENTIST.md:99-110, docs/TASKS_CODEX_MINI.md:247-368.
 
 from __future__ import annotations
 
-from ai_scientist import agent, model_endpoint
-from ai_scientist.config import ProviderConfig, ModelConfig, load_model_config
-from ai_scientist.model_provider import ChatResponse, invoke_chat_completion
-from ai_scientist.tools_api_smoke import run_smoke
-
 import logging
 import os
 import sys
 from pathlib import Path
+
+from ai_scientist import agent, model_endpoint
+from ai_scientist.config import ModelConfig, ProviderConfig, load_model_config
+from ai_scientist.model_provider import ChatResponse, invoke_chat_completion
+from ai_scientist.tools_api_smoke import run_smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

@@ -1,6 +1,7 @@
-import pytest
 import os
 from pathlib import Path
+
+import pytest
 
 try:
     from dotenv import load_dotenv
@@ -22,5 +23,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if target in str(item.fspath):
             item.add_marker(
-                pytest.mark.skip(reason="longdouble crash in forked process pool on this platform")
+                pytest.mark.skip(
+                    reason="longdouble crash in forked process pool on this platform"
+                )
             )

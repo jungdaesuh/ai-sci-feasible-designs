@@ -80,7 +80,9 @@ def invoke_chat_completion(
 ) -> ChatResponse:
     """Send a chat completion request to the configured provider and return the decoded response."""
 
-    chat_request = build_chat_request(provider, tool_call, messages=messages, model=model)
+    chat_request = build_chat_request(
+        provider, tool_call, messages=messages, model=model
+    )
     base_url = (base_url_override or provider.base_url or "").rstrip("/")
     if not base_url:
         raise ValueError(f"Provider '{provider.name}' is missing a base_url")
@@ -94,18 +96,20 @@ def invoke_chat_completion(
             status = getattr(response, "status", response.getcode())
     except HTTPError as exc:  # pragma: no cover - exercised with live providers
         error_body = exc.read().decode("utf-8", "replace") if exc.fp else ""
-        message = (
-            f"Provider '{provider.name}' returned HTTP {exc.code} for {url}: {error_body}"
-        )
+        message = f"Provider '{provider.name}' returned HTTP {exc.code} for {url}: {error_body}"
         raise RuntimeError(message) from exc
     except URLError as exc:  # pragma: no cover - exercised with live providers
-        raise RuntimeError(f"Failed to reach provider '{provider.name}' at {url}: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to reach provider '{provider.name}' at {url}: {exc}"
+        ) from exc
 
     body_text = payload.decode("utf-8") if payload else "{}"
     try:
         parsed = json.loads(body_text) if body_text.strip() else {}
     except json.JSONDecodeError as exc:  # pragma: no cover - malformed upstream payload
-        raise RuntimeError(f"Provider '{provider.name}' returned invalid JSON: {body_text}") from exc
+        raise RuntimeError(
+            f"Provider '{provider.name}' returned invalid JSON: {body_text}"
+        ) from exc
     _LOGGER.info(
         "provider=%s status=%s finish_reason=%s",
         provider.name,
@@ -115,4 +119,9 @@ def invoke_chat_completion(
     return ChatResponse(status_code=status, body=parsed)
 
 
-__all__ = ["ChatRequest", "ChatResponse", "build_chat_request", "invoke_chat_completion"]
+__all__ = [
+    "ChatRequest",
+    "ChatResponse",
+    "build_chat_request",
+    "invoke_chat_completion",
+]

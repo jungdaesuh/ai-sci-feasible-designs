@@ -7,11 +7,11 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from ai_scientist.tools.evaluation import (
-    FlattenSchema,
     BoundaryParams,
-    _ensure_mapping,
-    _derive_schema_from_params,
+    FlattenSchema,
     _coefficient_from_matrix,
+    _derive_schema_from_params,
+    _ensure_mapping,
     _quantize_float,
 )
 
@@ -26,7 +26,7 @@ def propose_boundary(
     params_map = _ensure_mapping(params)
     rng = np.random.default_rng(seed)
     new_params: dict[str, Any] = {}
-    
+
     for key, value in params_map.items():
         if key in ("r_cos", "z_sin", "r_sin", "z_cos"):
             if value is None:
@@ -37,7 +37,7 @@ def propose_boundary(
             new_params[key] = (arr + noise).tolist()
         else:
             new_params[key] = value
-            
+
     # Ensure symmetry constraints if flag is present
     if new_params.get("is_stellarator_symmetric"):
         if "r_cos" in new_params and new_params["r_cos"] is not None:
@@ -51,7 +51,7 @@ def propose_boundary(
             z_sin = np.asarray(new_params["z_sin"])
             z_sin[0, :] = 0.0
             new_params["z_sin"] = z_sin.tolist()
-            
+
     return new_params
 
 
@@ -127,66 +127,76 @@ def recombine_designs(
     seed: int | None = None,
 ) -> dict[str, Any]:
     """Perform geometric crossover between two parent designs via coefficient interpolation.
-    
+
     Args:
         parent_a: First parent boundary parameters.
         parent_b: Second parent boundary parameters.
-        alpha: Interpolation weight (0.0 = parent_b, 1.0 = parent_a). 
+        alpha: Interpolation weight (0.0 = parent_b, 1.0 = parent_a).
                If None, a random value in [0, 1] is chosen.
         seed: Random seed for alpha generation if alpha is None.
-    
+
     Returns:
         A new parameter dictionary representing the interpolated boundary.
     """
     params_a = _ensure_mapping(parent_a)
     params_b = _ensure_mapping(parent_b)
-    
+
     rng = np.random.default_rng(seed)
     mix_alpha = alpha if alpha is not None else rng.random()
-    
+
     new_params: dict[str, Any] = {}
-    
+
     # Keys to interpolate
     keys = ["r_cos", "z_sin", "r_sin", "z_cos"]
-    
+
     for key in keys:
         val_a = np.asarray(params_a.get(key, []), dtype=float)
         val_b = np.asarray(params_b.get(key, []), dtype=float)
-        
+
         if val_a.size == 0 and val_b.size == 0:
             continue
-        
+
         # Handle potentially different shapes (padding)
         shape_a = val_a.shape
         shape_b = val_b.shape
-        
+
         if shape_a != shape_b:
             # Determine max shape
-            max_rows = max(shape_a[0] if len(shape_a) > 0 else 0, shape_b[0] if len(shape_b) > 0 else 0)
-            max_cols = max(shape_a[1] if len(shape_a) > 1 else 0, shape_b[1] if len(shape_b) > 1 else 0)
-            
+            max_rows = max(
+                shape_a[0] if len(shape_a) > 0 else 0,
+                shape_b[0] if len(shape_b) > 0 else 0,
+            )
+            max_cols = max(
+                shape_a[1] if len(shape_a) > 1 else 0,
+                shape_b[1] if len(shape_b) > 1 else 0,
+            )
+
             target_shape = (max_rows, max_cols)
-            
+
             # Pad A
             pad_a = np.zeros(target_shape, dtype=float)
             if val_a.size > 0:
-                pad_a[:shape_a[0], :shape_a[1]] = val_a
+                pad_a[: shape_a[0], : shape_a[1]] = val_a
             val_a = pad_a
-            
+
             # Pad B
             pad_b = np.zeros(target_shape, dtype=float)
             if val_b.size > 0:
-                pad_b[:shape_b[0], :shape_b[1]] = val_b
+                pad_b[: shape_b[0], : shape_b[1]] = val_b
             val_b = pad_b
-            
+
         # Interpolate
         new_val = mix_alpha * val_a + (1.0 - mix_alpha) * val_b
         new_params[key] = new_val.tolist()
-        
+
     # Copy metadata from parent A (or B)
-    new_params["n_field_periods"] = params_a.get("n_field_periods", params_b.get("n_field_periods", 1))
-    new_params["is_stellarator_symmetric"] = params_a.get("is_stellarator_symmetric", True)
-    
+    new_params["n_field_periods"] = params_a.get(
+        "n_field_periods", params_b.get("n_field_periods", 1)
+    )
+    new_params["is_stellarator_symmetric"] = params_a.get(
+        "is_stellarator_symmetric", True
+    )
+
     return new_params
 
 
@@ -232,16 +242,16 @@ def structured_unflatten(
         A dictionary of parameters with 'r_cos', 'z_sin', etc.
     """
     params: dict[str, Any] = {}
-    
+
     # Initialize matrices with zeros based on schema
     r_cos_matrix = np.zeros((schema.mpol + 1, 2 * schema.ntor + 1), dtype=float)
     z_sin_matrix = np.zeros((schema.mpol + 1, 2 * schema.ntor + 1), dtype=float)
-    
+
     offset = 0
-    
+
     # Fill r_cos
     for m in range(schema.mpol + 1):
-        for n_idx in range(2 * schema.ntor + 1): # Corresponds to n from -ntor to +ntor
+        for n_idx in range(2 * schema.ntor + 1):  # Corresponds to n from -ntor to +ntor
             if offset < len(flattened_vector):
                 r_cos_matrix[m, n_idx] = flattened_vector[offset]
                 offset += 1
@@ -249,10 +259,10 @@ def structured_unflatten(
                 break
         if offset >= len(flattened_vector):
             break
-            
+
     # Fill z_sin
     for m in range(schema.mpol + 1):
-        for n_idx in range(2 * schema.ntor + 1): # Corresponds to n from -ntor to +ntor
+        for n_idx in range(2 * schema.ntor + 1):  # Corresponds to n from -ntor to +ntor
             if offset < len(flattened_vector):
                 z_sin_matrix[m, n_idx] = flattened_vector[offset]
                 offset += 1
@@ -263,5 +273,5 @@ def structured_unflatten(
 
     params["r_cos"] = r_cos_matrix.tolist()
     params["z_sin"] = z_sin_matrix.tolist()
-    
+
     return params

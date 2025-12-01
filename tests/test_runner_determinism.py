@@ -7,7 +7,8 @@ from dataclasses import replace
 from typing import Mapping
 from unittest.mock import patch
 
-from ai_scientist import config as ai_config, memory, runner, tools, cycle_executor
+from ai_scientist import config as ai_config
+from ai_scientist import cycle_executor, memory, runner, tools
 from ai_scientist.budget_manager import BudgetController, CycleBudgetFeedback
 
 
@@ -205,7 +206,7 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
                     planner=None,
                     coordinator=None,
                     budget_controller=budget_controller,
-                    fidelity_controller=fidelity_controller
+                    fidelity_controller=fidelity_controller,
                 )
                 executor.run_cycle(
                     cycle_index=0,

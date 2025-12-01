@@ -2,8 +2,8 @@
 
 Purpose: a queue of small, self‑contained tasks sized for Codex Mini. Each task has a tight scope, concrete files to touch, and a simple definition of done (DoD). Do not modify code under `constellaration/`.
 
-Owner: <assign>  
-Status: Active  
+Owner: <assign>
+Status: Active
 Updated: 2025‑11‑10
 
 ## Conventions
@@ -256,8 +256,8 @@ Updated: 2025‑11‑10
 - [x] Phase 7 optional RLAIF evidence chain — the harness now persists `adaptation/preference_pairs.jsonl`, `adaptation/summaries/cycle_<n>_p3_summary.json`, and the trajectory JSONL, the verifier statement records those anchors, and the “Positioning vs baselines” report section cites them so trainers can trace the P1/P2/HV gains before checking the box. Implementation details live in `ai_scientist/runner.py:660-1040`, `ai_scientist/reporting.py:184-373`, and `orchestration/adaptation.py:92-154` (see docs/MASTER_PLAN_AI_SCIENTIST.md:226-247 for the gating narrative).
 
 ## Picking the Next Task
-1) Start at the lowest unchecked task in the earliest wave.  
-2) Keep diffs small; avoid unrelated refactors.  
+1) Start at the lowest unchecked task in the earliest wave.
+2) Keep diffs small; avoid unrelated refactors.
 3) If a task blocks, add a short note and pick the next unblocked task.
 
 ## Done Definition (template)

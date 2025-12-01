@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Tuple, Literal
+from typing import Any, Literal, Mapping, Tuple
 
 import yaml
 
@@ -173,7 +173,7 @@ class GovernanceConfig:
 class ProposalMixConfig:
     constraint_ratio: float
     exploration_ratio: float
-    jitter_scale: float = 0.01 # Add default to match _proposal_mix_from_dict
+    jitter_scale: float = 0.01  # Add default to match _proposal_mix_from_dict
     exploitation_ratio: float = 0.0
     surrogate_pool_multiplier: float = 2.0
     sampler_type: str = "standard"
@@ -209,6 +209,7 @@ class SurrogateConfig:
 @dataclass(frozen=True)
 class ALMConfig:
     """ALM hyperparameters (mirrors constellaration settings)."""
+
     # Per-iteration settings
     penalty_parameters_increase_factor: float = 2.0
     constraint_violation_tolerance_reduction_factor: float = 0.5
@@ -253,11 +254,14 @@ class ALMConfig:
 @dataclass(frozen=True)
 class ASOConfig:
     """Configuration for Agent-Supervised Optimization loop."""
+
     # Control mode
     enabled: bool = False
 
     # Supervision frequency
-    supervision_mode: Literal["every_step", "periodic", "event_triggered"] = "event_triggered"
+    supervision_mode: Literal[
+        "every_step", "periodic", "event_triggered"
+    ] = "event_triggered"
     supervision_interval: int = 5  # Steps between LLM calls (if periodic)
 
     # Convergence detection
@@ -359,7 +363,9 @@ class ExperimentConfig:
             proposal_mix=defaults.proposal_mix,
             constraint_weights=defaults.constraint_weights,
             generative=defaults.generative,
-            surrogate=dataclasses.replace(defaults.surrogate, backend="neural_operator"),
+            surrogate=dataclasses.replace(
+                defaults.surrogate, backend="neural_operator"
+            ),
             aso=ASOConfig(enabled=True, supervision_mode="event_triggered"),
         )
 
@@ -417,7 +423,7 @@ class ExperimentConfig:
                 max_stagnation_steps=5,
             ),
         )
-    
+
     @property
     def surrogate_backend(self) -> str:
         """Backward compatibility alias."""
@@ -484,9 +490,7 @@ def _agent_gate_config_from_dict(
         model_alias=str(alias),
         allowed_tools=allowed,
         system_prompt=str(prompt) if prompt is not None else None,
-        provider_model=(
-            str(provider_model) if provider_model is not None else None
-        ),
+        provider_model=(str(provider_model) if provider_model is not None else None),
     )
 
 
@@ -693,12 +697,11 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         n_workers=int(budgets.get("n_workers", 1)),
         pool_type=str(budgets.get("pool_type", "process")),
     )
-    
+
     # Handle legacy surrogate_backend at top level
     legacy_surrogate_backend = payload.get("surrogate_backend")
     surrogate_config = _surrogate_config_from_dict(
-        payload.get("surrogate"), 
-        legacy_backend=legacy_surrogate_backend
+        payload.get("surrogate"), legacy_backend=legacy_surrogate_backend
     )
 
     return ExperimentConfig(

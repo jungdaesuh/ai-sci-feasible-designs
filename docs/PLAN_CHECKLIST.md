@@ -191,7 +191,7 @@ Quick Start For New Dev
 - Add --resume and write orchestration/summarize_run.py
 - Verify: small budgets (≤50) on laptop; confirm logs, resume, and
   summary outputs; no changes under constellaration/
-  
+
 Defaults & Specs
 
 - ALM (single‑objective, inequality constraints g(x) ≤ 0):

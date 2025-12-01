@@ -1,5 +1,6 @@
-import numpy as np
 from typing import Mapping, Sequence
+
+import numpy as np
 
 from ai_scientist import tools
 

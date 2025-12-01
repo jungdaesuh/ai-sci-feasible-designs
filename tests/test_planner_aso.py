@@ -1,8 +1,10 @@
 import pytest
 
-from ai_scientist.config import ASOConfig
-from ai_scientist.planner import HeuristicSupervisor, DirectiveAction
-from ai_scientist.planner import OptimizerDiagnostics, ConstraintDiagnostic
+from ai_scientist.planner import (
+    ConstraintDiagnostic,
+    DirectiveAction,
+    OptimizerDiagnostics,
+)
 
 
 def create_mock_diagnostics(**kwargs) -> OptimizerDiagnostics:
@@ -19,9 +21,15 @@ def create_mock_diagnostics(**kwargs) -> OptimizerDiagnostics:
         "bounds_norm": 1.0,
         "status": "IN_PROGRESS",
         "constraint_diagnostics": [
-            ConstraintDiagnostic(name="c1", violation=0.1, penalty=1.0, multiplier=1.0, trend="stable"),
-            ConstraintDiagnostic(name="c2", violation=0.0, penalty=1.0, multiplier=1.0, trend="stable"),
-            ConstraintDiagnostic(name="c3", violation=0.0, penalty=1.0, multiplier=1.0, trend="stable"),
+            ConstraintDiagnostic(
+                name="c1", violation=0.1, penalty=1.0, multiplier=1.0, trend="stable"
+            ),
+            ConstraintDiagnostic(
+                name="c2", violation=0.0, penalty=1.0, multiplier=1.0, trend="stable"
+            ),
+            ConstraintDiagnostic(
+                name="c3", violation=0.0, penalty=1.0, multiplier=1.0, trend="stable"
+            ),
         ],
         "narrative": ["test"],
         "steps_since_improvement": 0,
@@ -34,11 +42,13 @@ class TestHeuristicSupervisor:
     @pytest.fixture
     def aso_config(self):
         from ai_scientist.config import ASOConfig
+
         return ASOConfig()
 
     @pytest.fixture
     def supervisor(self, aso_config):
         from ai_scientist.planner import HeuristicSupervisor
+
         return HeuristicSupervisor(aso_config)
 
     def test_stop_on_feasible_found(self, supervisor):

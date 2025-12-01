@@ -1,3 +1,4 @@
+# ruff: noqa: F722, F821
 """Bridge between ai_scientist ASO loop and constellaration ALM infrastructure.
 
 This module provides a steppable interface to the ALM optimization loop,
@@ -6,37 +7,35 @@ allowing supervision injection between outer iterations.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
 import multiprocessing
 from concurrent import futures
-import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax.numpy as jnp
-from jaxtyping import Float
-import numpy as np
 import nevergrad
+import numpy as np
+from jaxtyping import Float
 
+import constellaration.forward_model as forward_model
+import constellaration.problems as problems
+from constellaration.geometry import surface_rz_fourier as rz_fourier
 from constellaration.optimization.augmented_lagrangian import (
     AugmentedLagrangianState,
-    AugmentedLagrangianSettings,
     augmented_lagrangian_function,
     update_augmented_lagrangian_state,
 )
 from constellaration.optimization.settings import (
     AugmentedLagrangianMethodSettings,
-    NevergradSettings,
     OptimizationSettings,
 )
-from constellaration.geometry import surface_rz_fourier as rz_fourier
 from constellaration.utils import pytree
-import constellaration.forward_model as forward_model
-import constellaration.problems as problems
 
 
 @dataclass
 class ALMStepResult:
     """Result of a single ALM outer iteration."""
+
     state: AugmentedLagrangianState
     n_evals: int
     objective: float
@@ -47,6 +46,7 @@ class ALMStepResult:
 @dataclass
 class ALMContext:
     """Context for ALM optimization (created once, reused across steps)."""
+
     scale: jnp.ndarray
     unravel_fn: Callable[[jnp.ndarray], rz_fourier.SurfaceRZFourier]
     problem: problems.SingleObjectiveProblem | problems.MHDStableQIStellarator
@@ -95,10 +95,17 @@ def create_alm_context(
     x0 = jnp.array(initial_guess) / scale
 
     # Evaluate initial point
-    from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
+    from constellaration.optimization.augmented_lagrangian_runner import (
+        objective_constraints,
+    )
+
     (objective, constraints), _ = objective_constraints(
-        x0, scale, problem, unravel_fn,
-        settings.forward_model_settings, aspect_ratio_upper_bound,
+        x0,
+        scale,
+        problem,
+        unravel_fn,
+        settings.forward_model_settings,
+        aspect_ratio_upper_bound,
     )
 
     # Create initial state
@@ -106,7 +113,8 @@ def create_alm_context(
     state = AugmentedLagrangianState(
         x=jnp.copy(x0),
         multipliers=jnp.zeros_like(constraints),
-        penalty_parameters=alm_settings.penalty_parameters_initial * jnp.ones_like(constraints),
+        penalty_parameters=alm_settings.penalty_parameters_initial
+        * jnp.ones_like(constraints),
         objective=objective,
         constraints=constraints,
         bounds=jnp.ones_like(x0) * alm_settings.bounds_initial,
@@ -149,7 +157,9 @@ def step_alm(
     Returns:
         ALMStepResult with updated state and metrics
     """
-    from constellaration.optimization.augmented_lagrangian_runner import objective_constraints
+    from constellaration.optimization.augmented_lagrangian_runner import (
+        objective_constraints,
+    )
 
     # Apply overrides to state before optimization
     if penalty_override is not None:
@@ -172,11 +182,12 @@ def step_alm(
     oracle.suggest(np.array(state.x))
 
     n_evals = 0
-    last_metrics = None
 
     mp_context = multiprocessing.get_context("forkserver")
 
-    with futures.ProcessPoolExecutor(max_workers=num_workers, mp_context=mp_context) as executor:
+    with futures.ProcessPoolExecutor(
+        max_workers=num_workers, mp_context=mp_context
+    ) as executor:
         running: list[Tuple[futures.Future, Any]] = []
         rest_budget = budget
 
@@ -206,7 +217,6 @@ def step_alm(
                 if future in completed:
                     n_evals += 1
                     (obj, cons), metrics = future.result()
-                    last_metrics = metrics
 
                     oracle.tell(
                         candidate,
@@ -221,8 +231,12 @@ def step_alm(
 
     # Evaluate final point
     (objective, constraints), final_metrics = objective_constraints(
-        x, context.scale, context.problem, context.unravel_fn,
-        context.forward_settings, context.aspect_ratio_upper_bound,
+        x,
+        context.scale,
+        context.problem,
+        context.unravel_fn,
+        context.forward_settings,
+        context.aspect_ratio_upper_bound,
     )
 
     # Update ALM state

@@ -1,11 +1,17 @@
-import pytest
 import numpy as np
+import pytest
+
 try:
     import torch
-    from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate, StellaratorNeuralOp
+
+    from ai_scientist.optim.surrogate_v2 import (
+        NeuralOperatorSurrogate,
+        StellaratorNeuralOp,
+    )
 except ImportError as e:
     print(f"DEBUG: Import failed: {e}")
     pytest.skip(f"PyTorch not available: {e}", allow_module_level=True)
+
 
 def _make_params(scale: float, mpol: int = 3, ntor: int = 3) -> dict:
     matrix = np.full((mpol + 1, 2 * ntor + 1), scale, dtype=float)
@@ -16,6 +22,7 @@ def _make_params(scale: float, mpol: int = 3, ntor: int = 3) -> dict:
         "is_stellarator_symmetric": True,
     }
 
+
 def _training_history(rows: int) -> tuple[list[dict], list[float]]:
     metrics_list: list[dict] = []
     targets: list[float] = []
@@ -25,86 +32,85 @@ def _training_history(rows: int) -> tuple[list[dict], list[float]]:
         metrics_payload = {
             "vacuum_well": 0.1 * idx,
             "qi": 1.0 / (idx + 1.0),
-            "max_elongation": 2.0 + 0.1 * idx
+            "max_elongation": 2.0 + 0.1 * idx,
         }
-        metrics_list.append({
-            "candidate_params": params, 
-            "metrics": metrics_payload
-        })
+        metrics_list.append({"candidate_params": params, "metrics": metrics_payload})
         targets.append(float(idx))
     return metrics_list, targets
+
 
 def test_neural_surrogate_init():
     surrogate = NeuralOperatorSurrogate(min_samples=2, epochs=1)
     assert not surrogate._trained
     assert len(surrogate._models) == 0
 
+
 def test_neural_surrogate_fit_and_predict():
     surrogate = NeuralOperatorSurrogate(
-        min_samples=4, 
-        epochs=5, 
-        batch_size=2,
-        learning_rate=0.01
+        min_samples=4, epochs=5, batch_size=2, learning_rate=0.01
     )
     metrics, targets = _training_history(8)
-    
+
     # Test fit
     surrogate.fit(metrics, targets, minimize_objective=False, cycle=1)
     assert surrogate._trained
     assert len(surrogate._models) > 0
     assert isinstance(surrogate._models[0], StellaratorNeuralOp)
-    
+
     # Check schema capture
     assert surrogate._schema is not None
     assert surrogate._schema.mpol >= 0
-    
+
     # Test rank/predict
     candidates = [
         {"params": _make_params(0.5)},
         {"params": _make_params(2.0)},
     ]
-    
+
     ranked = surrogate.rank_candidates(candidates, minimize_objective=False)
     assert len(ranked) == 2
     assert ranked[0].predicted_objective is not None
-    
+
     # Check prediction output structure
     pred = ranked[0]
     assert isinstance(pred.predicted_mhd, float)
     assert isinstance(pred.predicted_qi, float)
     assert isinstance(pred.predicted_elongation, float)
 
+
 def test_neural_surrogate_cold_start():
     surrogate = NeuralOperatorSurrogate(min_samples=100)
     metrics, targets = _training_history(10)
     surrogate.fit(metrics, targets, minimize_objective=False)
     assert not surrogate._trained
-    
+
     candidates = [{"params": _make_params(1.0)}]
     ranked = surrogate.rank_candidates(candidates, minimize_objective=False)
     assert len(ranked) == 1
     # Should return 0.0 scores
     assert ranked[0].predicted_objective == 0.0
 
+
 def test_model_forward_shape():
     # Test the model module directly
     mpol, ntor = 3, 3
     model = StellaratorNeuralOp(mpol=mpol, ntor=ntor)
-    
+
     # Input dim includes +1 for n_field_periods
     spectral_dim = 2 * (mpol + 1) * (2 * ntor + 1)
     input_dim = spectral_dim + 1
     batch_size = 4
-    
+
     x = torch.randn(batch_size, input_dim)
     # Set nfp (last column) to valid positive integers
     x[:, -1] = torch.randint(1, 5, (batch_size,)).float()
-    
+
     obj, mhd, qi = model(x)
-    
+
     assert obj.shape == (batch_size,)
     assert mhd.shape == (batch_size,)
     assert qi.shape == (batch_size,)
+
 
 if __name__ == "__main__":
     # Manual run

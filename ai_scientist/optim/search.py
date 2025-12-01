@@ -202,7 +202,9 @@ class P3SearchWrapper:
                 for idx in front:
                     distances[idx] = float("inf")
                 continue
-            grad_sorted = sorted(front, key=lambda idx: objectives[idx][0], reverse=True)
+            grad_sorted = sorted(
+                front, key=lambda idx: objectives[idx][0], reverse=True
+            )
             aspect_sorted = sorted(front, key=lambda idx: objectives[idx][1])
             grad_values = [objectives[idx][0] for idx in grad_sorted]
             aspect_values = [objectives[idx][1] for idx in aspect_sorted]
@@ -237,7 +239,6 @@ class P3SearchWrapper:
         while remaining:
             front: list[int] = []
             for idx in list(remaining):
-
                 dominated = False
                 for other in list(remaining):
                     if idx == other:

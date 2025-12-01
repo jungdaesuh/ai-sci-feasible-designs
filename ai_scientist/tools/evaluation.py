@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
-import hashlib
-import json
-import math
+
 import numpy as np
 
 import ai_scientist.forward_model as centralized_fm
-from constellaration import forward_model
-
 from ai_scientist.tools.hypervolume import (
+    _P3_REFERENCE_POINT,
     _hypervolume_minimization,
     _objective_vector,
-    _P3_REFERENCE_POINT,
 )
+from constellaration import forward_model
 
 _DEFAULT_RELATIVE_TOLERANCE = 1e-2
 _DEFAULT_SCHEMA_VERSION = 1
@@ -60,7 +58,10 @@ def _quantize_float(value: float, *, precision: float = _CANONICAL_PRECISION) ->
 
 def _canonicalize_value(value: Any, *, precision: float = _CANONICAL_PRECISION) -> Any:
     if isinstance(value, Mapping):
-        return {k: _canonicalize_value(v, precision=precision) for k, v in sorted(value.items())}
+        return {
+            k: _canonicalize_value(v, precision=precision)
+            for k, v in sorted(value.items())
+        }
     if isinstance(value, np.ndarray):
         return _canonicalize_value(value.tolist(), precision=precision)
     if isinstance(value, (list, tuple)):
@@ -83,19 +84,26 @@ def design_hash(
     """
     params_map = _ensure_mapping(params)
     return centralized_fm.compute_design_hash(
-        params_map, 
+        params_map,
         schema_version=schema.schema_version if schema else _DEFAULT_SCHEMA_VERSION,
-        rounding=rounding if rounding is not None else _DEFAULT_ROUNDING
+        rounding=rounding if rounding is not None else _DEFAULT_ROUNDING,
     )
 
+
 def _hash_params(
-    params: Mapping[str, Any], *, schema: FlattenSchema | None = None, rounding: float | None = None
+    params: Mapping[str, Any],
+    *,
+    schema: FlattenSchema | None = None,
+    rounding: float | None = None,
 ) -> str:
     return design_hash(params, schema=schema, rounding=rounding)
 
 
 def _derive_schema_from_params(
-    params: Mapping[str, Any], *, schema_version: int = _DEFAULT_SCHEMA_VERSION, rounding: float = _DEFAULT_ROUNDING
+    params: Mapping[str, Any],
+    *,
+    schema_version: int = _DEFAULT_SCHEMA_VERSION,
+    rounding: float = _DEFAULT_ROUNDING,
 ) -> FlattenSchema:
     r_cos = np.asarray(params.get("r_cos", []), dtype=float)
     z_sin = np.asarray(params.get("z_sin", []), dtype=float)
@@ -110,10 +118,14 @@ def _derive_schema_from_params(
 
     mpol = max(mpol_candidates) if mpol_candidates else 0
     ntor = max(ntor_candidates) if ntor_candidates else 0
-    return FlattenSchema(mpol=mpol, ntor=ntor, schema_version=schema_version, rounding=rounding)
+    return FlattenSchema(
+        mpol=mpol, ntor=ntor, schema_version=schema_version, rounding=rounding
+    )
 
 
-def _coefficient_from_matrix(matrix: np.ndarray, m: int, n: int, schema_ntor: int) -> float:
+def _coefficient_from_matrix(
+    matrix: np.ndarray, m: int, n: int, schema_ntor: int
+) -> float:
     if matrix.ndim != 2 or m < 0 or n < -schema_ntor or n > schema_ntor:
         return 0.0
     if m >= matrix.shape[0]:
@@ -146,7 +158,10 @@ def _contains_invalid_number(node: Any) -> bool:
 
 def _replace_invalid_numbers(node: Any, replacement: float) -> Any:
     if isinstance(node, Mapping):
-        return {key: _replace_invalid_numbers(value, replacement) for key, value in node.items()}
+        return {
+            key: _replace_invalid_numbers(value, replacement)
+            for key, value in node.items()
+        }
     if isinstance(node, (list, tuple)):
         return [_replace_invalid_numbers(value, replacement) for value in node]
     if isinstance(node, np.ndarray):
@@ -184,7 +199,9 @@ def _safe_evaluate(
     try:
         result = compute()
     except Exception as exc:  # noqa: BLE001
-        return _penalized_result(stage=stage, maximize=maximize, penalty=penalty, error=str(exc))
+        return _penalized_result(
+            stage=stage, maximize=maximize, penalty=penalty, error=str(exc)
+        )
 
     invalid = _contains_invalid_number(result)
     if invalid:
@@ -218,31 +235,40 @@ def _evaluate_cached_stage(
     Calls compute directly.
     """
     params_map = _ensure_mapping(boundary_params)
-    return _safe_evaluate(lambda: compute(params_map), stage=stage.lower(), maximize=maximize)
+    return _safe_evaluate(
+        lambda: compute(params_map), stage=stage.lower(), maximize=maximize
+    )
 
 
 # --- Re-exports / Delegates to centralized forward model for compatibility ---
+
 
 def make_boundary_from_params(params: Mapping[str, Any] | BoundaryParams) -> Any:
     params_map = _ensure_mapping(params)
     return centralized_fm.make_boundary_from_params(params_map)
 
+
 def compute_constraint_margins(metrics: Any, problem: str) -> Dict[str, float]:
     return centralized_fm.compute_constraint_margins(metrics, problem)
+
 
 def _max_violation(margins: Mapping[str, float]) -> float:
     return centralized_fm.max_violation(margins)
 
+
 # -----------------------------------------------------------------------------
+
 
 def _settings_for_stage(
     stage: str, problem: str, *, skip_qi: bool = False
 ) -> centralized_fm.ForwardModelSettings:
     stage_lower = stage.lower()
-    
+
     # Determine Constellaration Settings
     if stage_lower == "promote":
-        c_settings = forward_model.ConstellarationSettings.default_high_fidelity_skip_qi()
+        c_settings = (
+            forward_model.ConstellarationSettings.default_high_fidelity_skip_qi()
+        )
     elif (
         stage_lower.startswith("p2")
         or stage_lower.startswith("p3")
@@ -259,12 +285,12 @@ def _settings_for_stage(
                 "qi_settings": None,
             }
         )
-        
+
     return centralized_fm.ForwardModelSettings(
         constellaration_settings=c_settings,
         problem=problem,
         stage=stage_lower,
-        fidelity="high" if "high" in stage_lower or "p" in stage_lower else "low"
+        fidelity="high" if "high" in stage_lower or "p" in stage_lower else "low",
     )
 
 
@@ -300,14 +326,21 @@ def evaluate_p1(
 ) -> Dict[str, Any]:
     """Run a P1-style evaluation using centralized forward model."""
     import warnings
-    warnings.warn("evaluate_p1 is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
+
+    warnings.warn(
+        "evaluate_p1 is deprecated. Use forward_model_batch instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     params_map = _ensure_mapping(boundary_params)
     settings = _settings_for_stage(stage, "p1", skip_qi=True)
-    
+
     try:
         result = centralized_fm.forward_model(params_map, settings, use_cache=use_cache)
     except Exception as e:
-        return _penalized_result(stage=stage.lower(), maximize=False, penalty=1e9, error=str(e))
+        return _penalized_result(
+            stage=stage.lower(), maximize=False, penalty=1e9, error=str(e)
+        )
 
     metrics = result.metrics
     score = 0.0
@@ -339,14 +372,21 @@ def evaluate_p2(
 ) -> Dict[str, Any]:
     """Run a high-fidelity evaluator for the P2 (QI) problem."""
     import warnings
-    warnings.warn("evaluate_p2 is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
+
+    warnings.warn(
+        "evaluate_p2 is deprecated. Use forward_model_batch instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     params_map = _ensure_mapping(boundary_params)
     settings = _settings_for_stage(stage, "p2")
-    
+
     try:
         result = centralized_fm.forward_model(params_map, settings, use_cache=use_cache)
     except Exception as e:
-         return _penalized_result(stage=stage.lower(), maximize=True, penalty=-1e9, error=str(e))
+        return _penalized_result(
+            stage=stage.lower(), maximize=True, penalty=-1e9, error=str(e)
+        )
 
     metrics = result.metrics
     score = _gradient_score(metrics)
@@ -355,7 +395,7 @@ def evaluate_p2(
     return {
         "stage": stage.lower(),
         "objective": result.objective,
-        "minimize_objective": False, # P2 maximizes gradient
+        "minimize_objective": False,  # P2 maximizes gradient
         "feasibility": result.feasibility,
         "score": score,
         "hv": float(max(0.0, gradient - 1.0)),
@@ -375,14 +415,21 @@ def evaluate_p3(
 ) -> Dict[str, Any]:
     """Run a high-fidelity evaluator for the P3 (multi-objective) problem."""
     import warnings
-    warnings.warn("evaluate_p3 is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
+
+    warnings.warn(
+        "evaluate_p3 is deprecated. Use forward_model_batch instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     params_map = _ensure_mapping(boundary_params)
     settings = _settings_for_stage(stage, "p3")
 
     try:
         result = centralized_fm.forward_model(params_map, settings, use_cache=use_cache)
     except Exception as e:
-         return _penalized_result(stage=stage.lower(), maximize=False, penalty=1e9, error=str(e))
+        return _penalized_result(
+            stage=stage.lower(), maximize=False, penalty=1e9, error=str(e)
+        )
 
     metrics = result.metrics
     score = _gradient_score(metrics)
@@ -394,9 +441,7 @@ def evaluate_p3(
         "feasibility": result.feasibility,
         "score": score,
         "hv": float(
-            max(
-                0.0, metrics.minimum_normalized_magnetic_gradient_scale_length - 1.0
-            )
+            max(0.0, metrics.minimum_normalized_magnetic_gradient_scale_length - 1.0)
         ),
         "metrics": metrics.model_dump(),
         "settings": settings.constellaration_settings.model_dump(),
@@ -414,7 +459,12 @@ def evaluate_p3_set(
 ) -> Dict[str, Any]:
     """Evaluate a batch of P3 boundaries and compute the set-level hypervolume."""
     import warnings
-    warnings.warn("evaluate_p3_set is deprecated. Use forward_model_batch instead.", DeprecationWarning, stacklevel=2)
+
+    warnings.warn(
+        "evaluate_p3_set is deprecated. Use forward_model_batch instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     stage_lower = stage.lower()
     if not boundary_specs:

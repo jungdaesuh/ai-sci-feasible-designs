@@ -218,6 +218,7 @@ PHYSICS_HEURISTICS_GUIDANCE = (
     "never change n_field_periods."
 )
 
+
 def get_problem_spec(problem: str) -> ProblemSpec:
     key = problem.lower()
     if key not in _PROBLEM_SPECS:

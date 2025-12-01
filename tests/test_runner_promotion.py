@@ -1,7 +1,9 @@
 from typing import Any, Mapping
 
-from ai_scientist import runner, cycle_executor, config as ai_config
+from ai_scientist import config as ai_config
+from ai_scientist import cycle_executor
 from ai_scientist.fidelity_controller import FidelityController
+
 
 def _make_controller() -> FidelityController:
     cfg = ai_config.load_experiment_config()

@@ -87,7 +87,7 @@ class BudgetController:
         cache_stats = payload.get("cache_stats")
         if isinstance(cache_stats, dict):
             self._cache_stats = cache_stats
-        
+
         self._total_consumed = int(payload.get("total_consumed", 0))
 
     def consume(self, n_evals: int) -> None:
@@ -118,7 +118,7 @@ class BudgetController:
                 max_high_fidelity_evals_per_cycle=self._base.max_high_fidelity_evals_per_cycle,
                 remaining_budget=self._base.screen_evals_per_cycle,
             )
-        
+
         screen_evals = self._blend_budget(
             self._base.screen_evals_per_cycle,
             self._adaptive_cfg.screen_bounds,

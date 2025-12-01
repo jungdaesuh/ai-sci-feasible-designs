@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ai_scientist import rag
-from ai_scientist.rag import DEFAULT_INDEX_SOURCES
 from ai_scientist.memory.schema import StageHistoryEntry
+from ai_scientist.rag import DEFAULT_INDEX_SOURCES
 
 _LOGGER = logging.getLogger(__name__)
 _ALLOWED_REFERENCE_PREFIXES = (
@@ -415,7 +415,9 @@ def collect_adaptation_figures(out_dir: str | Path = "reports") -> list[Path]:
     return sorted(collected)
 
 
-def export_metrics_to_prometheus_textfile(metrics: Mapping[str, Any], file_path: Path) -> None:
+def export_metrics_to_prometheus_textfile(
+    metrics: Mapping[str, Any], file_path: Path
+) -> None:
     try:
         from prometheus_client import CollectorRegistry, Gauge, write_to_textfile
     except ImportError:
@@ -430,5 +432,5 @@ def export_metrics_to_prometheus_textfile(metrics: Mapping[str, Any], file_path:
             safe_key = key.replace(" ", "_").replace("-", "_").lower()
             g = Gauge(f"ai_scientist_{safe_key}", f"Metric: {key}", registry=registry)
             g.set(value)
-    
+
     write_to_textfile(str(file_path), registry)

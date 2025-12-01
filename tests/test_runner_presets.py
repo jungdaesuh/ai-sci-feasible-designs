@@ -1,7 +1,8 @@
 from dataclasses import replace
 from unittest.mock import patch
 
-from ai_scientist import config as ai_config, memory, runner
+from ai_scientist import config as ai_config
+from ai_scientist import memory, runner
 
 
 def _stub_evaluator():
@@ -58,7 +59,8 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     return_value=_stub_evaluator(),
                 ),
                 patch(
-                    "ai_scientist.cycle_executor._problem_tool_name", return_value="evaluate_p3"
+                    "ai_scientist.cycle_executor._problem_tool_name",
+                    return_value="evaluate_p3",
                 ),
             ):
                 budget_controller = runner.BudgetController(cfg)
@@ -69,7 +71,7 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     planner=None,
                     coordinator=None,
                     budget_controller=budget_controller,
-                    fidelity_controller=fidelity_controller
+                    fidelity_controller=fidelity_controller,
                 )
                 cycle_executor.run_cycle(
                     cycle_index=0,

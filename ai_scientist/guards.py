@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-
 REQUIRED_PATHS: Sequence[Path] = (
     Path("AGENTS.md"),
     Path("docs/TASKS_CODEX_MINI.md"),

@@ -450,13 +450,12 @@ def test_record_surrogate_checkpoint_rolls_back_on_failure(tmp_path):
                     commit=False,  # Ensure it doesn't commit by itself
                 )
                 raise RuntimeError("Simulated failure after checkpoint record")
-        
+
         # Verify that no surrogate checkpoint was recorded
         checkpoints_count = wm._conn.execute(
             "SELECT COUNT(*) FROM surrogate_checkpoints"
         ).fetchone()[0]
         assert checkpoints_count == 0
-
 
 
 def test_record_surrogate_checkpoint_minimal(tmp_path):

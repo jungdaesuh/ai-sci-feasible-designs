@@ -61,7 +61,9 @@ def _load_statements(db_path: Path) -> list[Mapping[str, Any]]:
 
 
 def _group_by_tool_stage(
-    entries: Iterable[Mapping[str, Any]], fallback_tool: str | None, fallback_stage: str | None
+    entries: Iterable[Mapping[str, Any]],
+    fallback_tool: str | None,
+    fallback_stage: str | None,
 ) -> dict[tuple[str, str], list[Mapping[str, Any]]]:
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for entry in entries:
@@ -155,14 +157,22 @@ def _save_adapter_bundle(
     versioned_meta = bundle_dir / f"metadata_{version}.json"
     versioned_meta.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    candidates = sorted(bundle_dir.glob("adapter_*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates = sorted(
+        bundle_dir.glob("adapter_*.safetensors"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     for old in candidates[keep:]:
         try:
             old.unlink()
         except OSError:
             LOGGER.debug("Unable to remove old adapter bundle %s", old)
 
-    meta_candidates = sorted(bundle_dir.glob("metadata_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    meta_candidates = sorted(
+        bundle_dir.glob("metadata_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     for old in meta_candidates[keep:]:
         try:
             old.unlink()
@@ -189,7 +199,9 @@ def train_from_preferences(
     stage_filter: str | None,
     keep: int,
 ) -> list[Path]:
-    preference_pairs = _load_preference_pairs(reports_dir / "adaptation" / "preference_pairs.jsonl")
+    preference_pairs = _load_preference_pairs(
+        reports_dir / "adaptation" / "preference_pairs.jsonl"
+    )
     statements = _load_statements(db_path)
     combined = preference_pairs + statements
     if not combined:
@@ -235,13 +247,26 @@ def train_from_preferences(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train PEFT adapters from preference data.")
-    parser.add_argument("--db", type=Path, default=DEFAULT_REPORTS / "ai_scientist.sqlite")
+    parser = argparse.ArgumentParser(
+        description="Train PEFT adapters from preference data."
+    )
+    parser.add_argument(
+        "--db", type=Path, default=DEFAULT_REPORTS / "ai_scientist.sqlite"
+    )
     parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORTS / "adapters")
-    parser.add_argument("--tool", type=str, help="Optional tool filter (e.g., evaluate_p3).")
-    parser.add_argument("--stage", type=str, help="Optional stage filter (e.g., screen).")
-    parser.add_argument("--keep", type=int, default=3, help="How many historical adapters to keep per tool/stage.")
+    parser.add_argument(
+        "--tool", type=str, help="Optional tool filter (e.g., evaluate_p3)."
+    )
+    parser.add_argument(
+        "--stage", type=str, help="Optional stage filter (e.g., screen)."
+    )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=3,
+        help="How many historical adapters to keep per tool/stage.",
+    )
     parser.add_argument(
         "--log-level",
         type=str,

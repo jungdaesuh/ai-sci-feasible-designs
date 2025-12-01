@@ -108,17 +108,17 @@ def main():
     # 1. Load & Clean
     df = load_source_datasets_with_no_errors()
     df = filter_geometric_validity(df)
-    
+
     # 2. Normalize (LogRobust for Physics, Standard for Geometry if needed)
     scaler = LogRobustScaler()
     physics_metrics = scaler.fit_transform(df[PHYSICS_COLS])
     joblib.dump(scaler, "checkpoints/scaler.pkl")
-    
+
     # 3. Train Surrogate (PHYSICS ONLY)
     surrogate = NeuralOperatorSurrogate()
     surrogate.fit(df[PARAMS], physics_metrics)
     torch.save(surrogate.state_dict(), "checkpoints/surrogate_v2.pt")
-    
+
     # 4. Smart Seeding
     seeds_p1 = select_best_seeds(df, problem="p1")
     # ...
@@ -133,7 +133,7 @@ def run(...):
         # Load Pre-trained Physics Brain
         surrogate.load_state_dict(torch.load(...))
         surrogate.set_scaler(joblib.load(...))
-        
+
         # Load Seeds
         initial_pool = load_seeds(...)
 ```

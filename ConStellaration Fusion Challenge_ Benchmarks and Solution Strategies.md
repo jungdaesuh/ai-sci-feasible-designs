@@ -142,37 +142,37 @@ used as an objective in Benchmarks 2 and 3
 Table 1 below summarizes how these metrics appear in each benchmark either as objectives to optimize or
 constraints to satisfy. Each benchmark has a specific formulation (single-objective for Problems 1 and 2, bi-
 
-- 
+-
 
 15
 
-- 
+-
 
-- 
-
-16
-
-- 
+-
 
 16
 
-- 
+-
+
+16
+
+-
 
 17
 
-- 
+-
 
 18
 
 19
 
-- 
+-
 
 20
 
 20
 
-- 
+-
 
 21
 
@@ -180,7 +180,7 @@ constraints to satisfy. Each benchmark has a specific formulation (single-object
 
 23
 
-- 
+-
 
 24
 19
@@ -463,22 +463,22 @@ Fourier coefficients (since ι depends on global plasma curvature and Shafranov 
 implicitly solve for shape that yields the desired ι while minimizing elongation. This coupling makes the
 problem non-trivial even though no explicit physics objective is present.
 
-- 
+-
 16
 
-- 
+-
 
 16
 
 38
 
-- 
+-
 
 39
 
 40
 
-- 
+-
 
 41
 
@@ -701,7 +701,7 @@ unrealistically deep.
 
 54
 
-- 
+-
 
 19
 
@@ -709,17 +709,17 @@ unrealistically deep.
 
 17
 
-- 
+-
 
 30
 
-- 
+-
 
-- 
+-
 
 55
 
-- 
+-
 
 55
 
@@ -783,13 +783,13 @@ Optimization Strategy: Based on the baseline and the nature of the objective, we
 an  Augmented  Lagrangian  +  global  optimizer as  the  primary  method.  The  ALM  will  treat  A,  E,  M
 constraints, maintaining feasibility, while the objective guides toward QI and coil simplicity. The baseline’s
 
-- 
+-
 
 56
 
 56
 
-- 
+-
 
 19
 28
@@ -866,17 +866,17 @@ final submission must have all constraints satisfied (normalized violation ~0)
 
 61
 
-- 
+-
 
-- 
+-
 
 17
 
-- 
+-
 
 49
 
-- 
+-
 
 53
 
@@ -941,7 +941,7 @@ we glean that an optimized QI field has almost constant |B| in certain direction
 
 37
 
-- 
+-
 
 62
 
@@ -949,11 +949,11 @@ we glean that an optimized QI field has almost constant |B| in certain direction
 
 64
 
-- 
+-
 
-- 
+-
 
-- 
+-
 
 65
 
@@ -1062,20 +1062,20 @@ at least “QI-like”). The problem statement says “ensuring confinement,” 
 
 64
 
-- 
+-
 
 15
 
-- 
+-
 15
 
 15
 
 15
 
-- 
+-
 
-- 
+-
 
 13
 
@@ -1141,13 +1141,13 @@ that approximate the efficient frontier. A larger hypervolume means the front is
 
 4
 
-- 
+-
 
 20
 
 68
 
-- 
+-
 
 23
 
@@ -1158,9 +1158,9 @@ that approximate the efficient frontier. A larger hypervolume means the front is
 70
 21
 
-- 
+-
 
-- 
+-
 
 29
 
@@ -1231,11 +1231,11 @@ configurations  as  seeds).  The  objective  functions  are  A  and  f_coil  =  
 
 72
 
-- 
+-
 
-- 
+-
 
-- 
+-
 
 73
 
@@ -1293,7 +1293,7 @@ simple geometric proxies for turbulence
 one). So we can compute C easily for any shape (it might be purely geometric from the boundary
 shape and field line curvature, possibly simpler than a full VMEC – maybe one can approximate
 
-- 
+-
 
 69
 
@@ -1351,11 +1351,11 @@ example, one solution might be a low aspect ratio stellarator (maybe A ~ 4) that
 design (A ~ 12) that is ultra-stable and nearly QI – basically a W7-X on steroids with even simpler coils (but
 large device). And intermediate ones bridging these.
 
-- 
+-
 
 74
 
-- 
+-
 
 75
 76
@@ -1489,7 +1489,7 @@ problems with penalties
 our go-to method. The ALM ensures the final solution is feasible (by heavily penalizing violation by
 the end) while the inner solver (gradient-free) handles the nonlinearity.
 
-- 
+-
 
 79
 
@@ -1497,7 +1497,7 @@ the end) while the inner solver (gradient-free) handles the nonlinearity.
 
 79
 
-- 
+-
 
 80
 
@@ -1562,20 +1562,20 @@ optimizer might exploit those errors (optimistic bias), leading to proposals tha
 poorly. A common practice is to use surrogate to find promising candidates then validate with the
 real model (which we do in iterative loops).
 
-- 
+-
 
 81
 44
 
 44
 
-- 
+-
 
 82
 
 76
 
-- 
+-
 
 20
 
@@ -1632,20 +1632,20 @@ W, C) from shape inputs. We’d likely use PyTorch for that due to its ease of u
 seamlessly combining modeling and optimization, which is great for e.g. writing a custom loss and
 doing gradient descent.
 
-- 
+-
 
-- 
+-
 
 49
 
-- 
+-
 50
 
-- 
+-
 
 79
 
-- 
+-
 
 21
 
@@ -1699,7 +1699,7 @@ use its shape coefficients.
 Optimization loop: Use an Augmented Lagrangian approach around a derivative-free optimizer:
 Initialize penalty factors for constraints small, and Lagrange multipliers = 0.
 
-- 
+-
 
 45
 
@@ -2084,20 +2084,20 @@ Validate and Iterate: Always validate the final candidates with independent mean
 instance, run a higher-resolution VMEC or a different equilibrium code (like an initial-value MHD
 stability code or SPEC) to ensure the solution is truly stable and quasi-isodynamic. The scoring uses
 
-- 
+-
 
 75
 
-- 
+-
 
 47
 46
 
-- 
+-
 
 61
 
-- 
+-
 
 27
 
@@ -2157,9 +2157,9 @@ Bringing Fusion Down to Earth: ML for Stellarator Optimization
 
 https://huggingface.co/blog/cgeorgiaw/constellaration-fusion-challenge
 
-- 
+-
 
-- 
+-
 
 85
 86
@@ -2289,4 +2289,3 @@ https://huggingface.co/datasets/proxima-fusion/constellaration
 88
 
 29
-

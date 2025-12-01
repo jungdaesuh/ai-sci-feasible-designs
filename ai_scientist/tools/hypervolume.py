@@ -43,8 +43,12 @@ class ParetoEntry:
 
 
 def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
-    gradient = float(metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0))
-    aspect = float(metrics.get("aspect_ratio", 1e9)) # Large value if aspect ratio is missing
+    gradient = float(
+        metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+    )
+    aspect = float(
+        metrics.get("aspect_ratio", 1e9)
+    )  # Large value if aspect ratio is missing
     return -gradient, aspect
 
 
@@ -79,8 +83,8 @@ def summarize_p3_candidates(
     reference_point: Tuple[float, float] = _P3_REFERENCE_POINT,
 ) -> P3Summary:
     """Produce the hypervolume score and all non-dominated seeds for a candidate batch."""
-    
-    from ai_scientist.tools.evaluation import design_hash, _DEFAULT_RELATIVE_TOLERANCE
+
+    from ai_scientist.tools.evaluation import _DEFAULT_RELATIVE_TOLERANCE, design_hash
 
     @dataclass(frozen=True)
     class _P3Entry:

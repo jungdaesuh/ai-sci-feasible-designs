@@ -109,21 +109,21 @@ In `ai_scientist/coordinator.py`:
 def produce_candidates_aso(self, ...):
     # 1. Initialize State
     state = worker.init_state(initial_seeds)
-    
+
     while budget_remaining:
         # 2. Run Chunk
         state = worker.step(state, steps=10)
-        
+
         # 3. Diagnostics
         diag = self.generate_diagnostics(state)
-        
+
         # 4. Agent Reasoning
         directive = planner.analyze_optimizer_diagnostics(diag)
-        
+
         # 5. Apply Control
         if directive.action == "STOP": break
         self.apply_directive(directive)
-        
+
     return state.candidates
 ```
 

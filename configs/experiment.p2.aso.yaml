@@ -2,7 +2,7 @@
 # Research-Production Configuration for P2 (Simple-To-Build Stellarator)
 #
 # Problem Description:
-# P2 balances physics (Rotational Transform, QA/QI) with engineering constraints 
+# P2 balances physics (Rotational Transform, QA/QI) with engineering constraints
 # (Coil Complexity, magnetic mirror ratio).
 #
 # Strategy:

@@ -1,3 +1,4 @@
+# ruff: noqa: F722, F821
 """Version 2.0 Surrogate: Neural Operator & Geometric Deep Learning.
 
 This module implements the Physics-Informed Surrogate (Phase 2) of the AI Scientist V2 upgrade.
@@ -23,10 +24,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
-from jaxtyping import Float, Int
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from jaxtyping import Float
 from torch.utils.data import DataLoader, TensorDataset
 
 from ai_scientist import tools
@@ -68,17 +69,16 @@ class StellaratorNeuralOp(nn.Module):
         # 2. Geometric Branch (Operating on 3D Point Cloud)
         # We use a modest grid for the surrogate to keep training fast.
         self.geo_n_theta = 16
-        self.geo_n_zeta = 64 
+        self.geo_n_zeta = 64
         self.geo_dim = 128
-        
+
         self.geo_encoder = equivariance.PointNetEncoder(
-            embedding_dim=self.geo_dim, 
-            align_input=True
+            embedding_dim=self.geo_dim, align_input=True
         )
 
         # Multi-head output (Fusion of Spectral + Geometric)
         fusion_dim = hidden_dim + self.geo_dim
-        
+
         self.head_base = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.SiLU(),
@@ -91,12 +91,11 @@ class StellaratorNeuralOp(nn.Module):
         self.head_qi = nn.Linear(hidden_dim, 1)
 
     def forward(
-        self, 
-        x: Float[torch.Tensor, "batch input_dim"]
+        self, x: Float[torch.Tensor, "batch input_dim"]
     ) -> tuple[
-        Float[torch.Tensor, "batch"], 
-        Float[torch.Tensor, "batch"], 
-        Float[torch.Tensor, "batch"]
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
     ]:
         """
         Args:
@@ -104,11 +103,11 @@ class StellaratorNeuralOp(nn.Module):
                The last element is n_field_periods.
         """
         batch_size = x.shape[0]
-        
+
         # Extract NFP (last column)
         nfp_batch = x[:, -1]
         x_spectral = x[:, :-1]
-        
+
         # --- Spectral Branch ---
         half_size = self.grid_h * self.grid_w
         r_cos_flat = x_spectral[:, :half_size]
@@ -116,48 +115,51 @@ class StellaratorNeuralOp(nn.Module):
 
         r_cos_grid = r_cos_flat.view(batch_size, 1, self.grid_h, self.grid_w)
         z_sin_grid = z_sin_flat.view(batch_size, 1, self.grid_h, self.grid_w)
-        spectral_grid = torch.cat([r_cos_grid, z_sin_grid], dim=1) # (B, 2, H, W)
+        spectral_grid = torch.cat([r_cos_grid, z_sin_grid], dim=1)  # (B, 2, H, W)
 
-        spectral_feat = self.conv_net(spectral_grid) # (B, hidden, H, W)
-        spectral_vec = self.global_pool(spectral_feat).view(batch_size, -1) # (B, hidden)
-        
+        spectral_feat = self.conv_net(spectral_grid)  # (B, hidden, H, W)
+        spectral_vec = self.global_pool(spectral_feat).view(
+            batch_size, -1
+        )  # (B, hidden)
+
         # --- Geometric Branch ---
         # Recover (B, mpol+1, 2*ntor+1) for geometry tool
         r_cos_in = r_cos_grid.squeeze(1)
         z_sin_in = z_sin_grid.squeeze(1)
-        
+
         # Generate Point Cloud (Differentiable)
         # Pass nfp_batch (Tensor) -> n_zeta becomes total points over 2pi
         R, Z, Phi = geometry.batch_fourier_to_real_space(
-            r_cos_in, z_sin_in, 
+            r_cos_in,
+            z_sin_in,
             n_field_periods=nfp_batch,
             n_theta=self.geo_n_theta,
-            n_zeta=self.geo_n_zeta
+            n_zeta=self.geo_n_zeta,
         )
-        
+
         X, Y, Z_cart = geometry.to_cartesian(R, Z, Phi)
-        
+
         # Stack to (Batch, 3, N_points)
         # R, Z, Phi are (Batch, T, ZetaTotal)
         # Flatten spatial dims
         X_flat = X.view(batch_size, -1)
         Y_flat = Y.view(batch_size, -1)
         Z_flat = Z_cart.view(batch_size, -1)
-        
-        points = torch.stack([X_flat, Y_flat, Z_flat], dim=1) # (B, 3, N)
-        
+
+        points = torch.stack([X_flat, Y_flat, Z_flat], dim=1)  # (B, 3, N)
+
         # Augmentation: Random Rotation during training to enforce SE(3) invariance
         if self.training:
             rot_mat = equivariance.random_rotation_matrix(batch_size, device=x.device)
             points = torch.bmm(rot_mat, points)
-        
-        geo_vec = self.geo_encoder(points) # (B, geo_dim)
-        
+
+        geo_vec = self.geo_encoder(points)  # (B, geo_dim)
+
         # --- Fusion ---
         combined = torch.cat([spectral_vec, geo_vec], dim=1)
-        
+
         base = self.head_base(combined)
-        
+
         pred_obj = self.head_objective(base).squeeze(-1)
         pred_mhd = self.head_mhd(base).squeeze(-1)
         pred_qi = self.head_qi(base).squeeze(-1)
@@ -167,8 +169,8 @@ class StellaratorNeuralOp(nn.Module):
 
 class NeuralOperatorSurrogate(BaseSurrogate):
     """Deep Learning Surrogate (V2) using PyTorch.
-    
-    Uses an ensemble of StellaratorNeuralOp models to predict metrics 
+
+    Uses an ensemble of StellaratorNeuralOp models to predict metrics
     and quantify epistemic uncertainty (Deep Ensembles).
     """
 
@@ -198,11 +200,11 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._batch_size = batch_size
         self._n_ensembles = max(1, n_ensembles)
         self._hidden_dim = hidden_dim
-        
+
         self._trained = False
         self._last_fit_count = 0
         self._last_fit_cycle = 0
-        
+
         self._models: list[StellaratorNeuralOp] = []
         self._optimizers: list[optim.Optimizer] = []
         self._schema: tools.FlattenSchema | None = None
@@ -212,64 +214,70 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
-            
+
         logging.info(f"[surrogate_v2] Loading checkpoint from {path}...")
-        
+
         # Allow loading pickled objects (legacy/offline artifact support)
-        # NOTE: We set weights_only=False to support loading full objects, 
+        # NOTE: We set weights_only=False to support loading full objects,
         # assuming the checkpoint is trusted (e.g. generated by scripts/train_offline.py).
         try:
             checkpoint = torch.load(path, map_location=self._device, weights_only=False)
         except TypeError:
             # Fallback for older PyTorch versions that don't support weights_only
             checkpoint = torch.load(path, map_location=self._device)
-        
+
         # Handle full object checkpoint (from scripts/train_offline.py)
         if isinstance(checkpoint, NeuralOperatorSurrogate):
-            logging.info("[surrogate_v2] Detected full surrogate object checkpoint. Restoring state...")
+            logging.info(
+                "[surrogate_v2] Detected full surrogate object checkpoint. Restoring state..."
+            )
             self._models = checkpoint._models
             self._schema = checkpoint._schema
             self._n_ensembles = checkpoint._n_ensembles
             self._hidden_dim = checkpoint._hidden_dim
             self._trained = checkpoint._trained
-            
+
             # Ensure models are on the correct device
             for model in self._models:
                 model.to(self._device)
             return
-        
+
         # Load Schema
         self._schema = checkpoint.get("schema")
-        
+
         # Re-init models
         state_dicts = checkpoint.get("models")
         if not state_dicts:
             raise ValueError("Checkpoint does not contain 'models' state dicts")
-            
+
         self._models = []
         self._n_ensembles = len(state_dicts)
-        
+
         mpol = checkpoint.get("mpol")
         ntor = checkpoint.get("ntor")
         hidden_dim = checkpoint.get("hidden_dim", self._hidden_dim)
-        
+
         if mpol is None or ntor is None:
-             # Try to infer from schema
-             if self._schema:
-                 mpol = self._schema.mpol
-                 ntor = self._schema.ntor
-             else:
-                 raise ValueError("Checkpoint missing mpol/ntor and schema")
-                 
-        logging.info(f"[surrogate_v2] Rehydrating {self._n_ensembles} models (mpol={mpol}, ntor={ntor}).")
-        
+            # Try to infer from schema
+            if self._schema:
+                mpol = self._schema.mpol
+                ntor = self._schema.ntor
+            else:
+                raise ValueError("Checkpoint missing mpol/ntor and schema")
+
+        logging.info(
+            f"[surrogate_v2] Rehydrating {self._n_ensembles} models (mpol={mpol}, ntor={ntor})."
+        )
+
         for i in range(self._n_ensembles):
-            model = StellaratorNeuralOp(mpol=mpol, ntor=ntor, hidden_dim=hidden_dim).to(self._device)
+            model = StellaratorNeuralOp(mpol=mpol, ntor=ntor, hidden_dim=hidden_dim).to(
+                self._device
+            )
             model.load_state_dict(state_dicts[i])
             model.eval()
             self._models.append(model)
             # No need to init optimizers for inference-only mode
-            
+
         self._trained = True
 
     def fit(
@@ -288,47 +296,50 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
         if sample_count < self._min_samples:
             logging.info(
-                "[surrogate_v2] cold start: %d samples (< %d required for DL)", 
-                sample_count, self._min_samples
+                "[surrogate_v2] cold start: %d samples (< %d required for DL)",
+                sample_count,
+                self._min_samples,
             )
             self._trained = False
             return
 
         logging.info(
-            "[surrogate_v2] Training Ensemble (N=%d) on %d samples (Device: %s)...", 
-            self._n_ensembles, sample_count, self._device
+            "[surrogate_v2] Training Ensemble (N=%d) on %d samples (Device: %s)...",
+            self._n_ensembles,
+            sample_count,
+            self._device,
         )
 
         # 1. Prepare Data
         features_list = []
-        
+
         # Capture schema from the first item if not set
         for i, metrics in enumerate(metrics_list):
             params = metrics.get("candidate_params") or metrics.get("params", {})
-            
+
             vector, schema = tools.structured_flatten(params, schema=self._schema)
             if self._schema is None:
                 self._schema = schema
-            
+
             # Append n_field_periods
             nfp = float(params.get("n_field_periods") or params.get("nfp", 1))
             vector_aug = np.append(vector, nfp)
-            
+
             features_list.append(vector_aug)
-            
+
         if not features_list:
             return
 
         X = torch.tensor(np.vstack(features_list), dtype=torch.float32).to(self._device)
         y_obj = torch.tensor(target_values, dtype=torch.float32).to(self._device)
-        
+
         # Auxiliary targets
         y_mhd_list, y_qi_list = [], []
         for metrics in metrics_list:
             m_payload = metrics.get("metrics", metrics)
             y_mhd_list.append(float(m_payload.get("vacuum_well", -1.0)))
             y_qi_list.append(float(m_payload.get("qi", 1.0)))
-            
+
         y_mhd = torch.tensor(y_mhd_list, dtype=torch.float32).to(self._device)
         y_qi = torch.tensor(y_qi_list, dtype=torch.float32).to(self._device)
 
@@ -340,23 +351,27 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         # Check dimensions match schema (ignoring appended nfp)
         current_mpol = self._schema.mpol
         current_ntor = self._schema.ntor
-        
+
         reinit = False
         if not self._models:
             reinit = True
-        elif self._models[0].mpol != current_mpol or self._models[0].ntor != current_ntor:
+        elif (
+            self._models[0].mpol != current_mpol or self._models[0].ntor != current_ntor
+        ):
             reinit = True
-            
+
         if reinit:
-            logging.info("[surrogate_v2] Initializing %d models with mpol=%d, ntor=%d", 
-                         self._n_ensembles, current_mpol, current_ntor)
+            logging.info(
+                "[surrogate_v2] Initializing %d models with mpol=%d, ntor=%d",
+                self._n_ensembles,
+                current_mpol,
+                current_ntor,
+            )
             self._models = []
             self._optimizers = []
             for _ in range(self._n_ensembles):
                 model = StellaratorNeuralOp(
-                    mpol=current_mpol, 
-                    ntor=current_ntor,
-                    hidden_dim=self._hidden_dim
+                    mpol=current_mpol, ntor=current_ntor, hidden_dim=self._hidden_dim
                 ).to(self._device)
                 self._models.append(model)
                 self._optimizers.append(optim.Adam(model.parameters(), lr=self._lr))
@@ -364,25 +379,25 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         # 3. Train Loop (Sequential over ensemble members)
         # Deep Ensembles rely on random initialization and stochastic shuffling
         criterion = nn.MSELoss()
-        
+
         for idx, model in enumerate(self._models):
             model.train()
             optimizer = self._optimizers[idx]
-            
+
             # Optional: Bagging (bootstrap sampling) could be added here by resampling the dataset
             # For now, we use the full dataset with shuffling, which is standard for Deep Ensembles.
-            
+
             for epoch in range(self._epochs):
                 for xb, yb_obj, yb_mhd, yb_qi in loader:
                     optimizer.zero_grad()
                     pred_obj, pred_mhd, pred_qi = model(xb)
-                    
+
                     loss = (
-                        criterion(pred_obj, yb_obj) + 
-                        0.5 * criterion(pred_mhd, yb_mhd) + 
-                        0.5 * criterion(pred_qi, yb_qi)
+                        criterion(pred_obj, yb_obj)
+                        + 0.5 * criterion(pred_mhd, yb_mhd)
+                        + 0.5 * criterion(pred_qi, yb_qi)
                     )
-                    
+
                     loss.backward()
                     optimizer.step()
 
@@ -392,53 +407,58 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         """Check if the deep surrogate should be retrained."""
         if not self._trained:
             return True
-        
+
         delta_points = sample_count - self._last_fit_count
         if delta_points >= self._points_cadence:
             return True
-        
+
         if cycle is None:
             return False
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
     def predict_torch(
-        self, 
-        x: Float[torch.Tensor, "batch input_dim"]
+        self, x: Float[torch.Tensor, "batch input_dim"]
     ) -> tuple[
-        Float[torch.Tensor, "batch"], Float[torch.Tensor, "batch"], 
-        Float[torch.Tensor, "batch"], Float[torch.Tensor, "batch"], 
-        Float[torch.Tensor, "batch"], Float[torch.Tensor, "batch"]
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
     ]:
         """Differentiable prediction for optimization loop (Mean + Std).
-        
+
         Returns:
             (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std)
         """
         if not self._models:
             raise RuntimeError("NeuralOperatorSurrogate not initialized/trained")
-        
+
         if x.device != torch.device(self._device):
             x = x.to(self._device)
-            
+
         # Collect predictions from all models
         preds_obj, preds_mhd, preds_qi = [], [], []
-        
+
         for model in self._models:
             o, m, q = model(x)
             preds_obj.append(o)
             preds_mhd.append(m)
             preds_qi.append(q)
-            
+
         # Stack (Ensemble, Batch)
         stack_obj = torch.stack(preds_obj)
         stack_mhd = torch.stack(preds_mhd)
         stack_qi = torch.stack(preds_qi)
-        
+
         # Compute Mean and Std
         return (
-            torch.mean(stack_obj, dim=0), torch.std(stack_obj, dim=0),
-            torch.mean(stack_mhd, dim=0), torch.std(stack_mhd, dim=0),
-            torch.mean(stack_qi, dim=0), torch.std(stack_qi, dim=0),
+            torch.mean(stack_obj, dim=0),
+            torch.std(stack_obj, dim=0),
+            torch.mean(stack_mhd, dim=0),
+            torch.std(stack_mhd, dim=0),
+            torch.mean(stack_qi, dim=0),
+            torch.std(stack_qi, dim=0),
         )
 
     def rank_candidates(
@@ -451,16 +471,21 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         """Rank candidates using the Deep Ensemble (Mean + Std for Exploration)."""
         if not candidates:
             return []
-            
+
         if not self._trained or not self._models:
             logging.info("[surrogate_v2] Model not trained, using heuristics")
             cold_ranks: list[SurrogatePrediction] = []
             for candidate in candidates:
-                cold_ranks.append(SurrogatePrediction(
-                    expected_value=0.0, prob_feasible=0.0, predicted_objective=0.0,
-                    minimize_objective=minimize_objective, metadata=candidate,
-                    predicted_elongation=0.0,
-                ))
+                cold_ranks.append(
+                    SurrogatePrediction(
+                        expected_value=0.0,
+                        prob_feasible=0.0,
+                        predicted_objective=0.0,
+                        minimize_objective=minimize_objective,
+                        metadata=candidate,
+                        predicted_elongation=0.0,
+                    )
+                )
             return cold_ranks
 
         vectors = []
@@ -470,12 +495,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             nfp = float(params.get("n_field_periods") or params.get("nfp", 1))
             vec_aug = np.append(vec, nfp)
             vectors.append(vec_aug)
-            
+
         X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
-        
+
         # Evaluation
         preds_obj, preds_mhd, preds_qi = [], [], []
-        
+
         for model in self._models:
             model.eval()
             with torch.no_grad():
@@ -483,19 +508,19 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                 preds_obj.append(o)
                 preds_mhd.append(m)
                 preds_qi.append(q)
-        
+
         # Convert to numpy (Ensemble, Batch)
         obj_stack = torch.stack(preds_obj).cpu().numpy()
         mhd_stack = torch.stack(preds_mhd).cpu().numpy()
         qi_stack = torch.stack(preds_qi).cpu().numpy()
-        
+
         # Statistics
         obj_mean = np.mean(obj_stack, axis=0)
         obj_std = np.std(obj_stack, axis=0)
-        
+
         mhd_mean = np.mean(mhd_stack, axis=0)
         qi_mean = np.mean(qi_stack, axis=0)
-        
+
         # Analytically compute elongation to keep downstream tests working
         with torch.no_grad():
             mpol = self._schema.mpol
@@ -503,42 +528,44 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             grid_h = mpol + 1
             grid_w = 2 * ntor + 1
             half_size = grid_h * grid_w
-            
+
             nfp_batch = X[:, -1]
             x_spectral = X[:, :-1]
-            
+
             r_cos_grid = x_spectral[:, :half_size].view(-1, grid_h, grid_w)
             z_sin_grid = x_spectral[:, half_size:].view(-1, grid_h, grid_w)
-            
-            elongations = geometry.elongation(r_cos_grid, z_sin_grid, nfp_batch).cpu().numpy()
-        
+
+            elongations = (
+                geometry.elongation(r_cos_grid, z_sin_grid, nfp_batch).cpu().numpy()
+            )
+
         predictions: list[SurrogatePrediction] = []
         for i, candidate in enumerate(candidates):
             # Feasibility based on mean predictions
-            is_likely_feasible = (mhd_mean[i] >= 0)
+            is_likely_feasible = mhd_mean[i] >= 0
             prob_feasible = 0.8 if is_likely_feasible else 0.2
-            
+
             obj_val = float(obj_mean[i])
             uncertainty = float(obj_std[i])
-            
+
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
-            
+
             # Score: Improvement + Exploration Bonus - Violations
             # For ranking, we usually maximize expected_value
             # If minimizing objective, we use -obj_val
-            
+
             base_score = -obj_val if minimize_objective else obj_val
-            
+
             # Active Learning: Add exploration bonus (UCB-like)
             # exploration_ratio scales the standard deviation contribution
             exploration_bonus = max(0.0, float(exploration_ratio)) * uncertainty
-            
+
             # Combine: Feasibility * (Performance + Exploration)
             # Or simply additive?
             # Let's stick to a robust scoring:
             score = base_score + exploration_bonus - (10.0 * constraint_distance)
-            
+
             predictions.append(
                 SurrogatePrediction(
                     expected_value=score,
@@ -551,5 +578,5 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     predicted_elongation=float(elongations[i]),
                 )
             )
-            
+
         return sorted(predictions, key=lambda item: item.expected_value, reverse=True)

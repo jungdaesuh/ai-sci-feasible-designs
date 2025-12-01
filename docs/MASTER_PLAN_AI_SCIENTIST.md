@@ -302,7 +302,7 @@ Success looks like the master plan now reflects the actual pipeline state: Phase
 
 ### Implementation plan
 1. **Validate Phase 6/9 acceptance** – *What:* Cross-check that feasibility, surrogates, and HV persistence work as described; *Why:* these underpin the acceptance boxes and need documented confirmation; *How:* cite `_run_cycle` summaries, `tools.summarize_p3_candidates`, and the checked text above when updating docs.
-2. **Confirm Wave B coverage** – *What:* Assert that budgets, fidelity ladder, and stage-gate checks in `docs/TASKS_CODEX_MINI.md:96-127` still match runner behavior; *Why:* any mismatch would invalidate Wave B's DoD; *How:* read `_evaluate_stage`, `RunnerCLIConfig`, and `_should_transition_*`, then log ‘no outstanding To Do’. 
+2. **Confirm Wave B coverage** – *What:* Assert that budgets, fidelity ladder, and stage-gate checks in `docs/TASKS_CODEX_MINI.md:96-127` still match runner behavior; *Why:* any mismatch would invalidate Wave B's DoD; *How:* read `_evaluate_stage`, `RunnerCLIConfig`, and `_should_transition_*`, then log ‘no outstanding To Do’.
 3. **Monitor HV scaling** – *What:* Describe how to read `cycle_hv` trends from the world model to guard against stage-gate sensitivity; *Why:* the minimization-space change could introduce new HV instability; *How:* mention querying `cycle_hv` and comparing `hv_value` against cycle count `n_archive`.
 4. **Coordinate Phase 8 reporting** – *What:* Explain how reports should reference reproduction snippets plus Pareto archive metadata rows; *Why:* future reporters need stable anchors for claims; *How:* tie `reporting.write_report` output, reproduction commands, and `WorldModel.record_pareto_archive` metadata together in guidance.
 

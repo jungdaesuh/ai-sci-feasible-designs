@@ -1,8 +1,10 @@
 """Problem definitions for AI Scientist optimization tasks."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
+
 import numpy as np
+
 
 class Problem(ABC):
     """Abstract base class for optimization problems."""
@@ -20,9 +22,7 @@ class Problem(ABC):
         ...
 
     @abstractmethod
-    def _normalized_constraint_violations(
-        self, metrics: Dict[str, Any]
-    ) -> np.ndarray:
+    def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
         """
         Compute normalized constraint violations.
 
@@ -74,7 +74,7 @@ class P1Problem(Problem):
         # 1. aspect_ratio <= 4.0
         # 2. average_triangularity <= -0.5
         # 3. edge_rotational_transform_over_n_field_periods >= 0.3
-        
+
         ar_limit = self._aspect_ratio_upper_bound
         tri_limit = self._average_triangularity_upper_bound
         iota_limit = self._edge_rotational_transform_over_n_field_periods_lower_bound
@@ -83,11 +83,13 @@ class P1Problem(Problem):
         tri = metrics.get("average_triangularity", 0.0)
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
 
-        violations = np.array([
-            (ar - ar_limit) / abs(ar_limit),
-            (tri - tri_limit) / abs(tri_limit),
-            (iota_limit - iota) / abs(iota_limit),
-        ])
+        violations = np.array(
+            [
+                (ar - ar_limit) / abs(ar_limit),
+                (tri - tri_limit) / abs(tri_limit),
+                (iota_limit - iota) / abs(iota_limit),
+            ]
+        )
         return violations
 
     def get_objective(self, metrics: Dict[str, Any]) -> float:
@@ -108,7 +110,7 @@ class P2Problem(Problem):
             "edge_rotational_transform",
             "qi",
             "edge_magnetic_mirror_ratio",
-            "max_elongation"
+            "max_elongation",
         ]
 
     # Constraint constants (exposed for prompts)
@@ -134,18 +136,22 @@ class P2Problem(Problem):
 
         ar = metrics.get("aspect_ratio", 0.0)
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
-        qi = metrics.get("qi", 1.0) # Default to 1.0 to avoid log(0) issues if missing, though it should be there
-        log_qi = np.log10(qi) if qi > 0 else 0.0 # Handle potential edge cases safely
+        qi = metrics.get(
+            "qi", 1.0
+        )  # Default to 1.0 to avoid log(0) issues if missing, though it should be there
+        log_qi = np.log10(qi) if qi > 0 else 0.0  # Handle potential edge cases safely
         mirror = metrics.get("edge_magnetic_mirror_ratio", 0.0)
         elong = metrics.get("max_elongation", 0.0)
 
-        violations = np.array([
-            (ar - ar_limit) / abs(ar_limit),
-            (iota_limit - iota) / abs(iota_limit),
-            (log_qi - qi_limit) / abs(qi_limit),
-            (mirror - mirror_limit) / abs(mirror_limit),
-            (elong - elong_limit) / abs(elong_limit),
-        ])
+        violations = np.array(
+            [
+                (ar - ar_limit) / abs(ar_limit),
+                (iota_limit - iota) / abs(iota_limit),
+                (log_qi - qi_limit) / abs(qi_limit),
+                (mirror - mirror_limit) / abs(mirror_limit),
+                (elong - elong_limit) / abs(elong_limit),
+            ]
+        )
         return violations
 
     def get_objective(self, metrics: Dict[str, Any]) -> float:
@@ -168,7 +174,7 @@ class P3Problem(Problem):
             "qi",
             "edge_magnetic_mirror_ratio",
             "flux_compression",
-            "vacuum_well"
+            "vacuum_well",
         ]
 
     # Constraint constants (exposed for prompts)
@@ -191,7 +197,7 @@ class P3Problem(Problem):
         mirror_limit = self._edge_magnetic_mirror_ratio_upper_bound
         flux_limit = self._flux_compression_in_regions_of_bad_curvature_upper_bound
         well_limit = self._vacuum_well_lower_bound
-        well_norm = max(1e-1, well_limit) # From constellaration code
+        well_norm = max(1e-1, well_limit)  # From constellaration code
 
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
         qi = metrics.get("qi", 1.0)
@@ -200,13 +206,15 @@ class P3Problem(Problem):
         flux = metrics.get("flux_compression_in_regions_of_bad_curvature", 0.0)
         well = metrics.get("vacuum_well", 0.0)
 
-        violations = np.array([
-            (iota_limit - iota) / abs(iota_limit),
-            (log_qi - qi_limit) / abs(qi_limit),
-            (mirror - mirror_limit) / abs(mirror_limit),
-            (flux - flux_limit) / abs(flux_limit),
-            (well_limit - well) / abs(well_norm),
-        ])
+        violations = np.array(
+            [
+                (iota_limit - iota) / abs(iota_limit),
+                (log_qi - qi_limit) / abs(qi_limit),
+                (mirror - mirror_limit) / abs(mirror_limit),
+                (flux - flux_limit) / abs(flux_limit),
+                (well_limit - well) / abs(well_norm),
+            ]
+        )
         return violations
 
     def get_objective(self, metrics: Dict[str, Any]) -> float:
@@ -229,8 +237,10 @@ def get_problem(name: str) -> Problem:
     key = name.lower()
     if key not in problems:
         # Fallback for "p3_..." or similar variations if any
-        if key.startswith("p1"): return problems["p1"]
-        if key.startswith("p2"): return problems["p2"]
+        if key.startswith("p1"):
+            return problems["p1"]
+        if key.startswith("p2"):
+            return problems["p2"]
         return problems["p3"]
-        
+
     return problems[key]

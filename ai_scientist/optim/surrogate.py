@@ -230,9 +230,7 @@ class SurrogateBundle(BaseSurrogate):
             raise
 
     def _vectorize(self, params: Mapping[str, Any]) -> np.ndarray:
-        vector, schema = tools.structured_flatten(
-            params, schema=self._schema
-        )
+        vector, schema = tools.structured_flatten(params, schema=self._schema)
         if self._schema is None:
             self._schema = schema
         return vector
@@ -248,7 +246,9 @@ class SurrogateBundle(BaseSurrogate):
             return np.zeros((0, 0), dtype=float)
         return np.vstack(vectors)
 
-    def _label_feasibility(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
+    def _label_feasibility(
+        self, metrics_list: Sequence[Mapping[str, Any]]
+    ) -> np.ndarray:
         labels: list[int] = []
         for metrics in metrics_list:
             feasibility = metrics.get("feasibility")
@@ -271,7 +271,11 @@ class SurrogateBundle(BaseSurrogate):
             self._last_fit_cycle = int(cycle)
 
         if sample_count < self._min_samples:
-            logging.info("[surrogate] cold start: %d samples (< %d)", sample_count, self._min_samples)
+            logging.info(
+                "[surrogate] cold start: %d samples (< %d)",
+                sample_count,
+                self._min_samples,
+            )
             self._trained = False
             return
 
@@ -281,35 +285,35 @@ class SurrogateBundle(BaseSurrogate):
             return
 
         feasibility_labels = self._label_feasibility(metrics_list)
-        
+
         # Prepare targets for regression
         primary_targets = np.asarray(target_values, dtype=float)
-        
+
         # Auxiliary targets
-        aux_targets: dict[str, list[float]] = {
-            "mhd": [],
-            "qi": [],
-            "elongation": []
-        }
-        
+        aux_targets: dict[str, list[float]] = {"mhd": [], "qi": [], "elongation": []}
+
         for metrics in metrics_list:
             # Handle nested metrics structure if present, or direct keys
             m_payload = metrics.get("metrics", metrics)
-            
+
             # MHD: vacuum_well (>=0 is good). We often want to predict violation or raw value.
             # Let's predict the raw value.
             aux_targets["mhd"].append(float(m_payload.get("vacuum_well", -1.0)))
-            
+
             # QI: qi (lower is better)
             aux_targets["qi"].append(float(m_payload.get("qi", 1.0)))
-            
-            # Elongation: max_elongation (lower is better)
-            aux_targets["elongation"].append(float(m_payload.get("max_elongation", 10.0)))
 
-        aux_target_arrays = {k: np.asarray(v, dtype=float) for k, v in aux_targets.items()}
+            # Elongation: max_elongation (lower is better)
+            aux_targets["elongation"].append(
+                float(m_payload.get("max_elongation", 10.0))
+            )
+
+        aux_target_arrays = {
+            k: np.asarray(v, dtype=float) for k, v in aux_targets.items()
+        }
 
         feasible_mask = feasibility_labels == 1
-        
+
         # Align classifier features to all rows; regressor uses features_reg.
         def _train_bundle() -> None:
             scaler = StandardScaler()
@@ -321,19 +325,22 @@ class SurrogateBundle(BaseSurrogate):
                 n_jobs=1,
             )
             clf.fit(scaled_class, feasibility_labels)
-            
+
             regressors = {}
-            
+
             # Train primary objective regressor (on feasible data only if enough samples)
             primary_reg = RandomForestRegressor(
                 n_estimators=12, max_depth=6, random_state=0, n_jobs=1
             )
             if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
-                primary_reg.fit(scaler.transform(features[feasible_mask]), primary_targets[feasible_mask])
+                primary_reg.fit(
+                    scaler.transform(features[feasible_mask]),
+                    primary_targets[feasible_mask],
+                )
             else:
                 primary_reg.fit(scaled_class, primary_targets)
             regressors["objective"] = primary_reg
-            
+
             # Train auxiliary regressors (using all data or feasible? Physics metrics usually valid even if not fully feasible?)
             # The prompt implies we want to predict violation "Instead of Infeasible (0.0), tell it MHD Violation = 0.5".
             # VMEC usually returns metrics even if it's not a "good" stellarator, unless it crashed.
@@ -341,11 +348,11 @@ class SurrogateBundle(BaseSurrogate):
             # Let's train on all data for aux metrics to learn from failures too, if data exists.
             # But wait, if VMEC crashed, metrics are mostly junk.
             # However, `runner.py` fills defaults on exception.
-            # Let's stick to the same logic: if we have enough feasible, use them. 
-            # BUT for "restoration", we need to guide FROM infeasible TO feasible. 
+            # Let's stick to the same logic: if we have enough feasible, use them.
+            # BUT for "restoration", we need to guide FROM infeasible TO feasible.
             # So we MUST train on infeasible data if it has valid metrics.
             # Assuming `metrics_list` contains valid VMEC outputs.
-            
+
             for name, targets in aux_target_arrays.items():
                 reg = RandomForestRegressor(
                     n_estimators=12, max_depth=6, random_state=0, n_jobs=1
@@ -362,7 +369,9 @@ class SurrogateBundle(BaseSurrogate):
         try:
             self._with_timeout(_train_bundle)
         except TimeoutError:
-            logging.warning("[surrogate] fit timed out; downgrading to untrained status.")
+            logging.warning(
+                "[surrogate] fit timed out; downgrading to untrained status."
+            )
             self._trained = False
 
     def should_retrain(self, sample_count: int, cycle: int | None = None) -> bool:
@@ -375,7 +384,9 @@ class SurrogateBundle(BaseSurrogate):
             return False
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
-    def _predict_batch(self, feature_matrix: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    def _predict_batch(
+        self, feature_matrix: np.ndarray
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         assert self._classifier is not None
         assert self._regressors
         assert self._scaler is not None
@@ -393,7 +404,11 @@ class SurrogateBundle(BaseSurrogate):
     def _expected_value(
         self, prob_feasible: float, predicted_objective: float, minimize_objective: bool
     ) -> float:
-        oriented = -float(predicted_objective) if minimize_objective else float(predicted_objective)
+        oriented = (
+            -float(predicted_objective)
+            if minimize_objective
+            else float(predicted_objective)
+        )
         return float(prob_feasible) * oriented
 
     def _heuristic_rank(
@@ -439,13 +454,15 @@ class SurrogateBundle(BaseSurrogate):
                 params = candidate.get("params", {})
             metrics_list.append({"candidate_params": params})
         feature_matrix = self._feature_matrix(metrics_list)
-        
+
         try:
             prob, preds_dict = self._predict_batch(feature_matrix)
         except TimeoutError:
-            logging.warning("[surrogate] prediction timed out; using heuristic fallback")
+            logging.warning(
+                "[surrogate] prediction timed out; using heuristic fallback"
+            )
             return self._heuristic_rank(candidates, minimize_objective)
-        
+
         # Default to objective predictions
         objs = preds_dict.get("objective", np.zeros(len(candidates)))
         mhds = preds_dict.get("mhd", np.zeros(len(candidates)))
@@ -456,7 +473,7 @@ class SurrogateBundle(BaseSurrogate):
         for i, candidate in enumerate(candidates):
             pf = prob[i]
             obj = objs[i]
-            
+
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
             uncertainty = float(pf * (1.0 - pf))

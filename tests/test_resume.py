@@ -10,8 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ai_scientist import config as ai_config
-from ai_scientist import memory
-from ai_scientist import runner
+from ai_scientist import memory, runner
 from ai_scientist.cycle_executor import CycleResult
 
 
@@ -178,22 +177,23 @@ def test_runner_resume_flow(temp_workspace):
         checkpoint_path = report_dir / "cycle_1.json"
         assert checkpoint_path.exists()
         data = json.loads(checkpoint_path.read_text())
-        exp_id = data["experiment_id"]
         assert data["cycle"] == 1
 
     # Resume to cycle 2; _run_cycle should be called only once for index 1.
-    with patch("ai_scientist.cycle_executor.CycleExecutor.run_cycle") as mock_run_cycle_2:
+    with patch(
+        "ai_scientist.cycle_executor.CycleExecutor.run_cycle"
+    ) as mock_run_cycle_2:
         mock_run_cycle_2.return_value = CycleResult(
-                cycle_index=1,
-                candidates_evaluated=1,
-                candidates_promoted=0,
-                best_objective=0.5,
-                hypervolume=0.5,
-                feasibility_rate=1.0,
-                report_path=Path("report2.md"),
-                best_eval=mock_eval,
-                p3_summary=mock_summary,
-            )
+            cycle_index=1,
+            candidates_evaluated=1,
+            candidates_promoted=0,
+            best_objective=0.5,
+            hypervolume=0.5,
+            feasibility_rate=1.0,
+            report_path=Path("report2.md"),
+            best_eval=mock_eval,
+            p3_summary=mock_summary,
+        )
 
         resume_cli = runner.RunnerCLIConfig(
             config_path=Path("dummy"),
@@ -246,7 +246,9 @@ def test_runner_resume_integration(temp_workspace):
         "design_hash": "hash_test",
     }
 
-    with patch("ai_scientist.cycle_executor._problem_evaluator", return_value=mock_eval_func):
+    with patch(
+        "ai_scientist.cycle_executor._problem_evaluator", return_value=mock_eval_func
+    ):
         config_c1 = replace(config, cycles=1)
         runner.run(config_c1)
 

@@ -4,46 +4,52 @@ Configuration and setup helpers for the AI Scientist runner.
 import argparse
 import os
 import subprocess
-import sys
-import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Sequence, Mapping, Any
+from typing import Sequence
+
 import yaml
 
 from ai_scientist import config as ai_config
+from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogateBundle
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from ai_scientist.optim.generative import GenerativeDesignModel, DiffusionDesignModel
+
 
 def create_surrogate(cfg: ai_config.ExperimentConfig) -> BaseSurrogate:
     """Factory to create the appropriate surrogate model based on config."""
     if cfg.surrogate.backend == "neural_operator":
-        print(f"[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend, Ensembles={cfg.surrogate.n_ensembles}).")
+        print(
+            f"[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend, Ensembles={cfg.surrogate.n_ensembles})."
+        )
         surrogate = NeuralOperatorSurrogate(
             learning_rate=cfg.surrogate.learning_rate,
             epochs=cfg.surrogate.epochs,
             n_ensembles=cfg.surrogate.n_ensembles,
             hidden_dim=cfg.surrogate.hidden_dim,
         )
-        
+
         if cfg.surrogate.use_offline_dataset:
             ckpt_path = Path("checkpoints/surrogate_physics_v2.pt")
             if ckpt_path.exists():
                 print(f"[runner] Loading offline surrogate checkpoint: {ckpt_path}")
                 surrogate.load_checkpoint(ckpt_path)
             else:
-                print(f"[runner] Warning: use_offline_dataset=True but {ckpt_path} not found. Starting cold.")
-        
+                print(
+                    f"[runner] Warning: use_offline_dataset=True but {ckpt_path} not found. Starting cold."
+                )
+
         return surrogate
     return SurrogateBundle()
 
 
-def create_generative_model(cfg: ai_config.ExperimentConfig) -> GenerativeDesignModel | DiffusionDesignModel | None:
+def create_generative_model(
+    cfg: ai_config.ExperimentConfig,
+) -> GenerativeDesignModel | DiffusionDesignModel | None:
     """Factory to create the generative model if enabled."""
     if not cfg.generative.enabled:
         return None
-        
+
     if cfg.generative.backend == "diffusion":
         print("[runner] Generative Model Enabled (Diffusion).")
         return DiffusionDesignModel(
@@ -59,6 +65,7 @@ def create_generative_model(cfg: ai_config.ExperimentConfig) -> GenerativeDesign
         epochs=cfg.generative.epochs,
         kl_weight=cfg.generative.kl_weight,
     )
+
 
 @dataclass
 class RunnerCLIConfig:
@@ -79,6 +86,7 @@ class RunnerCLIConfig:
     resume_from: Path | None = None
     aso: bool = False
     preset: str | None = None
+
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -219,6 +227,7 @@ def validate_runtime_flags(runtime: RunnerCLIConfig) -> None:
             f"(presets: {runtime.run_preset or '<none>'}). Remove one flag/preset."
         )
 
+
 def resolve_git_sha(repo_path: str | None = None) -> str:
     try:
         completed = subprocess.run(
@@ -232,6 +241,7 @@ def resolve_git_sha(repo_path: str | None = None) -> str:
         return completed.stdout.strip()
     except (subprocess.SubprocessError, FileNotFoundError):
         return "unknown"
+
 
 _RUN_PRESETS_PATH = Path("configs/run_presets.yaml")
 

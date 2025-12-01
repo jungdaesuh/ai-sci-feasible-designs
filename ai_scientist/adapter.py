@@ -134,7 +134,10 @@ def _latest_adapter_bundle(
     tool_name: str, stage: str
 ) -> tuple[Path | None, str | None, dict[str, Any]]:
     bundle_root = _adapter_bundle_path(tool_name, stage).parent
-    candidates = [bundle_root / "adapter.safetensors", *sorted(bundle_root.glob("adapter_*.safetensors"))]
+    candidates = [
+        bundle_root / "adapter.safetensors",
+        *sorted(bundle_root.glob("adapter_*.safetensors")),
+    ]
     existing = [path for path in candidates if path.exists()]
     if not existing:
         return None, None, {}
@@ -218,7 +221,8 @@ class ProblemEvaluator(Protocol):
         *,
         stage: str,
         use_cache: bool = True,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        ...
 
 
 @dataclass(frozen=True)

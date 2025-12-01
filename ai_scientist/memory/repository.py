@@ -11,12 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .graph import PropertyGraph
-from .schema import (
-    BudgetUsage,
-    StageHistoryEntry,
-    StatementRecord,
-    init_db,
-)
+from .schema import BudgetUsage, StageHistoryEntry, StatementRecord, init_db
 
 DEFAULT_RELATIVE_TOLERANCE = 1e-2
 
@@ -247,6 +242,7 @@ class WorldModel:
         commit: bool = True,
     ) -> None:
         """Record the trajectory of ALM multipliers/penalties per step."""
+
         def _write() -> None:
             self._conn.execute(
                 """
@@ -264,7 +260,7 @@ class WorldModel:
                     violation_magnitude,
                 ),
             )
-        
+
         if commit:
             with self._conn:
                 _write()
@@ -284,6 +280,7 @@ class WorldModel:
         commit: bool = True,
     ) -> int:
         """Register a trained surrogate model version."""
+
         def _write() -> None:
             nonlocal row_id
             cursor = self._conn.execute(
@@ -763,7 +760,7 @@ class WorldModel:
         limit: int = 5,
     ) -> list[Mapping[str, Any]]:
         """Return detailed info on recent failed candidates to help the agent learn."""
-        
+
         rows = self._conn.execute(
             """
             SELECT c.params_json, m.raw_json, m.feasibility
@@ -775,7 +772,7 @@ class WorldModel:
             """,
             (experiment_id, problem, limit),
         ).fetchall()
-        
+
         failures: list[Mapping[str, Any]] = []
         for row in rows:
             try:
@@ -784,15 +781,17 @@ class WorldModel:
                 constraint_margins = metrics_raw.get("constraint_margins", {})
                 # Only include significant violations to keep context clean
                 violations = {k: v for k, v in constraint_margins.items() if v > 0}
-                
-                failures.append({
-                    "params": params,
-                    "feasibility": float(row["feasibility"]),
-                    "violations": violations
-                })
+
+                failures.append(
+                    {
+                        "params": params,
+                        "feasibility": float(row["feasibility"]),
+                        "violations": violations,
+                    }
+                )
             except (json.JSONDecodeError, ValueError):
                 continue
-                
+
         return failures
 
     def previous_best_hv(self, experiment_id: int, cycle_number: int) -> float | None:

@@ -5,35 +5,34 @@ Orchestrates the experiment execution by composing BudgetController, FidelityCon
 from __future__ import annotations
 
 import json
-import sys
-import random
 import os
+import random
+import sys
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import numpy as np
-from dataclasses import replace
 
 from ai_scientist import config as ai_config
 from ai_scientist import memory
 from ai_scientist import planner as ai_planner
-from ai_scientist import rag
-from ai_scientist import tools
+from ai_scientist import rag, tools
 from ai_scientist.budget_manager import BudgetController
-from ai_scientist.fidelity_controller import CycleSummary, FidelityController
 from ai_scientist.coordinator import Coordinator
 from ai_scientist.cycle_executor import CycleExecutor, serialize_experiment_config
-from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.experiment_setup import (
     RunnerCLIConfig,
-    parse_args,
     apply_run_preset,
-    validate_runtime_flags,
-    create_surrogate,
     create_generative_model,
+    create_surrogate,
+    parse_args,
     resolve_git_sha,
+    validate_runtime_flags,
 )
+from ai_scientist.fidelity_controller import CycleSummary, FidelityController
+from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from orchestration import adaptation as adaptation_helpers
 
 
@@ -54,9 +53,7 @@ def run_experiment(
     )
     tools.clear_evaluation_cache()
     planner_mode = (
-        runtime.planner.lower()
-        if runtime and runtime.planner
-        else cfg.planner.lower()
+        runtime.planner.lower() if runtime and runtime.planner else cfg.planner.lower()
     )
     budget_controller = BudgetController(cfg)
     fidelity_ctl = FidelityController(cfg)
@@ -67,7 +64,7 @@ def run_experiment(
     with memory.WorldModel(cfg.memory_db) as world_model:
         git_sha = resolve_git_sha()
         constellaration_sha = resolve_git_sha("constellaration")
-        
+
         experiment_id: int
         start_cycle_index = 0
         stage_history: list[CycleSummary] = []
@@ -77,16 +74,22 @@ def run_experiment(
             resume_data = json.loads(runtime.resume_from.read_text(encoding="utf-8"))
             resume_cycle = int(resume_data["cycle"])
             if "experiment_id" not in resume_data:
-                raise ValueError(f"Checkpoint {runtime.resume_from} missing experiment_id; cannot resume deterministically.")
-            
+                raise ValueError(
+                    f"Checkpoint {runtime.resume_from} missing experiment_id; cannot resume deterministically."
+                )
+
             experiment_id = int(resume_data["experiment_id"])
-            print(f"[runner] resuming experiment_id={experiment_id} from cycle {resume_cycle}")
-            
+            print(
+                f"[runner] resuming experiment_id={experiment_id} from cycle {resume_cycle}"
+            )
+
             if world_model.cycles_completed(experiment_id) < resume_cycle:
-                 print(f"[runner] warning: DB has fewer cycles than checkpoint for exp {experiment_id}")
-            
+                print(
+                    f"[runner] warning: DB has fewer cycles than checkpoint for exp {experiment_id}"
+                )
+
             start_cycle_index = resume_cycle
-            
+
             restored = world_model.cycle_summaries(experiment_id)
             for row in restored:
                 stage_history.append(
@@ -98,11 +101,13 @@ def run_experiment(
                         stage=row["stage"],
                     )
                 )
-            
+
             last_stage = stage_history[-1].stage if stage_history else "s1"
             governance_stage = last_stage
-            
-            if last_stage == "s1" and fidelity_ctl.should_transition_s1_to_s2(stage_history):
+
+            if last_stage == "s1" and fidelity_ctl.should_transition_s1_to_s2(
+                stage_history
+            ):
                 governance_stage = "s2"
             elif last_stage == "s2" and fidelity_ctl.should_transition_s2_to_s3(
                 stage_history,
@@ -111,15 +116,19 @@ def run_experiment(
                 resume_cycle,
             ):
                 governance_stage = "s3"
-                
-            print(f"[runner] resumed state: start_index={start_cycle_index} next_stage={governance_stage}")
+
+            print(
+                f"[runner] resumed state: start_index={start_cycle_index} next_stage={governance_stage}"
+            )
             bc_state = resume_data.get("budget_controller")
             if bc_state:
                 budget_controller.restore(bc_state)
 
         else:
             experiment_id = world_model.start_experiment(
-                serialize_experiment_config(cfg, constellaration_sha=constellaration_sha),
+                serialize_experiment_config(
+                    cfg, constellaration_sha=constellaration_sha
+                ),
                 git_sha,
                 constellaration_sha=constellaration_sha,
             )
@@ -137,29 +146,35 @@ def run_experiment(
         )
 
         coordinator = Coordinator(
-            cfg, 
-            world_model, 
+            cfg,
+            world_model,
             planner=planning_agent or ai_planner.PlanningAgent(world_model=world_model),
-            surrogate=surrogate_model if isinstance(surrogate_model, NeuralOperatorSurrogate) else None, 
-            generative_model=generative_model
+            surrogate=surrogate_model
+            if isinstance(surrogate_model, NeuralOperatorSurrogate)
+            else None,
+            generative_model=generative_model,
         )
-        
+
         cycle_executor = CycleExecutor(
             config=cfg,
             world_model=world_model,
             planner=planning_agent,
-            coordinator=coordinator, 
+            coordinator=coordinator,
             budget_controller=budget_controller,
-            fidelity_controller=fidelity_ctl
+            fidelity_controller=fidelity_ctl,
         )
 
         last_best_objective: float | None = None
         if stage_history:
             last_best_objective = next(
-                (entry.objective for entry in reversed(stage_history) if entry.objective is not None),
+                (
+                    entry.objective
+                    for entry in reversed(stage_history)
+                    if entry.objective is not None
+                ),
                 None,
             )
-        
+
         last_feasibility_rate: float | None = None
 
         for idx in range(cfg.cycles):
@@ -182,7 +197,7 @@ def run_experiment(
                     }
                     for entry in stage_history
                 ]
-                
+
                 plan_outcome = planning_agent.plan_cycle(
                     cfg=cfg,
                     cycle_index=idx,
@@ -192,7 +207,7 @@ def run_experiment(
                 )
                 context_snapshot = json.dumps(plan_outcome.context, indent=2)
                 print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
-                
+
                 if plan_outcome.suggested_params:
                     suggested_params = [plan_outcome.suggested_params]
                 if plan_outcome.config_overrides:
@@ -214,7 +229,7 @@ def run_experiment(
                 screen_only=bool(runtime and runtime.screen_only),
                 log_cache_stats=bool(runtime and runtime.log_cache_stats),
             )
-            
+
             last_p3_summary = result.p3_summary
             last_feasibility_rate = result.feasibility_rate
 
@@ -222,11 +237,15 @@ def run_experiment(
                 print(f"[runner] cycle {idx + 1} report saved to {result.report_path}")
             else:
                 print(f"[runner] cycle {idx + 1} aborted (wall-clock or budget).")
-            
+
             summary = CycleSummary(
                 cycle=idx + 1,
-                objective=result.best_eval.get("objective") if result.best_eval else None,
-                feasibility=result.best_eval.get("feasibility") if result.best_eval else None,
+                objective=result.best_eval.get("objective")
+                if result.best_eval
+                else None,
+                feasibility=result.best_eval.get("feasibility")
+                if result.best_eval
+                else None,
                 hv=result.hypervolume,
                 stage=governance_stage,
             )
@@ -247,7 +266,7 @@ def run_experiment(
                 )
                 if current_objective is not None:
                     last_best_objective = float(current_objective)
-            
+
             next_stage = governance_stage
             if governance_stage == "s1":
                 if fidelity_ctl.should_transition_s1_to_s2(stage_history):
@@ -267,7 +286,7 @@ def run_experiment(
                         f"[runner][stage-gate] governance stage advanced to S3 after cycle {idx + 1}"
                     )
             governance_stage = next_stage
-        
+
         batch_summary_path = _export_batch_reports(cfg.reporting_dir, stage_history)
         world_model.log_artifact(
             experiment_id=experiment_id,
@@ -276,7 +295,7 @@ def run_experiment(
         )
         usage = world_model.budget_usage(experiment_id)
         print(
-            f"[runner] logged {usage.screen_evals} screen + {usage.promoted_evals} promote evaluations (" 
+            f"[runner] logged {usage.screen_evals} screen + {usage.promoted_evals} promote evaluations ("
             f"{usage.high_fidelity_evals} high-fidelity) into {cfg.memory_db}",
         )
 
@@ -341,7 +360,7 @@ def main() -> None:
     except ValueError as exc:
         print(f"[runner] invalid CLI flags: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    
+
     PRESET_MAP = {
         "p3-high-fidelity": ai_config.ExperimentConfig.p3_high_fidelity,
         "p3-quick": ai_config.ExperimentConfig.p3_quick_validation,
@@ -350,7 +369,10 @@ def main() -> None:
 
     if cli.preset:
         if cli.preset not in PRESET_MAP:
-            print(f"[runner] error: unknown preset '{cli.preset}'. Available: {list(PRESET_MAP.keys())}", file=sys.stderr)
+            print(
+                f"[runner] error: unknown preset '{cli.preset}'. Available: {list(PRESET_MAP.keys())}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         experiment = PRESET_MAP[cli.preset]()
         print(f"[runner] Loaded configuration from preset: {cli.preset}")

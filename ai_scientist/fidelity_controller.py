@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import math
-import os
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Protocol, Sequence, Tuple
+from typing import Any, Iterable, Mapping, Protocol, Tuple
 
-from ai_scientist import config as ai_config
-from ai_scientist import tools
-from ai_scientist import memory
 from ai_scientist import adapter
-from ai_scientist.forward_model import forward_model_batch, EvaluationResult
+from ai_scientist import config as ai_config
+from ai_scientist import memory, tools
+from ai_scientist.forward_model import forward_model_batch
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
 P3_REFERENCE_POINT = getattr(tools, "_P3_REFERENCE_POINT", (1.0, 20.0))
+
 
 class ProblemEvaluator(Protocol):
     def __call__(
@@ -25,7 +22,8 @@ class ProblemEvaluator(Protocol):
         *,
         stage: str,
         use_cache: bool = True,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        ...
 
 
 @dataclass
@@ -42,12 +40,11 @@ def _time_exceeded(start: float, limit_minutes: float) -> bool:
     return elapsed >= limit_minutes * 60
 
 
-
-
-
-def _extract_objectives(entry: Mapping[str, Any], problem_type: str = "p3") -> tuple[float, float]:
+def _extract_objectives(
+    entry: Mapping[str, Any], problem_type: str = "p3"
+) -> tuple[float, float]:
     metrics = entry["evaluation"]["metrics"]
-    
+
     if problem_type == "p1":
         # P1: minimize max_elongation.
         # We treat "gradient" slot as -max_elongation (higher is better)
@@ -59,7 +56,7 @@ def _extract_objectives(entry: Mapping[str, Any], problem_type: str = "p3") -> t
         gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
         aspect = float(metrics.get("aspect_ratio", 0.0))
         return gradient, aspect
-    
+
     # Fallback if metrics missing for non-P1 (or legacy behavior)
     elong = float(metrics.get("max_elongation", 0.0))
     return -elong, 0.0
@@ -137,13 +134,14 @@ class FidelityController:
         stage: str,
         budgets: ai_config.BudgetConfig,
         cycle_start: float,
-        evaluate_fn: ProblemEvaluator | None = None, # Deprecated/Unused if using forward_model
+        evaluate_fn: ProblemEvaluator
+        | None = None,  # Deprecated/Unused if using forward_model
         *,
         sleep_per_eval: float = 0.0,
         tool_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Evaluate candidates at a given fidelity, respecting wall-clock budget."""
-        
+
         # Convert iterable to list
         candidate_list = list(candidates)
         if not candidate_list:
@@ -156,7 +154,7 @@ class FidelityController:
 
         # Prepare settings
         # We use tools._settings_for_stage to get the correct config
-        # This assumes tools is available and has this helper. 
+        # This assumes tools is available and has this helper.
         # If not, we should replicate logic or import from where it lives.
         # For now, we rely on tools.
         fm_settings = tools._settings_for_stage(stage, self.config.problem)
@@ -175,7 +173,7 @@ class FidelityController:
             fm_settings,
             n_workers=budgets.n_workers,
             pool_type=budgets.pool_type,
-            use_cache=True
+            use_cache=True,
         )
 
         # Apply PEFT updates
@@ -184,11 +182,11 @@ class FidelityController:
 
         # Process Results
         results: list[dict[str, Any]] = []
-        
+
         for i, result in enumerate(batch_results):
             candidate = candidate_list[i]
             design_id = candidate.get("design_hash") or result.design_hash
-            
+
             # Convert EvaluationResult to dict format expected by runner
             # We need to reconstruct the dict structure:
             # {
@@ -199,13 +197,13 @@ class FidelityController:
             #     "constraint_margins": ...,
             #     ...
             # }
-            
+
             # Helper to calculate score (gradient - aspect for P3/P2)
             # This logic was in tools.evaluate_p3 etc.
             # We can reuse _objective_proxy or similar, but we need 'metrics' dict first.
-            
+
             metrics_dict = result.metrics.model_dump()
-            
+
             # Determine score/hv based on problem
             # This duplicates logic from tools.evaluate_p*, but that's inevitable if we decouple.
             # Or we can use the result.objective directly if it matches?
@@ -213,32 +211,32 @@ class FidelityController:
             # P1: max_elongation
             # P2: min_grad_scale
             # P3: aspect_ratio
-            
+
             # But runner expects:
             # P1: score = 1.0 - normalized(max_elongation)
             # P2: score = gradient / aspect
             # P3: score = gradient / aspect
-            
+
             # And 'objective' field in runner dict:
             # P1: result.objective (minimize=True)
             # P2: result.objective (minimize=False)
             # P3: result.objective (minimize=True)
-            
+
             # Let's map carefully.
-            
+
             eval_dict = {
                 "stage": stage,
                 "objective": result.objective,
                 "feasibility": result.feasibility,
                 "is_feasible": result.is_feasible,
                 "metrics": metrics_dict,
-                "constraint_margins": result.constraints_map, # Use map for compatibility
+                "constraint_margins": result.constraints_map,  # Use map for compatibility
                 "max_violation": result.feasibility,
                 "cache_hit": result.cache_hit,
                 "vmec_status": "ok" if not result.error_message else "exception",
                 "settings": result.settings.constellaration_settings.model_dump(),
             }
-            
+
             # Add derived fields
             if self.config.problem == "p1":
                 eval_dict["minimize_objective"] = True
@@ -251,30 +249,38 @@ class FidelityController:
             elif self.config.problem in ["p2", "p3"]:
                 eval_dict["minimize_objective"] = self.config.problem == "p3"
                 # Score logic
-                grad = float(metrics_dict.get("minimum_normalized_magnetic_gradient_scale_length", 0.0))
+                grad = float(
+                    metrics_dict.get(
+                        "minimum_normalized_magnetic_gradient_scale_length", 0.0
+                    )
+                )
                 aspect = float(metrics_dict.get("aspect_ratio", 1.0))
                 score = grad / max(1.0, aspect)
                 eval_dict["score"] = score
-                
+
                 if self.config.problem == "p2":
                     eval_dict["hv"] = max(0.0, grad - 1.0)
-                else: # p3
+                else:  # p3
                     eval_dict["hv"] = max(0.0, grad - 1.0)
 
             if result.error_message:
-                 eval_dict["error"] = result.error_message
-                 # Penalize if error?
-                 eval_dict["feasibility"] = float("inf")
-                 eval_dict["max_violation"] = float("inf")
-                 eval_dict["objective"] = 1e9 if eval_dict.get("minimize_objective", True) else -1e9
+                eval_dict["error"] = result.error_message
+                # Penalize if error?
+                eval_dict["feasibility"] = float("inf")
+                eval_dict["max_violation"] = float("inf")
+                eval_dict["objective"] = (
+                    1e9 if eval_dict.get("minimize_objective", True) else -1e9
+                )
 
-            results.append({
-                "params": candidate["params"],
-                "evaluation": eval_dict,
-                "seed": int(candidate["seed"]),
-                "design_hash": design_id,
-            })
-            
+            results.append(
+                {
+                    "params": candidate["params"],
+                    "evaluation": eval_dict,
+                    "seed": int(candidate["seed"]),
+                    "design_hash": design_id,
+                }
+            )
+
             if sleep_per_eval > 0:
                 time.sleep(sleep_per_eval)
 
@@ -289,18 +295,14 @@ class FidelityController:
         """Select top candidates for promotion based on feasibility and objective."""
         if not entries_by_design:
             return []
-        
+
         summary = tools.summarize_p3_candidates(
             list(entries_by_design.values()), reference_point=reference_point
         )
         # Phase 5 HV/Objective: rank promotions by feasibility first, then objective proxy.
         ordered_hashes = [entry.design_hash for entry in summary.pareto_entries]
         ranked: list[Mapping[str, Any]] = sorted(
-            (
-                entries_by_design[h]
-                for h in ordered_hashes
-                if h in entries_by_design
-            ),
+            (entries_by_design[h] for h in ordered_hashes if h in entries_by_design),
             key=lambda entry: (
                 0.0 if _feasibility_value(entry) <= FEASIBILITY_CUTOFF else 1.0,
                 _feasibility_value(entry),
@@ -309,11 +311,12 @@ class FidelityController:
         )
         if len(ranked) >= promote_limit:
             return ranked[:promote_limit]
-        
+
         remaining = {
             design_hash: entry
             for design_hash, entry in entries_by_design.items()
-            if design_hash not in {entry.design_hash for entry in summary.pareto_entries}
+            if design_hash
+            not in {entry.design_hash for entry in summary.pareto_entries}
         }
         crowding = _crowding_distance(remaining, problem_type=self.config.problem)
 
@@ -371,7 +374,7 @@ class FidelityController:
         """Check if conditions for S2 -> S3 transition are met."""
         gate_cfg = self.config.stage_gates
         governance_cfg = self.config.governance
-        
+
         avg_delta = world_model.average_recent_hv_delta(
             experiment_id, governance_cfg.hv_lookback
         )

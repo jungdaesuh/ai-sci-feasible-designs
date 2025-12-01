@@ -132,7 +132,7 @@ class PlanningAgent:
         self.planning_gate = agent_module.provision_model_tier(role="planning", config=self.config)
         self.literature_gate = agent_module.provision_model_tier(role="literature", config=self.config)
         self.analysis_gate = agent_module.provision_model_tier(role="analysis", config=self.config)
-        
+
         self.world_model = world_model
         self.rag_index = Path(rag_index or rag.DEFAULT_INDEX_PATH)
         self.last_context: Mapping[str, Any] | None = None
@@ -158,14 +158,14 @@ class PlanningAgent:
 
         from ai_scientist import model_provider
         provider = self.config.get_provider()
-        
+
         # Define the levers the agent can pull (The Control Schema)
         control_schema = {
             "config_overrides": {
                 "description": "Dynamically adjust optimization parameters. Use this to steer the optimizer.",
                 "examples": [
                     # Soft ALM: Adjusting specific constraint weights if the optimizer struggles with them
-                    {"constraint_weights": {"vacuum_well_mhd": 100.0, "qi_log10": 5.0}}, 
+                    {"constraint_weights": {"vacuum_well_mhd": 100.0, "qi_log10": 5.0}},
                     # Standard ALM: Adjusting overall behavior based on convergence speed or constraint satisfaction
                     {"alm_settings": {"penalty_parameters_increase_factor": 10.0}}, # Be more aggressive on constraints
                     {"alm_settings": {"bounds_reduction_factor": 0.8}}, # Narrow the search space faster
@@ -215,7 +215,7 @@ class PlanningAgent:
                 return OptimizationDirective(action="CONTINUE", reasoning="LLM error.")
 
             content = response.body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            
+
             # JSON extraction (robust handling)
             json_str = content
             if "```json" in content:
@@ -265,7 +265,7 @@ The `Coordinator` manages the optimization state, executes the ASO loop, transla
 # ================================================================================
 
 """
-The Coordinator manages the Neuro-Symbolic Feedback Loop, bridging the gap between 
+The Coordinator manages the Neuro-Symbolic Feedback Loop, bridging the gap between
 Semantic Reasoning (Planner) and Numerical Optimization (Workers).
 """
 
@@ -296,7 +296,7 @@ try:
     from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
 except ImportError:
     # Define a placeholder if the library is not available for type hinting
-    AugmentedLagrangianState = Any 
+    AugmentedLagrangianState = Any
 
 class Coordinator:
     """
@@ -304,8 +304,8 @@ class Coordinator:
     """
 
     def __init__(
-        self, 
-        cfg: ai_config.ExperimentConfig, 
+        self,
+        cfg: ai_config.ExperimentConfig,
         world_model: memory.WorldModel,
         planner: PlanningAgent, # The Planner is injected for supervision
         surrogate: Optional[NeuralOperatorSurrogate] = None,
@@ -314,13 +314,13 @@ class Coordinator:
         self.cfg = cfg
         self.world_model = world_model
         self.planner = planner
-        
+
         # Initialize Workers (These execute the math/exploration)
         # Note: We assume OptimizationWorker is adapted to handle iterative calls.
         self.opt_worker = OptimizationWorker(cfg, surrogate)
         self.explore_worker = ExplorationWorker(cfg, generative_model)
         self.geo_worker = GeometerWorker(cfg)
-        
+
         # State management for the ASO loop
         self.optimization_history: List[AugmentedLagrangianState] = []
         self.constraint_names = self._get_constraint_names(cfg.problem)
@@ -365,7 +365,7 @@ class Coordinator:
             violation = float(jnp.maximum(0., alm_state.constraints[i]))
             penalty = float(alm_state.penalty_parameters[i])
             trend = "stable"
-            
+
             if prev_state and i < len(prev_state.constraints):
                 prev_violation = float(jnp.maximum(0., prev_state.constraints[i]))
                 # Define thresholds for trend detection
@@ -380,7 +380,7 @@ class Coordinator:
                 "penalty": penalty,
                 "trend": trend
             }
-        
+
         # 2. Progress Analysis
         objective_delta = 0.0
         if prev_state:
@@ -390,7 +390,7 @@ class Coordinator:
         # 3. Status Determination and Narrative
         FEASIBILITY_THRESHOLD = 1e-3
         STAGNATION_THRESHOLD = 1e-5
-        
+
         if diagnostics["max_violation"] < FEASIBILITY_THRESHOLD:
             diagnostics["status"] = "FEASIBLE_FOUND"
             diagnostics["narrative"].append("Feasible region reached. Now optimizing objective.")
@@ -404,7 +404,7 @@ class Coordinator:
                  diagnostics["narrative"].append("Progressing, but struggling with specific constraints (see 'increasing_violation').")
              else:
                  diagnostics["narrative"].append("Progressing normally.")
-        
+
         return diagnostics
 
     def apply_directive(self, directive: OptimizationDirective, current_cfg: ai_config.ExperimentConfig) -> Tuple[ai_config.ExperimentConfig, Dict[str, Any]]:
@@ -416,19 +416,19 @@ class Coordinator:
             return current_cfg, {}
 
         print(f"[Coordinator] Applying Planner directive: {directive.action}. Reason: {directive.reasoning}")
-        
+
         new_cfg = current_cfg
         worker_overrides = {}
-        
+
         try:
             overrides = directive.config_overrides
-            
+
             # Handle Soft ALM constraint weights (applied globally to config, affects objective formulation)
             if "constraint_weights" in overrides:
                 new_weights = replace(new_cfg.constraint_weights, **overrides["constraint_weights"])
                 new_cfg = replace(new_cfg, constraint_weights=new_weights)
                 print(f"[Coordinator] Updated Constraint Weights.")
-            
+
             # Handle Standard ALM settings (passed directly to worker for the next step)
             if "alm_settings" in overrides:
                 worker_overrides["alm_settings"] = overrides["alm_settings"]
@@ -441,14 +441,14 @@ class Coordinator:
 
         except Exception as exc:
             print(f"[Coordinator] Failed to apply directive: {exc}")
-        
+
         return new_cfg, worker_overrides
 
 
     def produce_candidates(
-        self, 
-        cycle: int, 
-        experiment_id: int, 
+        self,
+        cycle: int,
+        experiment_id: int,
         n_candidates: int, # This now represents the total budget for the cycle
         template: ai_config.BoundaryTemplateConfig,
         initial_seeds: Optional[List[Dict[str, Any]]] = None,
@@ -461,7 +461,7 @@ class Coordinator:
         """
         budget = n_candidates
         config = initial_config or self.cfg
-        
+
         print(f"[Coordinator] Starting ASO Loop. Budget: {budget} evals.")
 
         # 1. Initialization
@@ -471,7 +471,7 @@ class Coordinator:
             print("[Coordinator] No initial seeds provided by Planner. Generating exploratory seeds.")
             explore_ctx = {"n_samples": 5, "cycle": cycle}
             initial_seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
-            if not initial_seeds: 
+            if not initial_seeds:
                 print("[Coordinator] Exploration failed to generate seeds. Stopping.")
                 return []
 
@@ -481,23 +481,23 @@ class Coordinator:
         if not valid_seeds: return []
 
         # Select the primary seed for the supervised optimization run.
-        active_seed = valid_seeds[0] 
-        
+        active_seed = valid_seeds[0]
+
         current_config = config
         evals_used = 0
         step = 0
         # Define the budget for execution between Planner consultations (Micro-cycle budget)
-        INNER_LOOP_BUDGET = 10 
+        INNER_LOOP_BUDGET = 10
 
         # Initialize optimization context for the worker
         # Note: We assume OptimizationWorker is modified to handle iterative execution.
         opt_ctx = {
-            "initial_guesses": [active_seed], 
+            "initial_guesses": [active_seed],
             "budget": INNER_LOOP_BUDGET,
             "alm_settings_overrides": {},
             "continue_from_state": None
         }
-        
+
         self.optimization_history = []
 
         # 2. The Neuro-Symbolic Loop
@@ -516,13 +516,13 @@ class Coordinator:
                 break
 
             # Assuming worker returns compatible state object
-            alm_state = alm_state_raw 
+            alm_state = alm_state_raw
 
             # 2b. Translate (Diagnostic Translator)
             diagnostics = self.generate_diagnostics(alm_state, step)
             # Record the state *after* generating diagnostics (for trend analysis in the next step)
             self.optimization_history.append(alm_state)
-            
+
             # 2c. Reason (Planner Supervision)
             directive = self.planner.analyze_optimizer_diagnostics(diagnostics, cycle)
 
@@ -530,13 +530,13 @@ class Coordinator:
             if directive.action == "STOP":
                 print("[Coordinator] Planner requested stop.")
                 break
-            
+
             current_config, worker_overrides = self.apply_directive(directive, current_config)
-            
+
             # Prepare next iteration context
             opt_ctx["continue_from_state"] = alm_state
             opt_ctx["budget"] = min(INNER_LOOP_BUDGET, budget - evals_used)
-            
+
             # Apply the specific ALM settings overrides requested by the Planner
             if "alm_settings" in worker_overrides:
                 opt_ctx["alm_settings_overrides"] = worker_overrides["alm_settings"]
@@ -581,7 +581,7 @@ from ai_scientist.optim.generative import GenerativeDesignModel
 # Example initialization (replaces the logic in the main execution flow):
 def initialize_architecture(cfg: ai_config.ExperimentConfig, world_model: memory.WorldModel):
     """Initializes the core components of the Neuro-Symbolic architecture."""
-    
+
     # Initialize models
     surrogate_model = _create_surrogate(cfg)
     generative_model = _create_generative_model(cfg)
@@ -602,7 +602,7 @@ def initialize_architecture(cfg: ai_config.ExperimentConfig, world_model: memory
         surrogate=surrogate_model if isinstance(surrogate_model, NeuralOperatorSurrogate) else None,
         generative_model=generative_model
     )
-    
+
     return planner, coordinator
 
 # The main loop would then use these components:
@@ -625,14 +625,14 @@ def _run_cycle(
     budget_controller: BudgetController,
     # ... other parameters
 ) -> tuple[Path | None, dict[str, Any] | None, tools.P3Summary | None]:
-    
+
     # (Initial setup for the cycle: evaluators, budgets)
     cycle_number = cycle_index + 1
     # ...
-    
+
     # --- 1. High-Level Planning Phase ---
     # The Planner sets the initial strategy, seeds, and configuration for the cycle.
-    
+
     # (Fetch history/summary for the planner)
     stage_history = [] # Placeholder
     last_p3_summary = None # Placeholder
@@ -658,7 +658,7 @@ def _run_cycle(
     # ... (Update active_budgets based on snapshot)
 
     # --- 2. Agent-Supervised Optimization (ASO) Loop ---
-    
+
     # Prepare initial seeds from the planning outcome
     initial_seeds = []
     if planning_outcome.suggested_params:
@@ -668,7 +668,7 @@ def _run_cycle(
 
     # Initiate the Neuro-Symbolic Loop managed by the Coordinator.
     print(f"[runner][cycle={cycle_number}] Starting Agent-Supervised Optimization (ASO) Loop.")
-    
+
     # The Coordinator handles the iterative process, consulting the Planner internally.
     optimization_results = coordinator.produce_candidates(
         cycle=cycle_number,
@@ -683,12 +683,12 @@ def _run_cycle(
 
     # The optimization_results contain candidates generated during the ASO loop.
     candidates_to_evaluate = optimization_results
-    
-    # (The rest of the _run_cycle handles final evaluation (if necessary), 
+
+    # (The rest of the _run_cycle handles final evaluation (if necessary),
     # logging, promotion (S2), reporting, and budget feedback. This logic remains largely the same.)
-    
+
     # ... (Evaluation, Logging, Reporting) ...
-    
+
     # Placeholder return
     return None, None, None
 ```

@@ -13,15 +13,13 @@ import pydantic
 
 from ai_scientist import agent as agent_module
 from ai_scientist import config as ai_config
+from ai_scientist import memory, rag, tools, tools_api
 from ai_scientist.config import ASOConfig
-from ai_scientist import memory
-from ai_scientist import rag
-from ai_scientist import tools
-from ai_scientist import tools_api
 
 
 class DirectiveAction(Enum):
     """Enumerated actions for type safety."""
+
     CONTINUE = "CONTINUE"
     ADJUST = "ADJUST"
     STOP = "STOP"
@@ -30,6 +28,7 @@ class DirectiveAction(Enum):
 
 class DirectiveSource(Enum):
     """Source of the directive for debugging."""
+
     LLM = "llm"
     HEURISTIC = "heuristic"
     CONVERGENCE = "convergence"
@@ -38,6 +37,7 @@ class DirectiveSource(Enum):
 
 class OptimizationDirective(pydantic.BaseModel):
     """Structured directive from Planner to Coordinator."""
+
     model_config = pydantic.ConfigDict(frozen=True)
 
     action: DirectiveAction
@@ -51,18 +51,20 @@ class OptimizationDirective(pydantic.BaseModel):
 
 class ConstraintDiagnostic(pydantic.BaseModel):
     """Diagnostic for a single constraint (from real ALM state)."""
+
     model_config = pydantic.ConfigDict(frozen=True)
 
     name: str
-    violation: float           # max(0, constraint_value)
-    penalty: float             # Current penalty parameter
-    multiplier: float          # Lagrange multiplier (learned importance)
-    trend: str                 # "stable", "increasing_violation", "decreasing_violation"
-    delta: float = 0.0         # Change from previous step
+    violation: float  # max(0, constraint_value)
+    penalty: float  # Current penalty parameter
+    multiplier: float  # Lagrange multiplier (learned importance)
+    trend: str  # "stable", "increasing_violation", "decreasing_violation"
+    delta: float = 0.0  # Change from previous step
 
 
 class OptimizerDiagnostics(pydantic.BaseModel):
     """Rich diagnostic report from real ALM state."""
+
     model_config = pydantic.ConfigDict(frozen=True)
 
     step: int
@@ -90,34 +92,42 @@ class OptimizerDiagnostics(pydantic.BaseModel):
         if aso_config.supervision_mode == "periodic":
             return self.step % aso_config.supervision_interval == 0
         # Event-triggered
-        return any([
-            self.status == "STAGNATION",
-            self.status == "FEASIBLE_FOUND",
-            self.status == "DIVERGING",
-            any(c.trend == "increasing_violation" for c in self.constraint_diagnostics),
-            self.steps_since_improvement >= aso_config.max_stagnation_steps,
-        ])
+        return any(
+            [
+                self.status == "STAGNATION",
+                self.status == "FEASIBLE_FOUND",
+                self.status == "DIVERGING",
+                any(
+                    c.trend == "increasing_violation"
+                    for c in self.constraint_diagnostics
+                ),
+                self.steps_since_improvement >= aso_config.max_stagnation_steps,
+            ]
+        )
 
     def to_json(self) -> str:
-        return json.dumps({
-            "step": self.step,
-            "objective": round(self.objective, 4),
-            "objective_delta": round(self.objective_delta, 6),
-            "max_violation": round(self.max_violation, 4),
-            "status": self.status,
-            "bounds_norm": round(self.bounds_norm, 4),
-            "constraints": [
-                {
-                    "name": c.name,
-                    "violation": round(c.violation, 4),
-                    "penalty": round(c.penalty, 2),
-                    "multiplier": round(c.multiplier, 4),
-                    "trend": c.trend,
-                }
-                for c in self.constraint_diagnostics
-            ],
-            "narrative": self.narrative,
-        }, indent=2)
+        return json.dumps(
+            {
+                "step": self.step,
+                "objective": round(self.objective, 4),
+                "objective_delta": round(self.objective_delta, 6),
+                "max_violation": round(self.max_violation, 4),
+                "status": self.status,
+                "bounds_norm": round(self.bounds_norm, 4),
+                "constraints": [
+                    {
+                        "name": c.name,
+                        "violation": round(c.violation, 4),
+                        "penalty": round(c.penalty, 2),
+                        "multiplier": round(c.multiplier, 4),
+                        "trend": c.trend,
+                    }
+                    for c in self.constraint_diagnostics
+                ],
+                "narrative": self.narrative,
+            },
+            indent=2,
+        )
 
 
 class HeuristicSupervisor:
@@ -167,22 +177,21 @@ class HeuristicSupervisor:
                 # High violation stagnation: boost penalties
                 worst_idx = max(
                     range(len(diagnostics.constraint_diagnostics)),
-                    key=lambda i: diagnostics.constraint_diagnostics[i].violation /
-                                  (diagnostics.constraint_diagnostics[i].penalty + 1e-6)
+                    key=lambda i: diagnostics.constraint_diagnostics[i].violation
+                    / (diagnostics.constraint_diagnostics[i].penalty + 1e-6),
                 )
                 worst = diagnostics.constraint_diagnostics[worst_idx]
 
                 new_penalties = diagnostics.penalty_parameters.copy()
                 new_penalties[worst_idx] = min(
-                    worst.penalty * cfg.max_penalty_boost,
-                    cfg.max_constraint_weight
+                    worst.penalty * cfg.max_penalty_boost, cfg.max_constraint_weight
                 )
 
                 return OptimizationDirective(
                     action=DirectiveAction.ADJUST,
                     alm_overrides={"penalty_parameters": new_penalties},
                     reasoning=f"Stagnation with violation={diagnostics.max_violation:.4f}, "
-                              f"boosting penalty for '{worst.name}' from {worst.penalty:.1f} to {new_penalties[worst_idx]:.1f}",
+                    f"boosting penalty for '{worst.name}' from {worst.penalty:.1f} to {new_penalties[worst_idx]:.1f}",
                     source=DirectiveSource.HEURISTIC,
                 )
             else:
@@ -207,10 +216,18 @@ class HeuristicSupervisor:
             )
 
         # Case 6: Specific constraint struggling
-        struggling = [c for c in diagnostics.constraint_diagnostics if c.trend == "increasing_violation"]
+        struggling = [
+            c
+            for c in diagnostics.constraint_diagnostics
+            if c.trend == "increasing_violation"
+        ]
         if struggling:
             worst = max(struggling, key=lambda c: c.violation)
-            worst_idx = next(i for i, c in enumerate(diagnostics.constraint_diagnostics) if c.name == worst.name)
+            worst_idx = next(
+                i
+                for i, c in enumerate(diagnostics.constraint_diagnostics)
+                if c.name == worst.name
+            )
 
             new_penalties = diagnostics.penalty_parameters.copy()
             new_penalties[worst_idx] = min(worst.penalty * 2, cfg.max_constraint_weight)
@@ -219,7 +236,7 @@ class HeuristicSupervisor:
                 action=DirectiveAction.ADJUST,
                 alm_overrides={"penalty_parameters": new_penalties},
                 reasoning=f"Constraint '{worst.name}' worsening (violation={worst.violation:.4f}), "
-                          f"boosting penalty to {new_penalties[worst_idx]:.1f}",
+                f"boosting penalty to {new_penalties[worst_idx]:.1f}",
                 source=DirectiveSource.HEURISTIC,
             )
 
@@ -229,6 +246,7 @@ class HeuristicSupervisor:
             reasoning="Normal progress",
             source=DirectiveSource.HEURISTIC,
         )
+
 
 class PlanningOutcome:
     """Structured output that mirrors the JSON sections sent to the planning agent prompt."""
@@ -250,7 +268,6 @@ class PlanningOutcome:
         self.graph_summary = graph_summary
         self.suggested_params = suggested_params
         self.config_overrides = config_overrides
-
 
 
 def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | None:
@@ -407,7 +424,12 @@ class PlanningAgent:
         alpha: float | None = None,
         seed: int | None = None,
     ) -> dict[str, Any]:
-        args = {"parent_a": parent_a, "parent_b": parent_b, "alpha": alpha, "seed": seed}
+        args = {
+            "parent_a": parent_a,
+            "parent_b": parent_b,
+            "alpha": alpha,
+            "seed": seed,
+        }
         # Clean args (remove None)
         args = {k: v for k, v in args.items() if v is not None}
         self._validate_tool_call(self.planning_gate, "recombine_designs", args)
@@ -487,13 +509,13 @@ class PlanningAgent:
         experiment_id: int | None = None,
     ) -> PlanningOutcome:
         cycle_number = cycle_index + 1
-        
+
         # Literature Retrieval (planning role)
         rag_snippets = self.retrieve_rag(
             f"Planning guidance for {cfg.problem.upper()} cycle {cycle_number}",
             k=3,
         )
-        
+
         # Planning Role Actions
         params = self._build_template_params(cfg.boundary_template)
         evaluation = self.evaluate_p3(
@@ -501,7 +523,7 @@ class PlanningAgent:
             stage=cfg.fidelity_ladder.screen,
         )
         boundary = self.make_boundary(params)
-        
+
         evaluation_summary = {
             "objective": evaluation.get("objective"),
             "feasibility": evaluation.get("feasibility"),
@@ -515,17 +537,17 @@ class PlanningAgent:
             "n_field_periods": boundary.n_field_periods,
             "stellarator_symmetric": boundary.is_stellarator_symmetric,
         }
-        
+
         # Property Graph Snapshot (if world_model connected)
         graph_summary: Mapping[str, Any] | None = None
         failure_cases: Sequence[Mapping[str, Any]] = []
-        
+
         if self.world_model and experiment_id is not None:
             pg = self.world_model.to_networkx(experiment_id)
             graph_dir = Path(cfg.reporting_dir) / "graphs"
             graph_dir.mkdir(parents=True, exist_ok=True)
             graph_file = graph_dir / f"cycle_{cycle_number}.json"
-            
+
             nodes = [{"id": node_id, **attrs} for node_id, attrs in pg.nodes(data=True)]
             edges = [
                 {"src": src, "dst": dst, "attrs": attrs}
@@ -533,19 +555,17 @@ class PlanningAgent:
             ]
             snapshot_data = {"nodes": nodes, "edges": edges}
             graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
-            
+
             graph_summary = {
                 "node_count": len(nodes),
                 "edge_count": len(edges),
                 "note_count": sum(1 for n in nodes if n.get("type") == "note"),
-                "snapshot_path": str(graph_file)
+                "snapshot_path": str(graph_file),
             }
-            
+
             # Retrieve recent failures for reflection
             failure_cases = self.world_model.recent_failures(
-                experiment_id=experiment_id,
-                problem=cfg.problem,
-                limit=5
+                experiment_id=experiment_id, problem=cfg.problem, limit=5
             )
 
         context = self._build_context(
@@ -560,128 +580,161 @@ class PlanningAgent:
             graph_summary=graph_summary,
             failure_cases=failure_cases,
         )
-        
+
         suggested_params = None
         config_overrides = None
 
         if self.config.agent_gates:
-             from ai_scientist import model_provider
-             provider = self.config.get_provider()
-             
-             tools_schemas = tools_api.list_tool_schemas()
-             available_tools = [
-                 schema for schema in tools_schemas 
-                 if schema["name"] in self.planning_gate.allowed_tools
-             ]
-             
-             system_prompt = (
-                 f"You are the Planning Agent for the AI Scientist (cycle {cycle_number}).\n"
-                 f"Your goal is to optimize a stellarator design (problem: {cfg.problem}) by analyzing the "
-                 "experiment context and literature.\n\n"
-                 "You have access to the following tools:\n"
-                 f"{json.dumps(available_tools, indent=2)}\n\n"
-                 "PROTOCOL:\n"
-                 "1. Analyze the context, specifically 'failure_cases' (to see what constraints are being violated) and 'rag_snippets'.\n"
-                 "2. You may use tools to gather more info or test hypotheses (e.g., 'retrieve_rag', 'evaluate_p3', 'propose_boundary').\n"
-                 "3. To call a tool, output a JSON object with {\"tool\": \"<name>\", \"arguments\": {<args>}}.\n"
-                 "4. To finish and commit to a plan, output a JSON object with {\"suggested_params\": {...}, \"config_overrides\": {...}}.\n"
-                 "   - 'suggested_params' (optional): A dictionary matching the structure of 'current_boundary' for the next candidate seed.\n"
-                 "   - 'config_overrides' (optional): A dictionary to adjust experiment settings.\n"
-                 "       - Example: {'proposal_mix': {'exploration_ratio': 0.8}}\n"
-                 "       - Example: {'constraint_weights': {'mhd': 50.0}} (Soft ALM: Increase weight if MHD is failing)\n\n"
-                 "Think step-by-step. You have a maximum of 5 turns."
-             )
-             
-             messages = [
-                 {"role": "system", "content": system_prompt},
-                 {"role": "user", "content": f"Context: {json.dumps(context, default=str)}"}
-             ]
-             
-             max_turns = 5
-             for turn in range(max_turns):
-                 try:
-                     response = model_provider.invoke_chat_completion(
-                         provider,
-                         tool_call={"name": "plan_cycle_turn", "arguments": {}},
-                         messages=messages,
-                         model=self.planning_gate.provider_model
-                     )
-                     
-                     if response.status_code != 200:
-                         print(f"[planner] Turn {turn}: LLM returned status {response.status_code}")
-                         break
-                         
-                     content = response.body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-                     
-                     # Naive JSON extraction
-                     json_str = content
-                     if "```json" in content:
-                         json_str = content.split("```json")[1].split("```")[0].strip()
-                     elif "```" in content:
-                         json_str = content.split("```")[1].split("```")[0].strip()
-                     
-                     try:
-                         action = json.loads(json_str)
-                     except json.JSONDecodeError:
-                         print(f"[planner] Turn {turn}: Failed to parse JSON response.")
-                         # Feedback loop: tell the agent its JSON was invalid?
-                         # For now, just append as text and ask to retry if we had more logic, 
-                         # but simpler to just break or continue.
-                         messages.append({"role": "assistant", "content": content})
-                         messages.append({"role": "user", "content": "Error: Invalid JSON format. Please output valid JSON for tool call or final plan."})
-                         continue
+            from ai_scientist import model_provider
 
-                     messages.append({"role": "assistant", "content": content})
+            provider = self.config.get_provider()
 
-                     # Check for final plan
-                     if "suggested_params" in action or "config_overrides" in action:
-                         suggested_params = action.get("suggested_params")
-                         config_overrides = action.get("config_overrides")
-                         print(f"[planner] Plan finalized in turn {turn+1}")
-                         if suggested_params:
-                             print("[planner] Suggesting new boundary params")
-                         if config_overrides:
-                             print(f"[planner] Suggesting config overrides: {config_overrides}")
-                         break
-                     
-                     # Check for tool call
-                     tool_name = action.get("tool")
-                     tool_args = action.get("arguments", {})
-                     
-                     if tool_name:
-                         print(f"[planner] Turn {turn}: Agent calling tool '{tool_name}'")
-                         tool_result = "Tool execution failed."
-                         try:
-                             if tool_name == "retrieve_rag":
-                                 tool_result = self.retrieve_rag(**tool_args)
-                             elif tool_name == "evaluate_p3":
-                                 tool_result = self.evaluate_p3(**tool_args)
-                             elif tool_name == "propose_boundary":
-                                 tool_result = self.propose_boundary(**tool_args)
-                             elif tool_name == "recombine_designs":
-                                 tool_result = self.recombine_designs(**tool_args)
-                             elif tool_name == "make_boundary":
-                                  # Helper: just return the object representation for the agent to see structure
-                                  # We can't pass the actual object back to LLM easily, so serialize parameters
-                                  # or just confirm it works. make_boundary in tools.py returns SurfaceRZFourier
-                                  # which isn't JSON serializable.
-                                  # Let's skip or serialize params.
-                                  # Actually, the agent might use this to validate params.
-                                  # For now, let's just echo params back or similar.
-                                  tool_result = {"status": "success", "params": tool_args.get("params")}
-                             else:
-                                 tool_result = f"Error: Tool '{tool_name}' not supported or permitted."
-                         except Exception as tool_exc:
-                             tool_result = f"Error executing tool: {tool_exc}"
-                         
-                         messages.append({"role": "user", "content": f"Tool '{tool_name}' output: {json.dumps(tool_result, default=str)}"})
-                     else:
-                         # No recognized action
-                         messages.append({"role": "user", "content": "Error: No 'tool' or 'suggested_params' found in JSON."})
-                 
-                 except Exception as exc:
-                     print(f"[planner] Turn {turn} failed: {exc}")
-                     break
+            tools_schemas = tools_api.list_tool_schemas()
+            available_tools = [
+                schema
+                for schema in tools_schemas
+                if schema["name"] in self.planning_gate.allowed_tools
+            ]
+
+            system_prompt = (
+                f"You are the Planning Agent for the AI Scientist (cycle {cycle_number}).\n"
+                f"Your goal is to optimize a stellarator design (problem: {cfg.problem}) by analyzing the "
+                "experiment context and literature.\n\n"
+                "You have access to the following tools:\n"
+                f"{json.dumps(available_tools, indent=2)}\n\n"
+                "PROTOCOL:\n"
+                "1. Analyze the context, specifically 'failure_cases' (to see what constraints are being violated) and 'rag_snippets'.\n"
+                "2. You may use tools to gather more info or test hypotheses (e.g., 'retrieve_rag', 'evaluate_p3', 'propose_boundary').\n"
+                '3. To call a tool, output a JSON object with {"tool": "<name>", "arguments": {<args>}}.\n'
+                '4. To finish and commit to a plan, output a JSON object with {"suggested_params": {...}, "config_overrides": {...}}.\n'
+                "   - 'suggested_params' (optional): A dictionary matching the structure of 'current_boundary' for the next candidate seed.\n"
+                "   - 'config_overrides' (optional): A dictionary to adjust experiment settings.\n"
+                "       - Example: {'proposal_mix': {'exploration_ratio': 0.8}}\n"
+                "       - Example: {'constraint_weights': {'mhd': 50.0}} (Soft ALM: Increase weight if MHD is failing)\n\n"
+                "Think step-by-step. You have a maximum of 5 turns."
+            )
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Context: {json.dumps(context, default=str)}",
+                },
+            ]
+
+            max_turns = 5
+            for turn in range(max_turns):
+                try:
+                    response = model_provider.invoke_chat_completion(
+                        provider,
+                        tool_call={"name": "plan_cycle_turn", "arguments": {}},
+                        messages=messages,
+                        model=self.planning_gate.provider_model,
+                    )
+
+                    if response.status_code != 200:
+                        print(
+                            f"[planner] Turn {turn}: LLM returned status {response.status_code}"
+                        )
+                        break
+
+                    content = (
+                        response.body.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "{}")
+                    )
+
+                    # Naive JSON extraction
+                    json_str = content
+                    if "```json" in content:
+                        json_str = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        json_str = content.split("```")[1].split("```")[0].strip()
+
+                    try:
+                        action = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        print(f"[planner] Turn {turn}: Failed to parse JSON response.")
+                        # Feedback loop: tell the agent its JSON was invalid?
+                        # For now, just append as text and ask to retry if we had more logic,
+                        # but simpler to just break or continue.
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Error: Invalid JSON format. Please output valid JSON for tool call or final plan.",
+                            }
+                        )
+                        continue
+
+                    messages.append({"role": "assistant", "content": content})
+
+                    # Check for final plan
+                    if "suggested_params" in action or "config_overrides" in action:
+                        suggested_params = action.get("suggested_params")
+                        config_overrides = action.get("config_overrides")
+                        print(f"[planner] Plan finalized in turn {turn+1}")
+                        if suggested_params:
+                            print("[planner] Suggesting new boundary params")
+                        if config_overrides:
+                            print(
+                                f"[planner] Suggesting config overrides: {config_overrides}"
+                            )
+                        break
+
+                    # Check for tool call
+                    tool_name = action.get("tool")
+                    tool_args = action.get("arguments", {})
+
+                    if tool_name:
+                        print(
+                            f"[planner] Turn {turn}: Agent calling tool '{tool_name}'"
+                        )
+                        tool_result = "Tool execution failed."
+                        try:
+                            if tool_name == "retrieve_rag":
+                                tool_result = self.retrieve_rag(**tool_args)
+                            elif tool_name == "evaluate_p3":
+                                tool_result = self.evaluate_p3(**tool_args)
+                            elif tool_name == "propose_boundary":
+                                tool_result = self.propose_boundary(**tool_args)
+                            elif tool_name == "recombine_designs":
+                                tool_result = self.recombine_designs(**tool_args)
+                            elif tool_name == "make_boundary":
+                                # Helper: just return the object representation for the agent to see structure
+                                # We can't pass the actual object back to LLM easily, so serialize parameters
+                                # or just confirm it works. make_boundary in tools.py returns SurfaceRZFourier
+                                # which isn't JSON serializable.
+                                # Let's skip or serialize params.
+                                # Actually, the agent might use this to validate params.
+                                # For now, let's just echo params back or similar.
+                                tool_result = {
+                                    "status": "success",
+                                    "params": tool_args.get("params"),
+                                }
+                            else:
+                                tool_result = f"Error: Tool '{tool_name}' not supported or permitted."
+                        except Exception as tool_exc:
+                            tool_result = f"Error executing tool: {tool_exc}"
+
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": f"Tool '{tool_name}' output: {json.dumps(tool_result, default=str)}",
+                            }
+                        )
+                    else:
+                        # No recognized action
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Error: No 'tool' or 'suggested_params' found in JSON.",
+                            }
+                        )
+
+                except Exception as exc:
+                    print(f"[planner] Turn {turn} failed: {exc}")
+                    break
 
         return PlanningOutcome(
             context=context,
@@ -690,7 +743,7 @@ class PlanningAgent:
             rag_snippets=rag_snippets,
             graph_summary=graph_summary,
             suggested_params=suggested_params,
-            config_overrides=config_overrides
+            config_overrides=config_overrides,
         )
 
     def _ensure_heuristic(self, aso_config: ASOConfig) -> HeuristicSupervisor:
@@ -744,10 +797,14 @@ class PlanningAgent:
         system_prompt = self._build_supervision_prompt(cycle, rag_context, diagnostics)
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Current ALM diagnostics:\n{diagnostics.to_json()}"},
+            {
+                "role": "user",
+                "content": f"Current ALM diagnostics:\n{diagnostics.to_json()}",
+            },
         ]
 
         from ai_scientist import model_provider
+
         provider = self.config.get_provider()
 
         for attempt in range(aso_config.llm_max_retries):
@@ -762,21 +819,34 @@ class PlanningAgent:
                 if response.status_code != 200:
                     raise RuntimeError(f"LLM returned {response.status_code}")
 
-                content = response.body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                content = (
+                    response.body.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "{}")
+                )
                 return self._parse_directive(content, diagnostics)
 
             except json.JSONDecodeError as e:
                 if attempt < aso_config.llm_max_retries - 1:
-                    messages.append({"role": "user", "content": f"Invalid JSON: {e}. Please output valid JSON."})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"Invalid JSON: {e}. Please output valid JSON.",
+                        }
+                    )
                     continue
                 raise
 
         raise RuntimeError("LLM supervision failed after retries")
 
-    def _build_supervision_prompt(self, cycle: int, rag_context: list, diagnostics: OptimizerDiagnostics) -> str:
+    def _build_supervision_prompt(
+        self, cycle: int, rag_context: list, diagnostics: OptimizerDiagnostics
+    ) -> str:
         rag_section = ""
         if rag_context:
-            rag_section = f"\n\nRelevant knowledge:\n{json.dumps(rag_context, indent=2)}"
+            rag_section = (
+                f"\n\nRelevant knowledge:\n{json.dumps(rag_context, indent=2)}"
+            )
 
         constraint_names = [c.name for c in diagnostics.constraint_diagnostics]
 
@@ -812,7 +882,9 @@ ADJUSTMENT STRATEGY:
 
 Respond with ONLY valid JSON."""
 
-    def _parse_directive(self, content: str, diagnostics: OptimizerDiagnostics) -> OptimizationDirective:
+    def _parse_directive(
+        self, content: str, diagnostics: OptimizerDiagnostics
+    ) -> OptimizationDirective:
         """Parse LLM response into OptimizationDirective."""
         json_str = content
         if "```json" in content:
@@ -830,4 +902,3 @@ Respond with ONLY valid JSON."""
             reasoning=data.get("reasoning", ""),
             source=DirectiveSource.LLM,
         )
-

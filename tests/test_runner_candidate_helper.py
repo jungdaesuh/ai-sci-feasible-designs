@@ -3,7 +3,8 @@ from typing import Any, Mapping, cast
 
 import numpy as np
 
-from ai_scientist import config as ai_config, memory, runner
+from ai_scientist import config as ai_config
+from ai_scientist import memory, runner
 
 
 class _FakeWorldModel:
@@ -120,18 +121,23 @@ def test_propose_p3_candidates_mixes_sampler_and_random() -> None:
             epochs=100,
             kl_weight=0.001,
         ),
-                    reporting_dir=Path("."),
-                    memory_db=Path("reports/ai_scientist.sqlite"),
-                    source_config=Path("configs/experiment.example.yaml"),
-                    constraint_weights=ai_config.ConstraintWeightsConfig(
-                        mhd=1.0,
-                        qi=1.0,
-                        elongation=1.0,
-                    ),
-                    initialization_strategy="template",
-                )
+        reporting_dir=Path("."),
+        memory_db=Path("reports/ai_scientist.sqlite"),
+        source_config=Path("configs/experiment.example.yaml"),
+        constraint_weights=ai_config.ConstraintWeightsConfig(
+            mhd=1.0,
+            qi=1.0,
+            elongation=1.0,
+        ),
+        initialization_strategy="template",
+    )
     world_model = _FakeWorldModel()
-    candidates, sampler_count, random_count, vae_results_count = runner._propose_p3_candidates_for_cycle(
+    (
+        candidates,
+        sampler_count,
+        random_count,
+        vae_results_count,
+    ) = runner._propose_p3_candidates_for_cycle(
         cfg,
         cycle_index=0,
         world_model=cast(memory.WorldModel, world_model),
@@ -206,7 +212,7 @@ def test_surrogate_ranker_prefers_high_hv_candidates() -> None:
             elongation=1.0,
         ),
         initialization_strategy="template",
-                )
+    )
     candidates: list[Mapping[str, Any]] = []
     for idx, value in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 2.5)):
         params = {
@@ -297,7 +303,7 @@ def test_surrogate_candidate_pool_size_allows_zero() -> None:
             elongation=1.0,
         ),
         initialization_strategy="template",
-                )
+    )
     assert (
         runner._surrogate_candidate_pool_size(
             cfg.budgets.screen_evals_per_cycle,

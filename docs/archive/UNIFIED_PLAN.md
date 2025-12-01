@@ -1,7 +1,7 @@
 > **DEPRECATED:** This document is superseded by `ASO_V4_IMPLEMENTATION_GUIDE.md`
 
-This document is a living roadmap for unifying the semantic reasoning layer  
-(`ai_scientist` agents) with the numerical optimization layer (ALM + VMEC++)  
+This document is a living roadmap for unifying the semantic reasoning layer
+(`ai_scientist` agents) with the numerical optimization layer (ALM + VMEC++)
 into a single Neuro‑Symbolic feedback loop.
 
 It has been updated to reflect the **current codebase reality** and to define a
@@ -55,7 +55,7 @@ This summarizes what is actually implemented today, not what we want eventually.
         - `suggested_params`: a candidate boundary seed.
         - `config_overrides`: tweaks such as constraint weights or proposal mix.
 
-Important: **Planner currently only acts at cycle boundaries.**  
+Important: **Planner currently only acts at cycle boundaries.**
 It does not yet supervise the inner ALM loop.
 
 ### 2.2 Coordinator (`ai_scientist/coordinator.py`)
@@ -105,26 +105,26 @@ The target architecture keeps the current modules but refines their roles.
 
 ### 3.1 Conceptual Loop
 
-1. **Math step (Workers)**  
+1. **Math step (Workers)**
    `OptimizationWorker` runs a short ALM chunk, starting from a given
    `AugmentedLagrangianState` and returning:
    - Updated ALM state.
    - Number of ALM evaluations used.
 
-2. **Translate (Coordinator)**  
+2. **Translate (Coordinator)**
    The Coordinator converts ALM state into a semantic diagnostics object:
    - `objective`, `max_violation`.
    - Per‑constraint violation + trend.
    - Simple health stats (e.g., bounds norm).
    - Status: `IN_PROGRESS`, `STAGNATION`, `FEASIBLE_FOUND`.
 
-3. **Reason (Planner)**  
+3. **Reason (Planner)**
    `PlanningAgent.analyze_optimizer_diagnostics(diagnostics, cycle)` uses an
    LLM to:
    - Decide whether to continue, adjust hyperparameters, re‑seed, or stop.
    - Emit a structured `OptimizationDirective`.
 
-4. **Direct (Coordinator)**  
+4. **Direct (Coordinator)**
    Coordinator applies the directive:
    - Update `cfg.constraint_weights`, `cfg.proposal_mix`, etc.
    - Pass ALM‑specific overrides (e.g. `penalty_parameters_increase_factor`)

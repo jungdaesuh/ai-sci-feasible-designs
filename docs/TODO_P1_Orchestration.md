@@ -20,7 +20,7 @@
     - [ ] Deltas after promotion (low → high fidelity)
     - [ ] Export CSV summaries for downstream analysis
 
-  
+
 
   - P2 orchestration
     - New CLI runner wrapping SimpleToBuildQIStellarator;

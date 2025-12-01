@@ -13,7 +13,6 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-
 _DEFAULT_ENCODING = "utf-8"
 _PREFERENCE_SCHEMA_VERSION = 1
 

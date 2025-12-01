@@ -6,8 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from ai_scientist import memory
-from ai_scientist import rag
+from ai_scientist import memory, rag
 
 
 def retrieve_rag(
@@ -47,7 +46,9 @@ def write_note(
         target_wm = memory.WorldModel(memory_db)
         owned = True
     if target_wm is None:
-        raise ValueError("write_note requires world_model or memory_db for persistence.")
+        raise ValueError(
+            "write_note requires world_model or memory_db for persistence."
+        )
     try:
         target_wm.log_note(experiment_id=experiment_id, cycle=cycle, content=content)
     except Exception as exc:  # pragma: no cover - safety for agent path

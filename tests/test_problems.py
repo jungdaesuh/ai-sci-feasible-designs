@@ -1,5 +1,6 @@
 """Tests for ai_scientist.problems."""
 
+# ruff: noqa: E402
 import sys
 from unittest.mock import MagicMock
 
@@ -25,29 +26,26 @@ sys.modules["constellaration.problems"] = MagicMock()
 sys.modules["constellaration.initial_guess"] = MagicMock()
 
 import numpy as np
-import pytest
-from ai_scientist.problems import (
-    Problem,
-    P1Problem,
-    P2Problem,
-    P3Problem,
-    get_problem
-)
+
+from ai_scientist.problems import P1Problem, P2Problem, P3Problem, Problem, get_problem
+
 
 class TestProblemABC:
     def test_template_methods(self):
         """Test is_feasible, compute_feasibility, max_violation template methods."""
-        
+
         class MockProblem(Problem):
             @property
-            def name(self): return "mock"
+            def name(self):
+                return "mock"
+
             @property
-            def constraint_names(self): return ["c1", "c2"]
+            def constraint_names(self):
+                return ["c1", "c2"]
+
             def _normalized_constraint_violations(self, metrics):
-                return np.array([
-                    metrics["v1"],
-                    metrics["v2"]
-                ])
+                return np.array([metrics["v1"], metrics["v2"]])
+
             def get_objective(self, metrics):
                 return 0.0
 
@@ -71,6 +69,7 @@ class TestProblemABC:
         assert p.compute_feasibility(metrics_mixed) == 0.3
         assert p.max_violation(metrics_mixed) == 0.3
 
+
 class TestP1Problem:
     def test_constraints(self):
         p = P1Problem()
@@ -85,26 +84,27 @@ class TestP1Problem:
             "aspect_ratio": 3.9,
             "average_triangularity": -0.6,
             "edge_rotational_transform_over_n_field_periods": 0.35,
-            "max_elongation": 2.0
+            "max_elongation": 2.0,
         }
         assert p.is_feasible(metrics)
         assert p.get_objective(metrics) == 2.0
 
         # Infeasible case
         metrics_bad = {
-            "aspect_ratio": 4.1, # Violation
+            "aspect_ratio": 4.1,  # Violation
             "average_triangularity": -0.6,
-            "edge_rotational_transform_over_n_field_periods": 0.35
+            "edge_rotational_transform_over_n_field_periods": 0.35,
         }
         assert not p.is_feasible(metrics_bad)
         violations = p._normalized_constraint_violations(metrics_bad)
-        assert violations[0] > 0 # AR violation
+        assert violations[0] > 0  # AR violation
+
 
 class TestP2Problem:
     def test_constraints(self):
         p = P2Problem()
         assert p.name == "p2"
-        
+
         # Feasible case
         # aspect_ratio <= 10.0
         # edge_rotational_transform_over_n_field_periods >= 0.25
@@ -117,15 +117,16 @@ class TestP2Problem:
             "qi": 1e-5,
             "edge_magnetic_mirror_ratio": 0.1,
             "max_elongation": 4.0,
-            "minimum_normalized_magnetic_gradient_scale_length": 1.5
+            "minimum_normalized_magnetic_gradient_scale_length": 1.5,
         }
         assert p.is_feasible(metrics)
         assert p.get_objective(metrics) == -1.5
 
         # Infeasible case
         metrics_bad = metrics.copy()
-        metrics_bad["qi"] = 1e-3 # log10(-3) > -4
+        metrics_bad["qi"] = 1e-3  # log10(-3) > -4
         assert not p.is_feasible(metrics_bad)
+
 
 class TestP3Problem:
     def test_constraints(self):
@@ -144,7 +145,7 @@ class TestP3Problem:
             "edge_magnetic_mirror_ratio": 0.2,
             "flux_compression_in_regions_of_bad_curvature": 0.8,
             "vacuum_well": 0.01,
-            "minimum_normalized_magnetic_gradient_scale_length": 2.0
+            "minimum_normalized_magnetic_gradient_scale_length": 2.0,
         }
         assert p.is_feasible(metrics)
         assert p.get_objective(metrics) == -2.0
@@ -154,9 +155,10 @@ class TestP3Problem:
         metrics_bad["vacuum_well"] = -0.01
         assert not p.is_feasible(metrics_bad)
 
+
 def test_get_problem():
     assert isinstance(get_problem("p1"), P1Problem)
     assert isinstance(get_problem("P1"), P1Problem)
     assert isinstance(get_problem("p2"), P2Problem)
     assert isinstance(get_problem("p3"), P3Problem)
-    assert isinstance(get_problem("p3_variant"), P3Problem) # Default/fallback behavior
+    assert isinstance(get_problem("p3_variant"), P3Problem)  # Default/fallback behavior

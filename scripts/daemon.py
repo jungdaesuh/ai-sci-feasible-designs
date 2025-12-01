@@ -56,20 +56,41 @@ def _run_once(cmd: Iterable[str]) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Daemon wrapper for ai_scientist.runner")
+    parser = argparse.ArgumentParser(
+        description="Daemon wrapper for ai_scientist.runner"
+    )
     parser.add_argument("--config", type=Path, help="Experiment config path.")
     parser.add_argument("--problem", choices=["p1", "p2", "p3"], help="Problem to run.")
     parser.add_argument("--cycles", type=int, help="Total cycles to run.")
     parser.add_argument("--memory-db", type=Path, help="World-model SQLite path.")
     parser.add_argument("--eval-budget", type=int, help="Screening budget override.")
     parser.add_argument("--workers", type=int, help="Worker override.")
-    parser.add_argument("--pool-type", choices=["thread", "process"], help="Executor type.")
+    parser.add_argument(
+        "--pool-type", choices=["thread", "process"], help="Executor type."
+    )
     parser.add_argument("--run-preset", type=str, help="Run preset name.")
-    parser.add_argument("--planner", choices=["deterministic", "agent"], default="deterministic")
-    parser.add_argument("--reporting-dir", type=Path, default=Path("reports"), help="Reporting directory to look for checkpoints.")
+    parser.add_argument(
+        "--planner", choices=["deterministic", "agent"], default="deterministic"
+    )
+    parser.add_argument(
+        "--reporting-dir",
+        type=Path,
+        default=Path("reports"),
+        help="Reporting directory to look for checkpoints.",
+    )
     parser.add_argument("--resume-from", type=Path, help="Explicit checkpoint path.")
-    parser.add_argument("--wall-clock-minutes", type=float, default=0.0, help="Wall-clock guard for the daemon (0 disables).")
-    parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-pick latest checkpoint when --resume-from not provided.")
+    parser.add_argument(
+        "--wall-clock-minutes",
+        type=float,
+        default=0.0,
+        help="Wall-clock guard for the daemon (0 disables).",
+    )
+    parser.add_argument(
+        "--auto-resume",
+        action="store_true",
+        default=True,
+        help="Auto-pick latest checkpoint when --resume-from not provided.",
+    )
     args = parser.parse_args()
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -85,17 +106,21 @@ def main() -> None:
     if rc != 0:
         latest = _latest_checkpoint(args.reporting_dir)
         if latest and latest != resume_path:
-            print(f"[daemon] runner failed (rc={rc}); retrying with checkpoint {latest}")
+            print(
+                f"[daemon] runner failed (rc={rc}); retrying with checkpoint {latest}"
+            )
             cmd = _build_cmd(args, latest)
             rc = _run_once(cmd)
-    
+
     if rc != 0:
         sys.exit(rc)
 
     if args.wall_clock_minutes > 0:
         elapsed_min = (time.monotonic() - start) / 60.0
         if elapsed_min > args.wall_clock_minutes:
-            print(f"[daemon] wall-clock limit reached ({elapsed_min:.2f} min > {args.wall_clock_minutes} min)")
+            print(
+                f"[daemon] wall-clock limit reached ({elapsed_min:.2f} min > {args.wall_clock_minutes} min)"
+            )
 
 
 if __name__ == "__main__":

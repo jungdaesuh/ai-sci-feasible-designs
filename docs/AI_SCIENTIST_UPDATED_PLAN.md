@@ -87,4 +87,3 @@ Purpose: merge prior plans and feedback into a concise, actionable blueprint to 
 ## Notes on dependencies
 - Default to sklearn-only footprint; gate PyTorch behind a config flag to avoid bloat when not needed.
 - Document HF dataset locality/caching strategy if used for offline pretrain.
-
