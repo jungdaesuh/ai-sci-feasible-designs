@@ -170,11 +170,15 @@ class TestASOIntegration:
 
         mock_invoke_chat_completion_func = self._create_mock_invoke_chat_completion()
 
-        with patch("ai_scientist.coordinator.step_alm") as mock_step_alm, patch(
-            "ai_scientist.coordinator.create_alm_context"
-        ) as mock_create_alm_context, patch(
-            "ai_scientist.model_provider.invoke_chat_completion",
-            new=mock_invoke_chat_completion_func,
+        with (
+            patch("ai_scientist.coordinator.step_alm") as mock_step_alm,
+            patch(
+                "ai_scientist.coordinator.create_alm_context"
+            ) as mock_create_alm_context,
+            patch(
+                "ai_scientist.model_provider.invoke_chat_completion",
+                new=mock_invoke_chat_completion_func,
+            ),
         ):
             # Setup mock ALM context/state
             mock_state = MagicMock()
@@ -246,9 +250,12 @@ class TestASOIntegration:
             source=DirectiveSource.HEURISTIC,
         )
 
-        with patch("ai_scientist.coordinator.step_alm") as mock_step_alm, patch(
-            "ai_scientist.coordinator.create_alm_context"
-        ) as mock_create_alm_context:
+        with (
+            patch("ai_scientist.coordinator.step_alm") as mock_step_alm,
+            patch(
+                "ai_scientist.coordinator.create_alm_context"
+            ) as mock_create_alm_context,
+        ):
             mock_state = MagicMock()
             mock_state.constraints = jnp.array([0.1])
             mock_state.multipliers = jnp.array([1.0])

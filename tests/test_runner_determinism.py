@@ -8,8 +8,10 @@ from typing import Mapping
 from unittest.mock import patch
 
 from ai_scientist import config as ai_config
-from ai_scientist import cycle_executor, memory, runner, tools
+from ai_scientist import cycle_executor, memory, tools
 from ai_scientist.budget_manager import BudgetController, CycleBudgetFeedback
+from ai_scientist.fidelity_controller import FidelityController
+from ai_scientist.optim.surrogate import SurrogateBundle
 
 
 class _DummyWorldModel:
@@ -182,7 +184,7 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
         tools.clear_evaluation_cache()
         with memory.WorldModel(db_path) as world_model:
             experiment_id = world_model.start_experiment(
-                runner.serialize_experiment_config(
+                cycle_executor.serialize_experiment_config(
                     cfg, constellaration_sha=constellaration_sha
                 ),
                 git_sha,
@@ -198,8 +200,8 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
                     return_value="stub_tool",
                 ),
             ):
-                budget_controller = runner.BudgetController(cfg)
-                fidelity_controller = runner.FidelityController(cfg)
+                budget_controller = BudgetController(cfg)
+                fidelity_controller = FidelityController(cfg)
                 executor = cycle_executor.CycleExecutor(
                     config=cfg,
                     world_model=world_model,
@@ -214,7 +216,7 @@ def test_run_cycle_deterministic_snapshot(tmp_path):
                     governance_stage="s1",
                     git_sha=git_sha,
                     constellaration_sha=constellaration_sha,
-                    surrogate_model=runner.SurrogateBundle(),
+                    surrogate_model=SurrogateBundle(),
                 )
         conn = sqlite3.connect(db_path)
         row = conn.execute(

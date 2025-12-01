@@ -3,6 +3,7 @@ import math
 import pytest
 
 from ai_scientist import tools
+from ai_scientist.tools.evaluation import _safe_evaluate
 from ai_scientist.test_helpers import base_params
 
 
@@ -14,7 +15,7 @@ def test_safe_evaluate_penalizes_nan_minimize() -> None:
             "metrics": {"aspect_ratio": math.nan},
         }
 
-    result = tools._safe_evaluate(compute, stage="screen", maximize=False)
+    result = _safe_evaluate(compute, stage="screen", maximize=False)
 
     assert result["objective"] == pytest.approx(1e9)
     assert result["minimize_objective"] is True
@@ -26,7 +27,7 @@ def test_safe_evaluate_respects_maximize_penalty() -> None:
     def compute() -> dict[str, float]:
         raise RuntimeError("boom")
 
-    result = tools._safe_evaluate(compute, stage="p2", maximize=True)
+    result = _safe_evaluate(compute, stage="p2", maximize=True)
 
     assert result["objective"] == pytest.approx(-1e9)
     assert result["minimize_objective"] is False

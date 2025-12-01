@@ -84,9 +84,11 @@ class TestCoordinatorASO:
 
     @pytest.fixture
     def coordinator(self, mock_cfg):
-        with patch("ai_scientist.coordinator.OptimizationWorker"), patch(
-            "ai_scientist.coordinator.ExplorationWorker"
-        ), patch("ai_scientist.coordinator.GeometerWorker"):
+        with (
+            patch("ai_scientist.coordinator.OptimizationWorker"),
+            patch("ai_scientist.coordinator.ExplorationWorker"),
+            patch("ai_scientist.coordinator.GeometerWorker"),
+        ):
             wm = MagicMock()
             planner = MagicMock()
             coord = Coordinator(mock_cfg, wm, planner)

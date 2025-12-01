@@ -81,9 +81,9 @@ def test_surrogate_uncertainty_execution():
     # Since objective is same (average of same MC process approx),
     # we just check they are different.
 
-    assert (
-        score_exp != score_no_exp
-    ), "Exploration ratio should affect score via uncertainty"
+    assert score_exp != score_no_exp, (
+        "Exploration ratio should affect score via uncertainty"
+    )
 
 
 if __name__ == "__main__":

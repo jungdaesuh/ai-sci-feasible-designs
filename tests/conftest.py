@@ -19,7 +19,23 @@ if "constellaration.forward_model" not in sys.modules:
     sys.modules["constellaration.forward_model"].__spec__ = None
 if "constellaration.geometry" not in sys.modules:
     sys.modules["constellaration.geometry"] = MagicMock()
+    # Configure SurfaceRZFourier to return a mock with r_cos/z_sin that have shape
+    mock_surface = MagicMock()
+    mock_surface.r_cos = MagicMock()
+    mock_surface.r_cos.shape = (2, 5)
+    mock_surface.r_cos.__getitem__.return_value = 0.2  # For test_make_boundary... assertion
+    mock_surface.z_sin = MagicMock()
+    mock_surface.z_sin.shape = (2, 5)
+    
+    # Mock the submodule surface_rz_fourier
+    mock_srf_module = MagicMock()
+    mock_srf_module.SurfaceRZFourier.return_value = mock_surface
+    sys.modules["constellaration.geometry"].surface_rz_fourier = mock_srf_module
+    
+    # Also set it directly on geometry just in case
+    sys.modules["constellaration.geometry"].SurfaceRZFourier.return_value = mock_surface
     sys.modules["constellaration.geometry"].__spec__ = None
+    sys.modules["constellaration.geometry"].SurfaceRZFourier.__spec__ = None
 if "constellaration.problems" not in sys.modules:
     sys.modules["constellaration.problems"] = MagicMock()
     sys.modules["constellaration.problems"].__spec__ = None
@@ -57,22 +73,105 @@ if "constellaration.initial_guess" not in sys.modules:
 
 # Configure mocks to be JSON serializable (behave like Pydantic models)
 class MockPydanticModel(MagicMock):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._mock_data = kwargs
+
     def model_dump(self, *args, **kwargs):
-        return {}
+        return self._mock_data
 
     def dict(self, *args, **kwargs):
-        return {}
+        return self._mock_data
 
     def model_copy(self, *args, **kwargs):
         return self
 
+    def __iter__(self):
+        # Prevent Pydantic from treating this as an iterator
+        raise TypeError("MockPydanticModel is not iterable")
+
+    def __repr__(self):
+        # Stable repr for caching
+        return f"MockPydanticModel({self._mock_data})"
+
+    def __getattr__(self, name):
+        try:
+            data = object.__getattribute__(self, "_mock_data")
+            if name in data:
+                return data[name]
+        except AttributeError:
+            pass
+        return super().__getattr__(name)
+
     @classmethod
     def default_high_fidelity_skip_qi(cls):
-        return cls()
+        return cls(fidelity="high_skip_qi")
 
     @classmethod
     def default_high_fidelity(cls):
-        return cls()
+        # Create nested mock for vmec_preset_settings
+        vmec_settings = cls(fidelity="high_fidelity")
+        return cls(fidelity="high", vmec_preset_settings=vmec_settings)
+
+
+@pytest.fixture
+def runner_module():
+    """
+    Fixture that mocks heavy dependencies and imports ai_scientist.runner.
+    Restores state after test to avoid polluting global sys.modules.
+    """
+    import sys
+    from unittest.mock import patch
+
+    # Create dummy classes for types used in annotations to satisfy jaxtyping/isinstance checks
+    class MockTensor:
+        pass
+
+    class MockArray:
+        pass
+
+    mock_torch = MagicMock()
+    mock_torch.Tensor = MockTensor
+
+    mock_jax = MagicMock()
+    mock_jax.Array = MockArray
+
+    mock_jax_numpy = MagicMock()
+    mock_jax_numpy.ndarray = MockArray
+    mock_jax.numpy = mock_jax_numpy
+
+    mock_modules = {
+        "torch": mock_torch,
+        "torch.nn": MagicMock(),
+        "torch.nn.functional": MagicMock(),
+        "torch.optim": MagicMock(),
+        "torch.distributions": MagicMock(),
+        "torch.utils": MagicMock(),
+        "torch.utils.data": MagicMock(),
+        "vmecpp": MagicMock(),
+        "jax": mock_jax,
+        "jaxlib": MagicMock(),
+        "jax.numpy": mock_jax_numpy,
+        "jax.tree_util": MagicMock(),
+        "ai_scientist.coordinator": MagicMock(),
+        "ai_scientist.forward_model": MagicMock(),
+        "ai_scientist.optim.surrogate_v2": MagicMock(),
+        "ai_scientist.tools": MagicMock(),
+    }
+
+    with patch.dict(sys.modules, mock_modules):
+        # Ensure we get a fresh import of runner using the mocks
+        # We must remove it from sys.modules if it exists to force re-import with mocks
+        if "ai_scientist.runner" in sys.modules:
+            del sys.modules["ai_scientist.runner"]
+
+        import ai_scientist.runner
+
+        yield ai_scientist.runner
+
+        # Cleanup: remove the mocked runner so subsequent tests don't use it
+        if "ai_scientist.runner" in sys.modules:
+            del sys.modules["ai_scientist.runner"]
 
 
 sys.modules["constellaration.forward_model"].ConstellarationSettings = MockPydanticModel

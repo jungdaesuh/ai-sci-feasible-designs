@@ -194,12 +194,12 @@ def test_nfp_dependence():
     curv = geometry.mean_curvature(rc, zs, n_field_periods=nfp)
 
     # Check that the two curvatures are DIFFERENT.
-    assert not torch.isclose(
-        curv[0], curv[1], rtol=1e-3
-    ).item(), f"Curvatures should differ for different Nfp. Got {curv[0]} and {curv[1]}"
+    assert not torch.isclose(curv[0], curv[1], rtol=1e-3).item(), (
+        f"Curvatures should differ for different Nfp. Got {curv[0]} and {curv[1]}"
+    )
 
     # Also check Surface Area
     area = geometry.surface_area(rc, zs, n_field_periods=nfp)
-    assert not torch.isclose(
-        area[0], area[1], rtol=1e-3
-    ).item(), f"Areas should differ for different Nfp. Got {area[0]} and {area[1]}"
+    assert not torch.isclose(area[0], area[1], rtol=1e-3).item(), (
+        f"Areas should differ for different Nfp. Got {area[0]} and {area[1]}"
+    )

@@ -1,7 +1,7 @@
 """Test the write_note tool."""
 
-
-from ai_scientist import memory, tools
+from ai_scientist import memory
+from ai_scientist.tools.integration import write_note
 
 
 def test_write_note_creates_file_and_db_entry(tmp_path):
@@ -11,7 +11,7 @@ def test_write_note_creates_file_and_db_entry(tmp_path):
     db_path = tmp_path / "wm.sqlite"
     content = "# Analysis\nThis is a test note."
 
-    msg = tools.write_note(
+    msg = write_note(
         content,
         filename="test_note.md",
         out_dir=notes_dir,
@@ -38,7 +38,7 @@ def test_write_note_auto_filename_and_db(tmp_path):
     db_path = tmp_path / "wm.sqlite"
     content = "Unique content"
 
-    tools.write_note(
+    write_note(
         content,
         out_dir=notes_dir,
         memory_db=db_path,

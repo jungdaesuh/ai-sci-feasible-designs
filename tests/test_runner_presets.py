@@ -2,7 +2,15 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from ai_scientist import config as ai_config
-from ai_scientist import memory, runner
+from ai_scientist import cycle_executor, memory
+from ai_scientist.budget_manager import BudgetController
+from ai_scientist.experiment_setup import (
+    RunnerCLIConfig,
+    apply_run_preset,
+    load_run_presets,
+)
+from ai_scientist.fidelity_controller import FidelityController
+from ai_scientist.optim.surrogate import SurrogateBundle
 
 
 def _stub_evaluator():
@@ -25,10 +33,10 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
     base_config = ai_config.load_experiment_config(
         ai_config.DEFAULT_EXPERIMENT_CONFIG_PATH
     )
-    presets = runner._load_run_presets()
+    presets = load_run_presets()
     assert presets, "Run presets should be defined in configs/run_presets.yaml"
     for preset_name in sorted(presets):
-        runtime = runner.RunnerCLIConfig(
+        runtime = RunnerCLIConfig(
             config_path=base_config.source_config,
             problem=None,
             cycles=None,
@@ -44,7 +52,7 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
             run_preset=preset_name,
             planner="deterministic",
         )
-        activated = runner._apply_run_preset(runtime)
+        activated = apply_run_preset(runtime)
         expected_stage = "s2" if activated.promote_only else "s1"
         cfg = replace(
             base_config,
@@ -63,9 +71,9 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     return_value="evaluate_p3",
                 ),
             ):
-                budget_controller = runner.BudgetController(cfg)
-                fidelity_controller = runner.FidelityController(cfg)
-                cycle_executor = runner.CycleExecutor(
+                budget_controller = BudgetController(cfg)
+                fidelity_controller = FidelityController(cfg)
+                executor = cycle_executor.CycleExecutor(
                     config=cfg,
                     world_model=wm,
                     planner=None,
@@ -73,13 +81,13 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     budget_controller=budget_controller,
                     fidelity_controller=fidelity_controller,
                 )
-                cycle_executor.run_cycle(
+                executor.run_cycle(
                     cycle_index=0,
                     experiment_id=experiment_id,
                     governance_stage=expected_stage,
                     git_sha="deadbeef",
                     constellaration_sha="deadbeef",
-                    surrogate_model=runner.SurrogateBundle(),
+                    surrogate_model=SurrogateBundle(),
                     verbose=activated.verbose,
                     slow=activated.slow,
                     screen_only=activated.screen_only,

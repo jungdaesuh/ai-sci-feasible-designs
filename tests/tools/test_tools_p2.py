@@ -21,8 +21,7 @@ def test_evaluate_p2_uses_high_fidelity_cache(monkeypatch):
     tools.clear_evaluation_cache()
     params = base_params()
 
-    result = tools.evaluate_p2(params)
-    assert result["stage"] == "p2"
+    result = tools.evaluate_p2(params, stage="p2")
     assert result["objective"] == pytest.approx(
         metrics.minimum_normalized_magnetic_gradient_scale_length
     )

@@ -25,6 +25,7 @@ from ai_scientist.cycle_executor import CycleExecutor, serialize_experiment_conf
 from ai_scientist.experiment_setup import (
     RunnerCLIConfig,
     apply_run_preset,
+    build_argument_parser,
     create_generative_model,
     create_surrogate,
     parse_args,

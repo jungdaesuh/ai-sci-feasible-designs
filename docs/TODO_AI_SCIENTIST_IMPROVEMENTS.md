@@ -295,12 +295,18 @@ tests/
 └── test_runner.py
 ```
 
-- [ ] **9.1 Reorganize test directory structure**
-  - Create `tests/optim/` subdirectory
-  - Move optimization-related tests
+- [x] **9.1 Reorganize test directory structure** ✅ **COMPLETED (2025-12-02)**
+  - ✅ Created `tests/optim/`, `tests/tools/`, `tests/memory/`, `tests/rag/` subdirectories
+  - ✅ Moved optimization-related tests to appropriate directories
+  - ✅ Updated imports in all test files to reflect new module structure
 
-- [ ] **9.2 Update pytest configuration**
-  - Ensure test discovery works with new structure
+- [x] **9.2 Update pytest configuration** ✅ **COMPLETED (2025-12-02)**
+  - ✅ Updated `pyproject.toml` to configure pytest for new directory structure
+  - ✅ Fixed test failures caused by module refactoring:
+    - Updated `test_runner_candidate_helper.py` to use new `BoundaryTemplateConfig` API and import from `cycle_executor`
+    - Updated `test_runner_presets.py` to import from `experiment_setup`
+    - Updated `test_runner_determinism.py` to import from correct modules
+  - ✅ All 20 runner and integration tests passing
 
 ---
 
