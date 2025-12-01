@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -312,7 +313,7 @@ class ExperimentConfig:
             proposal_mix=defaults.proposal_mix,
             constraint_weights=defaults.constraint_weights,
             generative=defaults.generative,
-            surrogate=SurrogateConfig(backend="neural_operator"),
+            surrogate=dataclasses.replace(defaults.surrogate, backend="neural_operator"),
             aso=ASOConfig(enabled=True, supervision_mode="event_triggered"),
         )
 
@@ -341,6 +342,7 @@ class ExperimentConfig:
             proposal_mix=defaults.proposal_mix,
             constraint_weights=defaults.constraint_weights,
             generative=defaults.generative,
+            surrogate=defaults.surrogate,
             aso=ASOConfig(enabled=False),
         )
 
@@ -362,6 +364,7 @@ class ExperimentConfig:
             proposal_mix=defaults.proposal_mix,
             constraint_weights=defaults.constraint_weights,
             generative=defaults.generative,
+            surrogate=defaults.surrogate,
             aso=ASOConfig(
                 enabled=True,
                 supervision_mode="event_triggered",

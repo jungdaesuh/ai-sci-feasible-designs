@@ -51,3 +51,49 @@ def test_p3_aso_enabled_factory():
     assert config.aso.enabled is True
     assert config.aso.supervision_mode == "event_triggered"
     assert config.aso.max_stagnation_steps == 5
+
+
+def test_surrogate_preservation():
+    """Verify that factory methods preserve surrogate settings from defaults."""
+    from unittest.mock import patch
+    from ai_scientist.config import SurrogateConfig
+
+    # Create a mock default config with non-default surrogate settings
+    mock_surrogate = SurrogateConfig(
+        backend="random_forest",
+        n_ensembles=5,  # Non-default
+        hidden_dim=128  # Non-default
+    )
+    
+    with patch("ai_scientist.config.load_experiment_config") as mock_load:
+        # Setup the mock to return a config with our custom surrogate
+        mock_defaults = MagicMock()
+        mock_defaults.surrogate = mock_surrogate
+        # Mock other required fields to avoid errors
+        mock_defaults.random_seed = 0
+        mock_defaults.budgets = MagicMock()
+        mock_defaults.adaptive_budgets = MagicMock()
+        mock_defaults.fidelity_ladder = MagicMock()
+        mock_defaults.boundary_template = MagicMock()
+        mock_defaults.stage_gates = MagicMock()
+        mock_defaults.governance = MagicMock()
+        mock_defaults.proposal_mix = MagicMock()
+        mock_defaults.constraint_weights = MagicMock()
+        mock_defaults.generative = MagicMock()
+        
+        mock_load.return_value = mock_defaults
+        
+        # Test p3_high_fidelity - should override backend but keep n_ensembles
+        config_high = ExperimentConfig.p3_high_fidelity()
+        assert config_high.surrogate.backend == "neural_operator"
+        assert config_high.surrogate.n_ensembles == 5
+        
+        # Test p3_quick_validation - should keep everything
+        config_quick = ExperimentConfig.p3_quick_validation()
+        assert config_quick.surrogate.backend == "random_forest"
+        assert config_quick.surrogate.n_ensembles == 5
+        
+        # Test p3_aso_enabled - should keep everything
+        config_aso = ExperimentConfig.p3_aso_enabled()
+        assert config_aso.surrogate.backend == "random_forest"
+        assert config_aso.surrogate.n_ensembles == 5
