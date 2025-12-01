@@ -42,9 +42,7 @@ def _time_exceeded(start: float, limit_minutes: float) -> bool:
     return elapsed >= limit_minutes * 60
 
 
-def _process_worker_initializer() -> None:
-    """Limit OpenMP threads inside process workers (Phase 5 observability safeguard)."""
-    os.environ["OMP_NUM_THREADS"] = "1"
+
 
 
 def _extract_objectives(entry: Mapping[str, Any], problem_type: str = "p3") -> tuple[float, float]:
@@ -171,22 +169,14 @@ class FidelityController:
         boundaries = [c["params"] for c in candidate_list]
 
         # Run Batch Evaluation
-        try:
-            # We use the budgets.n_workers for parallelism
-            batch_results = forward_model_batch(
-                boundaries,
-                fm_settings,
-                n_workers=budgets.n_workers,
-                use_cache=True
-            )
-        except Exception as exc:
-            print(f"[runner][stage-eval] Batch evaluation failed: {exc}")
-            # If batch fails completely, we might want to return empty or penalized?
-            # forward_model_batch re-raises exceptions from workers if they crash hard,
-            # but individual failures should be handled if we want partial results.
-            # Current forward_model_batch raises on first exception.
-            # We'll assume it fails all if it raises.
-            return []
+        # We use the budgets.n_workers for parallelism
+        batch_results = forward_model_batch(
+            boundaries,
+            fm_settings,
+            n_workers=budgets.n_workers,
+            pool_type=budgets.pool_type,
+            use_cache=True
+        )
 
         # Apply PEFT updates
         if tool_name:

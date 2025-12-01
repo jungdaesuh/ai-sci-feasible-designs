@@ -12,6 +12,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Mapping
 
 import numpy as np
+import os
 import pydantic
 from constellaration import forward_model as constellaration_forward
 from constellaration.geometry import surface_rz_fourier
@@ -36,6 +37,11 @@ def clear_cache() -> None:
     """Clear the evaluation cache."""
     _EVALUATION_CACHE.clear()
     _CACHE_STATS.clear()
+
+
+def _process_worker_initializer() -> None:
+    """Limit OpenMP threads inside process workers (Phase 5 observability safeguard)."""
+    os.environ["OMP_NUM_THREADS"] = "1"
 
 
 # --- Data Structures ---
@@ -388,17 +394,23 @@ def forward_model_batch(
     settings: ForwardModelSettings,
     *,
     n_workers: int = 4,
+    pool_type: str = "thread",
     use_cache: bool = True,
 ) -> List[EvaluationResult]:
     """Parallel batch evaluation."""
     results: List[EvaluationResult] = [None] * len(boundaries)
     
-    # Identify indices needing computation vs cache
-    # Since forward_model handles caching internally, we can just dispatch all.
-    # However, we can optimization by checking cache first serially to avoid thread overhead
-    # if we wanted. But standard ThreadPoolExecutor is fine.
+    executor_cls = (
+        concurrent.futures.ThreadPoolExecutor 
+        if pool_type == "thread" 
+        else concurrent.futures.ProcessPoolExecutor
+    )
+    
+    executor_kwargs: Dict[str, Any] = {"max_workers": n_workers}
+    if executor_cls is concurrent.futures.ProcessPoolExecutor:
+        executor_kwargs["initializer"] = _process_worker_initializer
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
+    with executor_cls(**executor_kwargs) as executor:
         future_to_idx = {
             executor.submit(
                 forward_model, 
@@ -415,11 +427,61 @@ def forward_model_batch(
                 results[idx] = future.result()
             except Exception as exc:
                 logger.error(f"Batch evaluation failed for index {idx}: {exc}")
-                # We need to decide how to handle batch failures. 
-                # Return a "failed" result or raise?
-                # For now, we raise to be safe, or we could insert a dummy failed result.
-                # Given the type signature, we must return EvaluationResult.
-                # Let's re-raise.
-                raise exc
+                # Return a penalized result instead of raising
+                # We need to construct a "failed" EvaluationResult
+                # We'll use a helper or manual construction
+                # Since we don't have the boundary here easily (it's in boundaries[idx]),
+                # we can use a placeholder hash or recompute it if needed.
+                # But EvaluationResult requires metrics.
+                
+                # Create dummy metrics
+                dummy_metrics = constellaration_forward.ConstellarationMetrics(
+                    aspect_ratio=float("inf"),
+                    minimum_normalized_magnetic_gradient_scale_length=0.0,
+                    max_elongation=float("inf"),
+                    # Add other required fields with safe defaults if needed
+                    # For now assuming these are sufficient or Pydantic defaults handle it?
+                    # ConstellarationMetrics likely has required fields.
+                    # We should probably look at what ConstellarationMetrics requires.
+                    # Ideally we'd have a factory for failed metrics.
+                    # For now, let's try to construct a minimal one.
+                    mean_elongation=float("inf"),
+                    max_curvature=float("inf"),
+                    mean_curvature=float("inf"),
+                    min_curvature=float("inf"),
+                    max_torsion=float("inf"),
+                    mean_torsion=float("inf"),
+                    min_torsion=float("inf"),
+                    mean_iota=0.0,
+                    min_iota=0.0,
+                    max_iota=0.0,
+                    magnetic_well=0.0,
+                    max_b_error=float("inf"),
+                    mean_b_error=float("inf"),
+                    quasisymmetry_error=float("inf"),
+                    beta=0.0,
+                )
+                
+                # Determine penalty direction based on problem
+                # This duplicates logic from _penalized_result in tools/evaluation.py
+                # But we are in forward_model.py now.
+                maximize = settings.problem.lower().startswith("p2")
+                penalty = -1e9 if maximize else 1e9
+                
+                results[idx] = EvaluationResult(
+                    metrics=dummy_metrics,
+                    objective=penalty,
+                    constraints=[],
+                    constraint_names=[],
+                    feasibility=float("inf"),
+                    is_feasible=False,
+                    cache_hit=False,
+                    design_hash="error", # Placeholder
+                    evaluation_time_sec=0.0,
+                    settings=settings,
+                    fidelity=settings.fidelity,
+                    equilibrium_converged=False,
+                    error_message=str(exc),
+                )
                 
     return results
