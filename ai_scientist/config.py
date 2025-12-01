@@ -227,6 +227,28 @@ class ALMConfig:
     oracle_budget_max: int = 200
     oracle_num_workers: int = 4
 
+    @staticmethod
+    def default() -> "ALMConfig":
+        """Standard ALM settings."""
+        return ALMConfig()
+
+    @staticmethod
+    def aggressive_penalties() -> "ALMConfig":
+        """Faster constraint satisfaction, may sacrifice objective."""
+        return ALMConfig(
+            penalty_parameters_increase_factor=4.0,
+            penalty_parameters_initial=10.0,
+        )
+
+    @staticmethod
+    def conservative() -> "ALMConfig":
+        """Slower convergence, better objective quality."""
+        return ALMConfig(
+            penalty_parameters_increase_factor=1.5,
+            bounds_reduction_factor=0.98,
+            maxit=50,
+        )
+
 
 @dataclass(frozen=True)
 class ASOConfig:
@@ -259,6 +281,30 @@ class ASOConfig:
     llm_timeout_seconds: float = 10.0
     llm_max_retries: int = 2
     use_heuristic_fallback: bool = True
+
+    @staticmethod
+    def default_event_triggered() -> "ASOConfig":
+        """ASO with event-triggered supervision (recommended)."""
+        return ASOConfig(
+            enabled=True,
+            supervision_mode="event_triggered",
+            max_stagnation_steps=5,
+            use_heuristic_fallback=True,
+        )
+
+    @staticmethod
+    def default_periodic(interval: int = 5) -> "ASOConfig":
+        """ASO with periodic LLM supervision."""
+        return ASOConfig(
+            enabled=True,
+            supervision_mode="periodic",
+            supervision_interval=interval,
+        )
+
+    @staticmethod
+    def disabled() -> "ASOConfig":
+        """ASO disabled (legacy mode)."""
+        return ASOConfig(enabled=False)
 
 
 @dataclass(frozen=True)

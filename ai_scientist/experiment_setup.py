@@ -78,6 +78,7 @@ class RunnerCLIConfig:
     planner: str
     resume_from: Path | None = None
     aso: bool = False
+    preset: str | None = None
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -162,6 +163,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Name of a preset from configs/run_presets.yaml that toggles --screen/--promote/--slow.",
     )
     parser.add_argument(
+        "--preset",
+        choices=["p3-high-fidelity", "p3-quick", "p3-aso"],
+        help="Use a predefined configuration preset. Overrides --config.",
+    )
+    parser.add_argument(
         "--planner",
         choices=["deterministic", "agent"],
         default=None,
@@ -202,6 +208,7 @@ def parse_args(args: Sequence[str] | None = None) -> RunnerCLIConfig:
         planner=namespace.planner,
         resume_from=namespace.resume_from,
         aso=bool(namespace.aso),
+        preset=namespace.preset,
     )
 
 

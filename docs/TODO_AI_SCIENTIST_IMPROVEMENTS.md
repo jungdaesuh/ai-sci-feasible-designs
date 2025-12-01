@@ -149,13 +149,13 @@ class ConstellarationSettings:
   - File: `ai_scientist/config.py`
   - Methods: `p3_high_fidelity()`, `p3_quick_validation()`, `p3_aso_enabled()`
 
-- [ ] **4.2 Add factory methods to `ASOConfig`**
+- [x] **4.2 Add factory methods to `ASOConfig`**
   - Methods: `default_event_triggered()`, `default_periodic()`, `disabled()`
 
-- [ ] **4.3 Add factory methods to `ALMConfig`**
+- [x] **4.3 Add factory methods to `ALMConfig`**
   - Methods: `default()`, `aggressive_penalties()`, `conservative()`
 
-- [ ] **4.4 Document factory methods in CLI help**
+- [x] **4.4 Document factory methods in CLI help**
   - Add `--preset` flag to runner that maps to factory methods
 
 ---

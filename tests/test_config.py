@@ -97,3 +97,45 @@ def test_surrogate_preservation():
         config_aso = ExperimentConfig.p3_aso_enabled()
         assert config_aso.surrogate.backend == "random_forest"
         assert config_aso.surrogate.n_ensembles == 5
+
+
+def test_aso_config_factories():
+    """Verify ASOConfig factory methods."""
+    from ai_scientist.config import ASOConfig
+
+    # Default event triggered
+    config = ASOConfig.default_event_triggered()
+    assert config.enabled is True
+    assert config.supervision_mode == "event_triggered"
+    assert config.max_stagnation_steps == 5
+    assert config.use_heuristic_fallback is True
+
+    # Default periodic
+    config = ASOConfig.default_periodic(interval=10)
+    assert config.enabled is True
+    assert config.supervision_mode == "periodic"
+    assert config.supervision_interval == 10
+
+    # Disabled
+    config = ASOConfig.disabled()
+    assert config.enabled is False
+
+
+def test_alm_config_factories():
+    """Verify ALMConfig factory methods."""
+    from ai_scientist.config import ALMConfig
+
+    # Default
+    config = ALMConfig.default()
+    assert config.penalty_parameters_increase_factor == 2.0  # Default value
+
+    # Aggressive penalties
+    config = ALMConfig.aggressive_penalties()
+    assert config.penalty_parameters_increase_factor == 4.0
+    assert config.penalty_parameters_initial == 10.0
+
+    # Conservative
+    config = ALMConfig.conservative()
+    assert config.penalty_parameters_increase_factor == 1.5
+    assert config.bounds_reduction_factor == 0.98
+    assert config.maxit == 50

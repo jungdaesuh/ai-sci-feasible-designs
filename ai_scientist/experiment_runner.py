@@ -341,7 +341,22 @@ def main() -> None:
     except ValueError as exc:
         print(f"[runner] invalid CLI flags: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    experiment = ai_config.load_experiment_config(cli.config_path)
+    
+    PRESET_MAP = {
+        "p3-high-fidelity": ai_config.ExperimentConfig.p3_high_fidelity,
+        "p3-quick": ai_config.ExperimentConfig.p3_quick_validation,
+        "p3-aso": ai_config.ExperimentConfig.p3_aso_enabled,
+    }
+
+    if cli.preset:
+        if cli.preset not in PRESET_MAP:
+            print(f"[runner] error: unknown preset '{cli.preset}'. Available: {list(PRESET_MAP.keys())}", file=sys.stderr)
+            sys.exit(1)
+        experiment = PRESET_MAP[cli.preset]()
+        print(f"[runner] Loaded configuration from preset: {cli.preset}")
+    else:
+        experiment = ai_config.load_experiment_config(cli.config_path)
+
     if cli.problem:
         experiment = replace(experiment, problem=cli.problem)
     if cli.cycles:
