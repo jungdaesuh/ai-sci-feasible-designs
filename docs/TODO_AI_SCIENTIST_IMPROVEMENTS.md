@@ -334,8 +334,8 @@ tests/
 
 ### From `SAS_TODO.md` (Stellarator AI Scientist)
 
-- [ ] **Dataset Tools** `datasets/sampler.py`
-  - [ ] HuggingFace dataset loading with filtering
+- [x] **Dataset Tools** `datasets/sampler.py`
+  - [x] HuggingFace dataset loading with filtering
   - [ ] PCA + GMM for latent space sampling
   - [ ] MCMC posterior sampling
 
@@ -348,16 +348,16 @@ All phases marked complete ✅ - no outstanding items.
 
 ### From `PLAN_CHECKLIST.md` (Orchestration)
 
-- [ ] **P2 Orchestration** (Simple-to-Build QI)
-  - [ ] Runner wrapping `SimpleToBuildQIStellarator`
-  - [ ] Same JSONL logging/promotion pipeline
+- [x] **P2 Orchestration** (Simple-to-Build QI)
+  - [x] Runner wrapping `SimpleToBuildQIStellarator`
+  - [x] Same JSONL logging/promotion pipeline
 
 - [ ] **P3 Orchestration** (MHD-Stable QI, Multi-Objective)
   - [ ] Multi-objective search (L_grad, A)
   - [ ] Hypervolume computation and logging
 
-- [ ] **Feasibility Prefilter** (Data-Driven)
-  - [ ] Train quick classifier to reject obvious infeasible candidates
+- [x] **Feasibility Prefilter** (Data-Driven)
+  - [x] Train quick classifier to reject obvious infeasible candidates
 
 ### From `ASO_V4_IMPLEMENTATION_GUIDE.md`
 

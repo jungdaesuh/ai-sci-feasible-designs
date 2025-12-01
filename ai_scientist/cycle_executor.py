@@ -45,6 +45,7 @@ from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration import forward_model
 from orchestration import adaptation as adaptation_helpers
+from ai_scientist.prefilter import FeasibilityPrefilter
 
 # Constants
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -169,6 +170,7 @@ class CycleExecutor:
         self.coordinator = coordinator
         self.budget_controller = budget_controller
         self.fidelity_controller = fidelity_controller
+        self.prefilter = FeasibilityPrefilter()
 
     def run_cycle(
         self,
@@ -281,7 +283,10 @@ class CycleExecutor:
                 )
 
         # Create local fidelity controller with active config
-        fidelity_ctl = FidelityController(active_cfg)
+        if self.fidelity_controller:
+            fidelity_ctl = self.fidelity_controller
+        else:
+            fidelity_ctl = FidelityController(active_cfg)
 
         budget_snapshot = self.budget_controller.snapshot()
         active_budgets = replace(
@@ -320,21 +325,34 @@ class CycleExecutor:
             if gen_history:
                 generative_model.fit([item[0] for item in gen_history])
 
+            if gen_history:
+                generative_model.fit([item[0] for item in gen_history])
+
+        # Train Feasibility Prefilter on historical data
+        # We need (X, y) where X are params and y is feasibility
+        # For now, we fetch from world_model if available, or just skip if empty
+        # This is a placeholder for fetching historical data
+        # In a real run, we would query world_model for all evaluations
+        # history = self.world_model.get_all_evaluations() ...
+        # self.prefilter.train(X, y)
+
         candidate_pool: list[Mapping[str, Any]] = []
 
         # Initialize Coordinator (Phase 5)
-        # If one was passed in __init__, we might need to update it or use a new one if config changed.
-        # Since Coordinator takes `active_cfg` and `planner` (which might depend on things),
-        # and `runner.py` logic was creating it fresh:
-        coordinator = Coordinator(
-            active_cfg,
-            self.world_model,
-            planner=ai_planner.PlanningAgent(),  # Default planner
-            surrogate=surrogate_model
-            if isinstance(surrogate_model, NeuralOperatorSurrogate)
-            else None,
-            generative_model=generative_model,
-        )
+        # If one was passed in __init__, use it (assuming caller manages updates).
+        # Otherwise create a new one.
+        if self.coordinator:
+            coordinator = self.coordinator
+        else:
+            coordinator = Coordinator(
+                active_cfg,
+                self.world_model,
+                planner=ai_planner.PlanningAgent(),  # Default planner
+                surrogate=surrogate_model
+                if isinstance(surrogate_model, NeuralOperatorSurrogate)
+                else None,
+                generative_model=generative_model,
+            )
 
         if active_cfg.aso.enabled:
             if verbose:
@@ -441,6 +459,16 @@ class CycleExecutor:
                 print(
                     f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count} vae={vae_count} agent={len(suggested_params or [])}"
                 )
+
+            # Apply Feasibility Prefilter
+            if self.prefilter.is_trained:
+                original_count = len(candidate_pool)
+                candidate_pool = self.prefilter.filter_candidates(candidate_pool)
+                if verbose:
+                    print(
+                        f"[runner][cycle={cycle_number}] Prefilter: {original_count} -> {len(candidate_pool)} candidates"
+                    )
+
             candidates = _surrogate_rank_screen_candidates(
                 active_cfg,
                 active_budgets.screen_evals_per_cycle,
