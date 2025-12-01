@@ -1,6 +1,6 @@
 # AI Scientist Improvement TODO
 
-**Date:** 2025-11-30
+**Date:** 2025-12-02
 **Status:** Active
 **Purpose:** Consolidated improvement checklist based on codebase analysis comparing `ai_scientist/` with `constellaration/` patterns, plus outstanding items from existing roadmaps.
 
@@ -334,7 +334,7 @@ tests/
 
 ### From `SAS_TODO.md` (Stellarator AI Scientist)
 
-- [x] **Dataset Tools** `datasets/sampler.py`
+- [ ] **Dataset Tools** `datasets/sampler.py`
   - [x] HuggingFace dataset loading with filtering
   - [ ] PCA + GMM for latent space sampling
   - [ ] MCMC posterior sampling
