@@ -186,28 +186,53 @@ class TestALMBridgeFunctionality:
 
 
 class TestALMInvariants:
-    """Property-based tests for ALM mathematical invariants."""
+    """Property-based tests for ALM mathematical invariants.
+
+    Note on implementation coverage:
+    - These tests verify core mathematical invariants using the update formulas
+    - The actual ALM bridge functions (create_alm_context, step_alm) are exercised
+      in TestALMBridgeFunctionality integration tests above
+    - Property-based testing of the full integration path would be too slow/complex
+      for hypothesis (requires boundary, problem, settings fixtures)
+    - These formula tests ensure the mathematical properties hold for any inputs,
+      while integration tests ensure the bridge correctly wraps constellaration's ALM
+    """
 
     @hypothesis.given(
         multipliers=st.lists(
-            st.floats(0.0, 100.0, allow_nan=False), min_size=3, max_size=5
+            st.floats(0.0, 100.0, allow_nan=False),
+            min_size=3,
+            max_size=5,
         ),
         violations=st.lists(
-            st.floats(-1.0, 1.0, allow_nan=False), min_size=3, max_size=5
+            st.floats(-1.0, 1.0, allow_nan=False),
+            min_size=3,
+            max_size=5,
         ),
+        penalty_param=st.floats(0.1, 10.0),
     )
-    def test_multiplier_update_non_negative(self, multipliers, violations):
-        """Lagrange multipliers should always be non-negative."""
+    def test_multiplier_update_non_negative(
+        self, multipliers, violations, penalty_param
+    ):
+        """Lagrange multipliers should remain non-negative after update.
+
+        Mathematical invariant: λ_new = max(0, λ + ρ * g) ≥ 0 for all λ, ρ, g
+
+        This verifies the formula used in constellaration.optimization.augmented_lagrangian.
+        update_augmented_lagrangian_state(). Integration tests in TestALMBridgeFunctionality
+        verify this holds in practice when running step_alm().
+        """
         # Ensure same length
         min_len = min(len(multipliers), len(violations))
-        multipliers = np.array(multipliers[:min_len])
-        violations = np.array(violations[:min_len])
+        multipliers = jnp.array(multipliers[:min_len])
+        violations = jnp.array(violations[:min_len])
 
-        # Simulated update: λ ← max(0, λ + ρ * g)
-        rho = 1.0
-        new_multipliers = np.maximum(0, multipliers + rho * violations)
+        # Apply the ALM multiplier update formula: λ ← max(0, λ + ρ * g)
+        rho = penalty_param
+        new_multipliers = jnp.maximum(0, multipliers + rho * violations)
 
-        assert np.all(new_multipliers >= 0)
+        # Verify non-negativity invariant holds
+        assert jnp.all(new_multipliers >= 0)
 
     @hypothesis.given(
         penalties=st.lists(
@@ -215,8 +240,18 @@ class TestALMInvariants:
         ),
     )
     def test_penalties_bounded(self, penalties):
-        """Penalties should be bounded by max."""
+        """Penalties should be bounded by max.
+
+        Tests the mathematical property that penalty parameter updates
+        respect the maximum bound: ρ ← min(ρ_max, increase_factor * ρ)
+        """
         PENALTY_MAX = 1e8
-        penalties = np.array(penalties)
-        bounded = np.minimum(penalties * 2.0, PENALTY_MAX)
-        assert np.all(bounded <= PENALTY_MAX)
+        INCREASE_FACTOR = 2.0
+
+        penalties = jnp.array(penalties)
+
+        # Simulate penalty increase (as done in ALM when constraint violation persists)
+        updated_penalties = jnp.minimum(penalties * INCREASE_FACTOR, PENALTY_MAX)
+
+        # Verify penalties are bounded
+        assert jnp.all(updated_penalties <= PENALTY_MAX)

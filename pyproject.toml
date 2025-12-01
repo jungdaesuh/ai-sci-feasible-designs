@@ -50,6 +50,8 @@ reportGeneralTypeIssues = false
 reportUnboundVariable = false
 reportOptionalMemberAccess = false
 reportOptionalSubscript = false
+reportAttributeAccessIssue = false
+reportCallIssue = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

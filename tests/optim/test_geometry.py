@@ -99,24 +99,46 @@ def test_coordinate_transform():
 
 
 class TestGeometryInvariants:
-    """Property-based tests for geometry mathematical invariants."""
+    """Property-based tests for geometry mathematical invariants using actual implementation."""
 
     @hypothesis.given(
         R_major=st.floats(0.5, 10.0),
         R_minor=st.floats(0.1, 2.0),
     )
     def test_aspect_ratio_positive(self, R_major, R_minor):
-        """Aspect ratio should always be positive."""
+        """Aspect ratio should always be positive when computed via geometry module."""
         hypothesis.assume(R_minor < R_major)
-        aspect = R_major / R_minor
-        assert aspect > 0
+
+        # Construct a simple torus with these parameters
+        # m=0, n=0 -> R_major
+        # m=1, n=0 -> R_minor (for both R and Z to make a circular cross-section)
+        mpol = 1
+        ntor = 0
+        r_cos = torch.zeros((mpol + 1, 2 * ntor + 1))
+        z_sin = torch.zeros((mpol + 1, 2 * ntor + 1))
+
+        r_cos[0, 0] = R_major
+        r_cos[1, 0] = R_minor
+        z_sin[1, 0] = R_minor
+
+        # Add batch dimension
+        r_cos = r_cos.unsqueeze(0)
+        z_sin = z_sin.unsqueeze(0)
+        nfp = torch.tensor([1.0])
+
+        # Compute aspect ratio using the actual function
+        ar = geometry.aspect_ratio(r_cos, z_sin, nfp)
+
+        assert ar.item() > 0
+        # For a circular torus, AR should be approx R_major / R_minor
+        assert np.isclose(ar.item(), R_major / R_minor, rtol=0.1)
 
     @hypothesis.given(
         coeffs=st.lists(st.floats(-1.0, 1.0, allow_nan=False), min_size=4, max_size=16),
     )
     @hypothesis.settings(max_examples=50)
     def test_fourier_to_real_smooth(self, coeffs):
-        """Real-space representation should be smooth (no NaN/inf)."""
+        """Real-space representation should be smooth (no NaN/inf) using actual conversion."""
         # Construct a valid shape (rows, 1) which corresponds to ntor=0
         rows = len(coeffs)
         cols = 1
@@ -124,9 +146,11 @@ class TestGeometryInvariants:
         r_cos = np.array(coeffs).reshape(rows, cols)
         z_sin = np.array(coeffs).reshape(rows, cols)
 
-        # R, Z, Phi = geometry.fourier_to_real_space(r_cos, z_sin, n_theta, n_zeta, n_field_periods)
+        # Use the actual function
         R, Z, Phi = geometry.fourier_to_real_space(
             r_cos, z_sin, n_theta=32, n_zeta=32, n_field_periods=1
         )
+
         assert np.all(np.isfinite(R))
         assert np.all(np.isfinite(Z))
+        assert np.all(np.isfinite(Phi))
