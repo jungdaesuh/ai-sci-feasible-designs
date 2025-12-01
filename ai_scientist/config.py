@@ -259,9 +259,9 @@ class ASOConfig:
     enabled: bool = False
 
     # Supervision frequency
-    supervision_mode: Literal[
-        "every_step", "periodic", "event_triggered"
-    ] = "event_triggered"
+    supervision_mode: Literal["every_step", "periodic", "event_triggered"] = (
+        "event_triggered"
+    )
     supervision_interval: int = 5  # Steps between LLM calls (if periodic)
 
     # Convergence detection

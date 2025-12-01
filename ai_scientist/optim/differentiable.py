@@ -11,13 +11,13 @@ from typing import Any, Mapping, Sequence, Tuple
 import jax.numpy as jnp
 import numpy as np
 import torch
+from constellaration.geometry import surface_rz_fourier as surface_module
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.utils import pytree
-from constellaration.geometry import surface_rz_fourier as surface_module
 
 # Register SurfaceRZFourier as a Pytree to ensure JAX compatibility
 # (In case the installed constellaration library hasn't registered it yet)

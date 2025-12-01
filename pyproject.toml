@@ -1,6 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai_scientist"
+version = "0.1.0"
+description = "AI Scientist for stellarator design optimization"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "jaxtyping>=0.2.0",
+    "torch>=2.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai_scientist*"]
+exclude = ["tests*", "constellaration*", "vmecpp*", "orchestration*"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+select = ["E", "F", "I"]  # Enable pycodestyle errors, pyflakes, and isort
 ignore = ["E402", "F722", "F821"]
 
 [tool.ruff.per-file-ignores]

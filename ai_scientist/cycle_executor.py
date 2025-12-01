@@ -23,20 +23,6 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, Set, Tuple
 
 import jax.numpy as jnp
 import numpy as np
-
-from ai_scientist import adapter
-from ai_scientist import config as ai_config
-from ai_scientist import memory
-from ai_scientist import planner as ai_planner
-from ai_scientist import reporting, tools
-from ai_scientist.budget_manager import BudgetController, BudgetSnapshot
-from ai_scientist.coordinator import Coordinator
-from ai_scientist.fidelity_controller import FidelityController
-from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
-from ai_scientist.optim.samplers import NearAxisSampler
-from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
-from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
-from constellaration import forward_model
 from constellaration.geometry import surface_rz_fourier as surface_module
 from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 from constellaration.optimization.augmented_lagrangian import (
@@ -46,6 +32,18 @@ from constellaration.optimization.augmented_lagrangian import (
     update_augmented_lagrangian_state,
 )
 from constellaration.utils import pytree
+
+from ai_scientist import adapter, memory, reporting, tools
+from ai_scientist import config as ai_config
+from ai_scientist import planner as ai_planner
+from ai_scientist.budget_manager import BudgetController, BudgetSnapshot
+from ai_scientist.coordinator import Coordinator
+from ai_scientist.fidelity_controller import FidelityController
+from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
+from ai_scientist.optim.samplers import NearAxisSampler
+from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
+from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+from constellaration import forward_model
 from orchestration import adaptation as adaptation_helpers
 
 # Constants
@@ -78,8 +76,7 @@ class ProblemEvaluator(Protocol):
         *,
         stage: str,
         use_cache: bool = True,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 class WorldModelLike(Protocol):
@@ -99,8 +96,7 @@ class WorldModelLike(Protocol):
         repro_cmd: str,
         created_at: str | None = None,
         commit: bool = True,
-    ) -> int:
-        ...
+    ) -> int: ...
 
 
 _PROBLEM_EVALUATORS: dict[str, tuple[str, ProblemEvaluator]] = {
@@ -1097,9 +1093,9 @@ class CycleExecutor:
 
         alm_settings_obj = AugmentedLagrangianSettings(**alm_settings_overrides)
 
-        sa_alm_predictor: Callable[
-            [Mapping[str, Any]], Tuple[float, Sequence[float]]
-        ] | None = None
+        sa_alm_predictor: (
+            Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]] | None
+        ) = None
         if optimizer_mode == "sa-alm" or self.config.optimizer_backend == "sa-alm":
             problem = (self.config.problem or "").lower()
             target_column = "hv" if problem == "p3" else "objective"

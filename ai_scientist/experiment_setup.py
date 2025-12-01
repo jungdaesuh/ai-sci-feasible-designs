@@ -1,6 +1,7 @@
 """
 Configuration and setup helpers for the AI Scientist runner.
 """
+
 import argparse
 import os
 import subprocess

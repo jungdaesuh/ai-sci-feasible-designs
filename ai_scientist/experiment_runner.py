@@ -2,6 +2,7 @@
 Experiment runner module.
 Orchestrates the experiment execution by composing BudgetController, FidelityController, CycleExecutor, and Coordinator.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,9 +17,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from ai_scientist import config as ai_config
-from ai_scientist import memory
+from ai_scientist import memory, rag, tools
 from ai_scientist import planner as ai_planner
-from ai_scientist import rag, tools
 from ai_scientist.budget_manager import BudgetController
 from ai_scientist.coordinator import Coordinator
 from ai_scientist.cycle_executor import CycleExecutor, serialize_experiment_config
@@ -418,6 +418,10 @@ def main() -> None:
         f"log_cache_stats={cli.log_cache_stats} slow={cli.slow} preset={preset_label}"
     )
     run_experiment(experiment, runtime=cli)
+
+
+# Backward compatibility alias for tests
+run = run_experiment
 
 
 if __name__ == "__main__":

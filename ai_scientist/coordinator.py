@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import jax.numpy as jnp
 import numpy as np
 import pydantic
+from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
 
 from ai_scientist import config as ai_config
 from ai_scientist import memory
@@ -32,7 +33,6 @@ from ai_scientist.planner import (
 )
 from ai_scientist.problems import get_problem
 from ai_scientist.workers import ExplorationWorker, GeometerWorker, OptimizationWorker
-from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianState
 
 
 class TrajectoryState(pydantic.BaseModel):

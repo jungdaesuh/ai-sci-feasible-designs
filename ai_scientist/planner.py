@@ -673,7 +673,7 @@ class PlanningAgent:
                     if "suggested_params" in action or "config_overrides" in action:
                         suggested_params = action.get("suggested_params")
                         config_overrides = action.get("config_overrides")
-                        print(f"[planner] Plan finalized in turn {turn+1}")
+                        print(f"[planner] Plan finalized in turn {turn + 1}")
                         if suggested_params:
                             print("[planner] Suggesting new boundary params")
                         if config_overrides:

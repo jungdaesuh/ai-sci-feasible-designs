@@ -12,13 +12,11 @@ from concurrent import futures
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
+import constellaration.forward_model as forward_model
+import constellaration.problems as problems
 import jax.numpy as jnp
 import nevergrad
 import numpy as np
-from jaxtyping import Float
-
-import constellaration.forward_model as forward_model
-import constellaration.problems as problems
 from constellaration.geometry import surface_rz_fourier as rz_fourier
 from constellaration.optimization.augmented_lagrangian import (
     AugmentedLagrangianState,
@@ -30,6 +28,7 @@ from constellaration.optimization.settings import (
     OptimizationSettings,
 )
 from constellaration.utils import pytree
+from jaxtyping import Float
 
 
 @dataclass

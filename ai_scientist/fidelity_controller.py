@@ -6,9 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol, Tuple
 
-from ai_scientist import adapter
+from ai_scientist import adapter, memory, tools
 from ai_scientist import config as ai_config
-from ai_scientist import memory, tools
 from ai_scientist.forward_model import forward_model_batch
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -22,8 +21,7 @@ class ProblemEvaluator(Protocol):
         *,
         stage: str,
         use_cache: bool = True,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @dataclass

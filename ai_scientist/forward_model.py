@@ -14,9 +14,9 @@ from typing import Any, Dict, List, Mapping
 
 import numpy as np
 import pydantic
+from constellaration.geometry import surface_rz_fourier
 
 from constellaration import forward_model as constellaration_forward
-from constellaration.geometry import surface_rz_fourier
 
 logger = logging.getLogger(__name__)
 

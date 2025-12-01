@@ -221,8 +221,7 @@ class ProblemEvaluator(Protocol):
         *,
         stage: str,
         use_cache: bool = True,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)

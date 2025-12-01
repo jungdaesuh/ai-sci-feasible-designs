@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from constellaration.geometry import surface_rz_fourier
+from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
-from constellaration.geometry import surface_rz_fourier
-from constellaration.initial_guess import generate_nae, generate_rotating_ellipse
 
 _LOGGER = logging.getLogger(__name__)
 
