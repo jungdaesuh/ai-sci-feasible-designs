@@ -19,10 +19,13 @@ try:
     
     # Register SurfaceRZFourier as a pytree node to ensure mask_and_ravel works
     # This is likely done implicitly in the full app but needed explicitly here
-    register_pydantic_data(
-        surface_rz_fourier.SurfaceRZFourier,
-        meta_fields=["n_field_periods", "is_stellarator_symmetric"]
-    )
+    try:
+        register_pydantic_data(
+            surface_rz_fourier.SurfaceRZFourier,
+            meta_fields=["n_field_periods", "is_stellarator_symmetric"]
+        )
+    except ValueError:
+        pass
 except ImportError:
     pytest.skip("constellaration not installed", allow_module_level=True)
 

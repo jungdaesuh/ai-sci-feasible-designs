@@ -17,7 +17,7 @@ from ai_scientist import tools
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration.geometry import surface_rz_fourier as surface_module
-from constellaration.utils import pytree
+from ai_scientist.utils import pytree
 
 # Register SurfaceRZFourier as a Pytree to ensure JAX compatibility
 # (In case the installed constellaration library hasn't registered it yet)

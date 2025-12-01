@@ -1,29 +1,12 @@
 
+
 import sys
-from unittest.mock import MagicMock, patch
-
-# Mock modules before importing FidelityController
-mock_tools = MagicMock()
-mock_tools._DEFAULT_RELATIVE_TOLERANCE = 1e-2
-mock_tools._P3_REFERENCE_POINT = (1.0, 20.0)
-sys.modules["ai_scientist.tools"] = mock_tools
-
-mock_fm = MagicMock()
-sys.modules["ai_scientist.forward_model"] = mock_fm
-
-mock_adapter = MagicMock()
-sys.modules["ai_scientist.adapter"] = mock_adapter
-
-mock_memory = MagicMock()
-sys.modules["ai_scientist.memory"] = mock_memory
-
-mock_runner = MagicMock()
-sys.modules["ai_scientist.experiment_runner"] = mock_runner
-
 import unittest
+from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 from typing import Any, List, Mapping
 
+# Define mock classes at top level so they are available
 @dataclass
 class MockEvaluationResult:
     metrics: Any
@@ -39,12 +22,6 @@ class MockEvaluationResult:
     fidelity: str
     constraints_map: Mapping[str, float]
     error_message: str | None = None
-
-mock_fm.EvaluationResult = MockEvaluationResult
-mock_fm.forward_model_batch = MagicMock()
-
-from ai_scientist import config as ai_config
-from ai_scientist.fidelity_controller import FidelityController
 
 @dataclass
 class MockBudget:
@@ -74,9 +51,46 @@ class MockMetrics:
 
 class TestFidelityControllerMock(unittest.TestCase):
     def setUp(self):
+        # Create mocks
+        self.mock_tools = MagicMock()
+        self.mock_tools._DEFAULT_RELATIVE_TOLERANCE = 1e-2
+        self.mock_tools._P3_REFERENCE_POINT = (1.0, 20.0)
+        
+        self.mock_fm = MagicMock()
+        self.mock_fm.EvaluationResult = MockEvaluationResult
+        self.mock_fm.forward_model_batch = MagicMock()
+        
+        self.mock_adapter = MagicMock()
+        self.mock_memory = MagicMock()
+        self.mock_runner = MagicMock()
+        
+        self.mock_modules = {
+            "ai_scientist.tools": self.mock_tools,
+            "ai_scientist.forward_model": self.mock_fm,
+            "ai_scientist.adapter": self.mock_adapter,
+            "ai_scientist.memory": self.mock_memory,
+            "ai_scientist.experiment_runner": self.mock_runner,
+        }
+        
+        # Start patcher
+        self.patcher = patch.dict(sys.modules, self.mock_modules)
+        self.patcher.start()
+        
+        # Force re-import of module under test to pick up mocks
+        if "ai_scientist.fidelity_controller" in sys.modules:
+            del sys.modules["ai_scientist.fidelity_controller"]
+            
+        from ai_scientist.fidelity_controller import FidelityController
+        self.FidelityController = FidelityController
+        
         self.config = MockConfig()
-        self.controller = FidelityController(self.config)
+        self.controller = self.FidelityController(self.config)
         self.budgets = MockBudget()
+
+    def tearDown(self):
+        self.patcher.stop()
+        if "ai_scientist.fidelity_controller" in sys.modules:
+            del sys.modules["ai_scientist.fidelity_controller"]
 
     @patch("ai_scientist.fidelity_controller._time_exceeded")
     def test_evaluate_stage_calls_batch(self, mock_time_exceeded):
@@ -87,7 +101,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         tool_name = "test_tool"
         
         mock_time_exceeded.return_value = False
-        mock_tools._settings_for_stage.return_value = MagicMock()
+        self.mock_tools._settings_for_stage.return_value = MagicMock()
         
         # Mock batch result
         metrics = MockMetrics()
@@ -108,7 +122,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         )
         result.settings.constellaration_settings.model_dump.return_value = {}
         
-        mock_fm.forward_model_batch.return_value = [result]
+        self.mock_fm.forward_model_batch.return_value = [result]
 
         # Execute
         results = self.controller.evaluate_stage(
@@ -121,16 +135,16 @@ class TestFidelityControllerMock(unittest.TestCase):
         )
 
         # Verify
-        mock_tools._settings_for_stage.assert_called_with(stage, "p3")
-        mock_adapter.prepare_peft_hook.assert_called_with(tool_name, stage)
-        mock_fm.forward_model_batch.assert_called_once_with(
+        self.mock_tools._settings_for_stage.assert_called_with(stage, "p3")
+        self.mock_adapter.prepare_peft_hook.assert_called_with(tool_name, stage)
+        self.mock_fm.forward_model_batch.assert_called_once_with(
             [candidates[0]["params"]],
-            mock_tools._settings_for_stage.return_value,
+            self.mock_tools._settings_for_stage.return_value,
             n_workers=self.budgets.n_workers,
             pool_type=self.budgets.pool_type,
             use_cache=True
         )
-        mock_adapter.apply_lora_updates.assert_called_with(tool_name, stage)
+        self.mock_adapter.apply_lora_updates.assert_called_with(tool_name, stage)
         
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["design_hash"], "hash1")
@@ -146,7 +160,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         tool_name = "test_tool"
         
         mock_time_exceeded.return_value = False
-        mock_tools._settings_for_stage.return_value = MagicMock()
+        self.mock_tools._settings_for_stage.return_value = MagicMock()
         
         # Mock failed batch result
         result = MockEvaluationResult(
@@ -166,7 +180,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         )
         result.settings.constellaration_settings.model_dump.return_value = {}
         
-        mock_fm.forward_model_batch.return_value = [result]
+        self.mock_fm.forward_model_batch.return_value = [result]
 
         # Execute
         results = self.controller.evaluate_stage(
