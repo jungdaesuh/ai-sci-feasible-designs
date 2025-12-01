@@ -1,5 +1,27 @@
+import sys
 import pytest
 from unittest.mock import MagicMock, patch
+
+# Mock dependencies to avoid environment issues
+sys.modules["vmecpp"] = MagicMock()
+sys.modules["vmecpp.cpp"] = MagicMock()
+sys.modules["vmecpp.cpp._vmecpp"] = MagicMock()
+
+constellaration = MagicMock()
+sys.modules["constellaration"] = constellaration
+sys.modules["constellaration.forward_model"] = MagicMock()
+sys.modules["constellaration.boozer"] = MagicMock()
+sys.modules["constellaration.mhd"] = MagicMock()
+sys.modules["constellaration.geometry"] = MagicMock()
+sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
+sys.modules["constellaration.optimization"] = MagicMock()
+sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
+sys.modules["constellaration.optimization.settings"] = MagicMock()
+sys.modules["constellaration.utils"] = MagicMock()
+sys.modules["constellaration.utils.pytree"] = MagicMock()
+sys.modules["constellaration.problems"] = MagicMock()
+sys.modules["constellaration.initial_guess"] = MagicMock()
+
 import jax.numpy as jnp
 import numpy as np
 from ai_scientist.coordinator import Coordinator, TrajectoryState
@@ -19,7 +41,22 @@ def create_mock_alm_state(**kwargs):
         "bounds": jnp.ones(10),
     }
     defaults.update(kwargs)
-    return AugmentedLagrangianState(**defaults)
+    
+    # Create a MagicMock and set attributes explicitly
+    state = MagicMock()
+    for k, v in defaults.items():
+        setattr(state, k, v)
+        
+    # Mock model_copy method to simulate Pydantic V2 behavior
+    def mock_copy(update=None):
+        new_kwargs = defaults.copy()
+        if update:
+            new_kwargs.update(update)
+        return create_mock_alm_state(**new_kwargs)
+    
+    state.model_copy.side_effect = mock_copy
+    state.copy.side_effect = mock_copy # Mock both just in case
+    return state
 
 class TestCoordinatorASO:
     
@@ -75,7 +112,7 @@ class TestCoordinatorASO:
         # Verify fields
         assert diag.objective == 1.0
         assert diag.objective_delta == pytest.approx(-0.1)
-        assert diag.max_violation == 0.06
+        assert diag.max_violation == pytest.approx(0.06)
         assert diag.bounds_norm == pytest.approx(np.linalg.norm(np.ones(10) * 0.5))
         assert diag.multipliers == [0.5, 0.0, 0.0]
         assert diag.penalty_parameters == [10.0, 1.0, 1.0]
@@ -83,7 +120,7 @@ class TestCoordinatorASO:
         # Verify constraint analysis
         c1 = diag.constraint_diagnostics[0]
         assert c1.name == "c1"
-        assert c1.violation == 0.06
+        assert c1.violation == pytest.approx(0.06)
         assert c1.trend == "increasing_violation" # 0.05 -> 0.06 is > 5% increase
         
     @patch("ai_scientist.coordinator.step_alm")
@@ -177,9 +214,13 @@ class TestCoordinatorASO:
              # Fallback if positional args were used (though unlikely given the code)
              passed_state = call_args.args[1]
         
+        print(f"DEBUG: Type of passed_state.penalty_parameters: {type(passed_state.penalty_parameters)}")
+        print(f"DEBUG: passed_state.penalty_parameters: {passed_state.penalty_parameters}")
+
         # In the test setup, we mock step_alm to return res2 (state2)
         # Then the coordinator receives dir2 (ADJUST)
         # Then the coordinator modifies traj.alm_state (which is state2)
         # Then next loop calls step_alm with modified state2.
         
-        assert jnp.array_equal(passed_state.penalty_parameters, jnp.array([100.0, 1.0, 1.0]))
+        # Use numpy comparison to avoid JAX/Mock recursion issues
+        assert np.allclose(passed_state.penalty_parameters, np.array([100.0, 1.0, 1.0]))

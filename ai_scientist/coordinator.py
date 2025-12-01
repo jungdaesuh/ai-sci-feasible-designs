@@ -28,6 +28,8 @@ from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.optim.generative import GenerativeDesignModel
 
 
+from ai_scientist.problems import get_problem
+
 class TrajectoryState(pydantic.BaseModel):
     """State for a single optimization trajectory."""
     model_config = pydantic.ConfigDict(
@@ -54,14 +56,6 @@ class Coordinator:
     Decides whether to Explore or Exploit and delegates to workers.
     """
 
-    CONSTRAINT_NAMES = { # Added
-        "p1": ["aspect_ratio", "average_triangularity", "edge_rotational_transform"], # Added
-        "p2": ["aspect_ratio", "edge_rotational_transform", "edge_magnetic_mirror_ratio", # Added
-               "max_elongation", "qi"], # Added
-        "p3": ["edge_rotational_transform", "edge_magnetic_mirror_ratio", # Added
-               "vacuum_well", "flux_compression", "qi"], # Added
-    } # Added
-
     def __init__(
         self, 
         cfg: ai_config.ExperimentConfig, 
@@ -85,8 +79,8 @@ class Coordinator:
         self.current_strategy = "HYBRID" # Default to doing both
 
         # ASO Initialization
-        problem_key = (cfg.problem or "p3").lower()[:2]
-        self.constraint_names = self.CONSTRAINT_NAMES.get(problem_key, self.CONSTRAINT_NAMES["p3"])
+        self.problem = get_problem(cfg.problem or "p3")
+        self.constraint_names = self.problem.constraint_names
         self.telemetry: List[Dict[str, Any]] = []
 
 

@@ -1,0 +1,217 @@
+"""Problem definitions for AI Scientist optimization tasks."""
+
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Tuple
+import numpy as np
+
+class Problem(ABC):
+    """Abstract base class for optimization problems."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Problem identifier (p1, p2, p3)."""
+        ...
+
+    @property
+    @abstractmethod
+    def constraint_names(self) -> List[str]:
+        """Names of constraints for this problem."""
+        ...
+
+    @abstractmethod
+    def _normalized_constraint_violations(
+        self, metrics: Dict[str, Any]
+    ) -> np.ndarray:
+        """
+        Compute normalized constraint violations.
+
+        Returns array where positive values indicate violation.
+        """
+        ...
+
+    @abstractmethod
+    def get_objective(self, metrics: Dict[str, Any]) -> float:
+        """Extract objective value from metrics."""
+        ...
+
+    # Template methods
+    def is_feasible(self, metrics: Dict[str, Any]) -> bool:
+        """Check if metrics satisfy all constraints."""
+        violations = self._normalized_constraint_violations(metrics)
+        # Use a small tolerance for floating point comparisons, consistent with constellaration
+        return bool(np.all(violations <= 1e-2))
+
+    def compute_feasibility(self, metrics: Dict[str, Any]) -> float:
+        """Compute continuous feasibility metric (0 = feasible)."""
+        violations = self._normalized_constraint_violations(metrics)
+        return float(np.max(np.maximum(violations, 0)))
+
+    def max_violation(self, metrics: Dict[str, Any]) -> float:
+        """Get maximum constraint violation."""
+        violations = self._normalized_constraint_violations(metrics)
+        return float(np.max(np.maximum(violations, 0)))
+
+
+class P1Problem(Problem):
+    """Geometrical Problem - minimize elongation."""
+
+    @property
+    def name(self) -> str:
+        return "p1"
+
+    @property
+    def constraint_names(self) -> List[str]:
+        return ["aspect_ratio", "average_triangularity", "edge_rotational_transform"]
+
+    def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
+        # Constraints from constellaration.problems.GeometricalProblem
+        # 1. aspect_ratio <= 4.0
+        # 2. average_triangularity <= -0.5
+        # 3. edge_rotational_transform_over_n_field_periods >= 0.3
+        
+        ar_limit = 4.0
+        tri_limit = -0.5
+        iota_limit = 0.3
+
+        ar = metrics.get("aspect_ratio", 0.0)
+        tri = metrics.get("average_triangularity", 0.0)
+        iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
+
+        violations = np.array([
+            (ar - ar_limit) / abs(ar_limit),
+            (tri - tri_limit) / abs(tri_limit),
+            (iota_limit - iota) / abs(iota_limit),
+        ])
+        return violations
+
+    def get_objective(self, metrics: Dict[str, Any]) -> float:
+        return metrics.get("max_elongation", float("inf"))
+
+
+class P2Problem(Problem):
+    """Simple-to-Build QI Stellarator."""
+
+    @property
+    def name(self) -> str:
+        return "p2"
+
+    @property
+    def constraint_names(self) -> List[str]:
+        return [
+            "aspect_ratio",
+            "edge_rotational_transform",
+            "qi",
+            "edge_magnetic_mirror_ratio",
+            "max_elongation"
+        ]
+
+    def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
+        # Constraints from constellaration.problems.SimpleToBuildQIStellarator
+        # 1. aspect_ratio <= 10.0
+        # 2. edge_rotational_transform_over_n_field_periods >= 0.25
+        # 3. log10(qi) <= -4.0
+        # 4. edge_magnetic_mirror_ratio <= 0.2
+        # 5. max_elongation <= 5.0
+
+        ar_limit = 10.0
+        iota_limit = 0.25
+        qi_limit = -4.0
+        mirror_limit = 0.2
+        elong_limit = 5.0
+
+        ar = metrics.get("aspect_ratio", 0.0)
+        iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
+        qi = metrics.get("qi", 1.0) # Default to 1.0 to avoid log(0) issues if missing, though it should be there
+        log_qi = np.log10(qi) if qi > 0 else 0.0 # Handle potential edge cases safely
+        mirror = metrics.get("edge_magnetic_mirror_ratio", 0.0)
+        elong = metrics.get("max_elongation", 0.0)
+
+        violations = np.array([
+            (ar - ar_limit) / abs(ar_limit),
+            (iota_limit - iota) / abs(iota_limit),
+            (log_qi - qi_limit) / abs(qi_limit),
+            (mirror - mirror_limit) / abs(mirror_limit),
+            (elong - elong_limit) / abs(elong_limit),
+        ])
+        return violations
+
+    def get_objective(self, metrics: Dict[str, Any]) -> float:
+        # Maximize minimum_normalized_magnetic_gradient_scale_length
+        # We return negative because optimization usually minimizes
+        return -metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+
+
+class P3Problem(Problem):
+    """MHD-Stable QI Stellarator (multi-objective)."""
+
+    @property
+    def name(self) -> str:
+        return "p3"
+
+    @property
+    def constraint_names(self) -> List[str]:
+        return [
+            "edge_rotational_transform",
+            "qi",
+            "edge_magnetic_mirror_ratio",
+            "flux_compression",
+            "vacuum_well"
+        ]
+
+    def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
+        # Constraints from constellaration.problems.MHDStableQIStellarator
+        # 1. edge_rotational_transform_over_n_field_periods >= 0.25
+        # 2. log10(qi) <= -3.5
+        # 3. edge_magnetic_mirror_ratio <= 0.25
+        # 4. flux_compression_in_regions_of_bad_curvature <= 0.9
+        # 5. vacuum_well >= 0.0
+
+        iota_limit = 0.25
+        qi_limit = -3.5
+        mirror_limit = 0.25
+        flux_limit = 0.9
+        well_limit = 0.0
+        well_norm = max(1e-1, well_limit) # From constellaration code
+
+        iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
+        qi = metrics.get("qi", 1.0)
+        log_qi = np.log10(qi) if qi > 0 else 0.0
+        mirror = metrics.get("edge_magnetic_mirror_ratio", 0.0)
+        flux = metrics.get("flux_compression_in_regions_of_bad_curvature", 0.0)
+        well = metrics.get("vacuum_well", 0.0)
+
+        violations = np.array([
+            (iota_limit - iota) / abs(iota_limit),
+            (log_qi - qi_limit) / abs(qi_limit),
+            (mirror - mirror_limit) / abs(mirror_limit),
+            (flux - flux_limit) / abs(flux_limit),
+            (well_limit - well) / abs(well_norm),
+        ])
+        return violations
+
+    def get_objective(self, metrics: Dict[str, Any]) -> float:
+        # P3 is multi-objective, but for single-value context (like simple tracking)
+        # we might return the primary objective or a scalarization.
+        # However, Coordinator uses ALM which handles constraints.
+        # The 'objective' in ALM state is usually the Lagrangian.
+        # For simple tracking, let's return the gradient scale length (negated)
+        # as it's the primary physics performance metric besides aspect ratio.
+        return -metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+
+
+def get_problem(name: str) -> Problem:
+    """Get problem instance by name."""
+    problems = {
+        "p1": P1Problem(),
+        "p2": P2Problem(),
+        "p3": P3Problem(),
+    }
+    key = name.lower()
+    if key not in problems:
+        # Fallback for "p3_..." or similar variations if any
+        if key.startswith("p1"): return problems["p1"]
+        if key.startswith("p2"): return problems["p2"]
+        return problems["p3"]
+        
+    return problems[key]

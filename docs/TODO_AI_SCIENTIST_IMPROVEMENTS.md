@@ -192,16 +192,16 @@ class _Problem(abc.ABC):
         return np.all(violations <= 0)
 ```
 
-- [ ] **6.1 Create Problem ABC in ai_scientist**
+- [x] **6.1 Create Problem ABC in ai_scientist**
   - File: `ai_scientist/problems.py` (new)
   - Abstract methods: `_normalized_constraint_violations()`, `get_objective()`
   - Template methods: `is_feasible()`, `compute_feasibility()`
 
-- [ ] **6.2 Implement P1Problem, P2Problem, P3Problem**
+- [x] **6.2 Implement P1Problem, P2Problem, P3Problem**
   - Inherit from ABC
   - Define constraint specifications per problem
 
-- [ ] **6.3 Integrate with existing `prompts.ProblemSpec`**
+- [x] **6.3 Integrate with existing `prompts.ProblemSpec`**
   - Map constraint names to Problem classes
   - Use in `coordinator._generate_diagnostics()`
 

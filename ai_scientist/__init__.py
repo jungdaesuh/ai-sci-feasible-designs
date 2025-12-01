@@ -7,6 +7,7 @@ from ai_scientist.forward_model import (
     ForwardModelSettings,
     forward_model,
 )
+from ai_scientist.problems import Problem, get_problem
 
 _suppress = os.getenv("AI_SCIENTIST_SUPPRESS_SIMSOPT_WARN", "1") != "0"
 if _suppress:

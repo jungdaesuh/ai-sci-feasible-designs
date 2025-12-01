@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from constellaration import problems as problem_module
+from ai_scientist import problems as problem_module
 
-_SOURCE_PATH = "constellaration/src/constellaration/problems.py"
+_SOURCE_PATH = "ai_scientist/problems.py"
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class ProblemSpec:
 
 
 def _geometrical_spec() -> ProblemSpec:
-    instance = problem_module.GeometricalProblem()
+    instance = problem_module.P1Problem()
     return ProblemSpec(
         key="p1",
         constraints=(
@@ -87,7 +87,7 @@ def _geometrical_spec() -> ProblemSpec:
 
 
 def _simple_qi_spec() -> ProblemSpec:
-    instance = problem_module.SimpleToBuildQIStellarator()
+    instance = problem_module.P2Problem()
     return ProblemSpec(
         key="p2",
         constraints=(
@@ -137,7 +137,7 @@ def _simple_qi_spec() -> ProblemSpec:
 
 
 def _mhd_qi_spec() -> ProblemSpec:
-    instance = problem_module.MHDStableQIStellarator()
+    instance = problem_module.P3Problem()
     return ProblemSpec(
         key="p3",
         constraints=(
