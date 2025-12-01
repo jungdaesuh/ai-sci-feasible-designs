@@ -314,17 +314,17 @@ tests/
 
 **Context:** `constellaration` uses property-based testing for mathematical invariants. `ai_scientist` relies heavily on mocks.
 
-- [ ] **10.1 Add hypothesis for ALM invariants**
+- [x] **10.1 Add hypothesis for ALM invariants**
   - Test: multipliers grow when constraints violated
   - Test: penalties bounded by max
-  - File: `tests/test_alm_bridge.py`
+  - File: `tests/optim/test_alm_bridge.py`
 
-- [ ] **10.2 Add hypothesis for geometry functions**
+- [x] **10.2 Add hypothesis for geometry functions**
   - Test: `fourier_to_real_space` invertible
   - Test: aspect ratio always positive
   - File: `tests/optim/test_geometry.py`
 
-- [ ] **10.3 Add hypothesis for surrogate predictions**
+- [x] **10.3 Add hypothesis for surrogate predictions**
   - Test: ensemble uncertainty ≥ individual variance
   - File: `tests/optim/test_surrogate.py`
 

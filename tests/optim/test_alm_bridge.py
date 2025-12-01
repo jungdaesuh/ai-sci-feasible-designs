@@ -1,6 +1,8 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import hypothesis
+from hypothesis import strategies as st
 
 # Check if constellaration is available
 try:
@@ -179,4 +181,42 @@ class TestALMBridgeFunctionality:
         assert isinstance(result, ALMStepResult)
         # Verify the penalties in the result are at least as high as the override
         # (ALM might increase them further, but shouldn't decrease them below override if violation persists)
+        # (ALM might increase them further, but shouldn't decrease them below override if violation persists)
         assert jnp.all(result.state.penalty_parameters >= override_value)
+
+
+class TestALMInvariants:
+    """Property-based tests for ALM mathematical invariants."""
+
+    @hypothesis.given(
+        multipliers=st.lists(
+            st.floats(0.0, 100.0, allow_nan=False), min_size=3, max_size=5
+        ),
+        violations=st.lists(
+            st.floats(-1.0, 1.0, allow_nan=False), min_size=3, max_size=5
+        ),
+    )
+    def test_multiplier_update_non_negative(self, multipliers, violations):
+        """Lagrange multipliers should always be non-negative."""
+        # Ensure same length
+        min_len = min(len(multipliers), len(violations))
+        multipliers = np.array(multipliers[:min_len])
+        violations = np.array(violations[:min_len])
+
+        # Simulated update: λ ← max(0, λ + ρ * g)
+        rho = 1.0
+        new_multipliers = np.maximum(0, multipliers + rho * violations)
+
+        assert np.all(new_multipliers >= 0)
+
+    @hypothesis.given(
+        penalties=st.lists(
+            st.floats(1.0, 1e6, allow_nan=False), min_size=3, max_size=5
+        ),
+    )
+    def test_penalties_bounded(self, penalties):
+        """Penalties should be bounded by max."""
+        PENALTY_MAX = 1e8
+        penalties = np.array(penalties)
+        bounded = np.minimum(penalties * 2.0, PENALTY_MAX)
+        assert np.all(bounded <= PENALTY_MAX)

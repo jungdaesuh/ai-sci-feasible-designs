@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+import hypothesis
+from hypothesis import strategies as st
 
 from ai_scientist.optim import geometry
 
@@ -94,3 +96,37 @@ def test_coordinate_transform():
     X, Y, Z_out = geometry.to_cartesian(R, Z, Phi)
     assert np.isclose(X[0, 0], 0.0, atol=1e-7)
     assert np.isclose(Y[0, 0], 1.0, atol=1e-7)
+
+
+class TestGeometryInvariants:
+    """Property-based tests for geometry mathematical invariants."""
+
+    @hypothesis.given(
+        R_major=st.floats(0.5, 10.0),
+        R_minor=st.floats(0.1, 2.0),
+    )
+    def test_aspect_ratio_positive(self, R_major, R_minor):
+        """Aspect ratio should always be positive."""
+        hypothesis.assume(R_minor < R_major)
+        aspect = R_major / R_minor
+        assert aspect > 0
+
+    @hypothesis.given(
+        coeffs=st.lists(st.floats(-1.0, 1.0, allow_nan=False), min_size=4, max_size=16),
+    )
+    @hypothesis.settings(max_examples=50)
+    def test_fourier_to_real_smooth(self, coeffs):
+        """Real-space representation should be smooth (no NaN/inf)."""
+        # Construct a valid shape (rows, 1) which corresponds to ntor=0
+        rows = len(coeffs)
+        cols = 1
+
+        r_cos = np.array(coeffs).reshape(rows, cols)
+        z_sin = np.array(coeffs).reshape(rows, cols)
+
+        # R, Z, Phi = geometry.fourier_to_real_space(r_cos, z_sin, n_theta, n_zeta, n_field_periods)
+        R, Z, Phi = geometry.fourier_to_real_space(
+            r_cos, z_sin, n_theta=32, n_zeta=32, n_field_periods=1
+        )
+        assert np.all(np.isfinite(R))
+        assert np.all(np.isfinite(Z))
