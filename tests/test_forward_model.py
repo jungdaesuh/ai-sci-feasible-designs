@@ -116,7 +116,7 @@ def test_problem_p2_metrics(mock_constellaration_forward):
     # P2 constraints check
     # Aspect ratio - 10.0 <= 0
     # 5.0 - 10.0 = -5.0 (Satisfied)
-    assert result.constraints["aspect_ratio"] == -5.0
+    assert result.constraints_map["aspect_ratio"] == -5.0
 
 def test_design_hash_stability():
     params1 = {"r_cos": [[1.0]], "z_sin": [[0.0]]}
@@ -146,7 +146,7 @@ def test_evaluation_result_structure(mock_constellaration_forward):
     
     assert isinstance(result.constraint_names, list)
     assert len(result.constraint_names) > 0
-    assert isinstance(result.constraint_values, list)
+    assert isinstance(result.constraints, list)
     
     # Check to_pareto_point
     pareto = result.to_pareto_point()

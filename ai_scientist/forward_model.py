@@ -62,30 +62,33 @@ class EvaluationResult(pydantic.BaseModel):
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
+    # Core metrics from constellaration
     metrics: constellaration_forward.ConstellarationMetrics
+
+    # Optimization-relevant fields
     objective: float
-    constraints: Dict[str, float]
-    feasibility: float
+    constraints: List[float]
+    constraint_names: List[str]
+    feasibility: float  # max(0, max_constraint_violation)
     is_feasible: bool
+
+    # Caching
     cache_hit: bool = False
     design_hash: str
+
+    # Telemetry
     evaluation_time_sec: float
+    fidelity: str  # "low", "medium", "high"
     settings: ForwardModelSettings
 
-    # Telemetry & Diagnostics
-    fidelity: str = "unknown"
+    # Optional equilibrium data
     equilibrium_converged: bool = True
     error_message: str | None = None
 
     @property
-    def constraint_names(self) -> List[str]:
-        """List of constraint names (keys)."""
-        return list(self.constraints.keys())
-
-    @property
-    def constraint_values(self) -> List[float]:
-        """List of constraint values."""
-        return list(self.constraints.values())
+    def constraints_map(self) -> Dict[str, float]:
+        """Map of constraint names to values."""
+        return dict(zip(self.constraint_names, self.constraints))
 
     def to_pareto_point(self) -> tuple[float, float]:
         """
@@ -351,8 +354,8 @@ def forward_model(
 
     # 5. Compute Derived Values
     objective = compute_objective(metrics, settings.problem)
-    constraints = compute_constraint_margins(metrics, settings.problem)
-    feasibility = max_violation(constraints)
+    constraints_map = compute_constraint_margins(metrics, settings.problem)
+    feasibility = max_violation(constraints_map)
     is_feasible = feasibility <= 1e-2 # Tolerance
 
     evaluation_time = time.time() - start_time
@@ -360,7 +363,8 @@ def forward_model(
     result = EvaluationResult(
         metrics=metrics,
         objective=objective,
-        constraints=constraints,
+        constraints=list(constraints_map.values()),
+        constraint_names=list(constraints_map.keys()),
         feasibility=feasibility,
         is_feasible=is_feasible,
         cache_hit=False,
