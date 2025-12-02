@@ -19,7 +19,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence, Set, Tuple
+from typing import Any, Callable, Mapping, Protocol, Sequence, Set, Tuple, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -71,7 +71,7 @@ class CycleResult:
 
 
 class ProblemEvaluator(Protocol):
-    def __call(
+    def __call__(
         self,
         boundary_params: Mapping[str, Any],
         *,
@@ -182,7 +182,7 @@ class CycleExecutor:
         surrogate_model: BaseSurrogate,
         generative_model: GenerativeDesignModel | None = None,
         prev_feasibility_rate: float | None = None,
-        suggested_params: list[Mapping[str, Any]] | None = None,
+        suggested_params: list[dict[str, Any]] | None = None,
         config_overrides: Mapping[str, Any] | None = None,
         # Runtime flags passed as kwargs to avoid coupling with RunnerCLIConfig
         verbose: bool = False,
@@ -325,9 +325,6 @@ class CycleExecutor:
             if gen_history:
                 generative_model.fit([item[0] for item in gen_history])
 
-            if gen_history:
-                generative_model.fit([item[0] for item in gen_history])
-
         # Train Feasibility Prefilter on historical data
         # We need (X, y) where X are params and y is feasibility
         # For now, we fetch from world_model if available, or just skip if empty
@@ -336,23 +333,19 @@ class CycleExecutor:
         # history = self.world_model.get_all_evaluations() ...
         # self.prefilter.train(X, y)
 
-        candidate_pool: list[Mapping[str, Any]] = []
+        candidate_pool: list[dict[str, Any]] = []
 
         # Initialize Coordinator (Phase 5)
-        # If one was passed in __init__, use it (assuming caller manages updates).
-        # Otherwise create a new one.
-        if self.coordinator:
-            coordinator = self.coordinator
-        else:
-            coordinator = Coordinator(
-                active_cfg,
-                self.world_model,
-                planner=ai_planner.PlanningAgent(),  # Default planner
-                surrogate=surrogate_model
-                if isinstance(surrogate_model, NeuralOperatorSurrogate)
-                else None,
-                generative_model=generative_model,
-            )
+        # Always rebuild with active_cfg to honor per-cycle overrides (P1 fix)
+        coordinator = Coordinator(
+            active_cfg,
+            self.world_model,
+            planner=ai_planner.PlanningAgent(),  # Default planner
+            surrogate=surrogate_model
+            if isinstance(surrogate_model, NeuralOperatorSurrogate)
+            else None,
+            generative_model=generative_model,
+        )
 
         if active_cfg.aso.enabled:
             if verbose:
@@ -362,13 +355,16 @@ class CycleExecutor:
             if suggested_params:
                 initial_seeds = suggested_params
 
-            candidate_pool = coordinator.produce_candidates_aso(
-                cycle=cycle_number,
-                experiment_id=experiment_id,
-                eval_budget=active_budgets.screen_evals_per_cycle,
-                template=active_cfg.boundary_template,
-                initial_seeds=initial_seeds,
-                initial_config=active_cfg,
+            candidate_pool = cast(
+                list[dict[str, Any]],
+                coordinator.produce_candidates_aso(
+                    cycle=cycle_number,
+                    experiment_id=experiment_id,
+                    eval_budget=active_budgets.screen_evals_per_cycle,
+                    template=active_cfg.boundary_template,
+                    initial_seeds=initial_seeds,
+                    initial_config=active_cfg,
+                ),
             )
             candidates = candidate_pool
 
@@ -378,11 +374,14 @@ class CycleExecutor:
                     f"[runner][cycle={cycle_number}] V2 Gradient Descent Optimization active (Phase 5 Coordinator)."
                 )
 
-            candidate_pool = coordinator.produce_candidates(
-                cycle=cycle_number,
-                experiment_id=experiment_id,
-                n_candidates=pool_size,
-                template=active_cfg.boundary_template,
+            candidate_pool = cast(
+                list[dict[str, Any]],
+                coordinator.produce_candidates(
+                    cycle=cycle_number,
+                    experiment_id=experiment_id,
+                    n_candidates=pool_size,
+                    template=active_cfg.boundary_template,
+                ),
             )
 
             if not candidate_pool:
@@ -444,16 +443,19 @@ class CycleExecutor:
                 sampler_count,
                 random_count,
                 vae_count,
-            ) = _propose_p3_candidates_for_cycle(
-                active_cfg,
-                cycle_index,
-                self.world_model,
-                experiment_id,
-                screen_budget=active_budgets.screen_evals_per_cycle,
-                total_candidates=pool_size,
-                prev_feasibility_rate=prev_feasibility_rate,
-                suggested_params=suggested_params,
-                generative_model=generative_model,
+            ) = cast(
+                tuple[list[dict[str, Any]], int, int, int],
+                _propose_p3_candidates_for_cycle(
+                    active_cfg,
+                    cycle_index,
+                    self.world_model,
+                    experiment_id,
+                    screen_budget=active_budgets.screen_evals_per_cycle,
+                    total_candidates=pool_size,
+                    prev_feasibility_rate=prev_feasibility_rate,
+                    suggested_params=suggested_params,
+                    generative_model=generative_model,
+                ),
             )
             if verbose:
                 print(
@@ -514,7 +516,7 @@ class CycleExecutor:
         )
 
         promote_limit = 0
-        to_promote: list[Mapping[str, Any]] = []
+        to_promote: list[dict[str, Any]] = []
 
         if screen_design_map:
             promote_limit = min(
@@ -529,7 +531,9 @@ class CycleExecutor:
                     active_budgets.promote_top_k,
                     P3_REFERENCE_POINT,
                 )
-                to_promote = prioritized_screen[:promote_limit]
+                to_promote = cast(
+                    list[dict[str, Any]], prioritized_screen[:promote_limit]
+                )
             else:
                 if verbose:
                     print(
@@ -541,7 +545,9 @@ class CycleExecutor:
                         entry["evaluation"].get("max_violation", float("inf"))
                     ),
                 )
-                to_promote = sorted_by_violation[:promote_limit]
+                to_promote = cast(
+                    list[dict[str, Any]], sorted_by_violation[:promote_limit]
+                )
                 for candidate in to_promote:
                     candidate["promotion_reason"] = "restoration"
 
@@ -619,7 +625,7 @@ class CycleExecutor:
             vmec_failure_rate=vmec_failure_rate,
             retrain_time=_LAST_SURROGATE_FIT_SEC,
             cache_hit_rate=cache_hit_rate,
-            budget_snapshot=active_budgets,
+            budget_snapshot=budget_snapshot,
         )
 
         if self.config.reporting.get("prometheus_export_enabled", False):
@@ -643,7 +649,7 @@ class CycleExecutor:
         )
 
         best_entry = min(latest_by_design.values(), key=_oriented_objective)
-        best_eval = dict(best_entry["evaluation"])
+        best_eval: dict[str, Any] = dict(best_entry["evaluation"])
         metrics_payload = best_eval.setdefault("metrics", {})
         metrics_payload["cycle_hv"] = p3_summary.hv_score
         best_eval["cycle_hv"] = p3_summary.hv_score
@@ -1062,7 +1068,7 @@ class CycleExecutor:
         cycle_number,
         verbose,
         cycle_start,
-    ) -> list[Mapping[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Extracted ALM optimization logic."""
         if verbose:
             print(
@@ -1236,7 +1242,7 @@ class CycleExecutor:
             bounds=jnp.ones_like(x0) * 0.1,
         )
 
-        alm_candidates: list[Mapping[str, Any]] = []
+        alm_candidates: list[dict[str, Any]] = []
         budget_per_step = 8
         num_alm_steps = max(1, active_budgets.screen_evals_per_cycle // budget_per_step)
 
@@ -1679,14 +1685,16 @@ def _generate_candidate_params(
             r_cos[0, :center_idx] = 0.0
         z_sin[0, :] = 0.0
 
-    params = {
+    params: dict[str, Any] = {
         "r_cos": r_cos.tolist(),
         "z_sin": z_sin.tolist(),
         "n_field_periods": template.n_field_periods or n_field_periods,
         "is_stellarator_symmetric": is_stellarator_symmetric,
     }
+
     if r_sin is not None:
         params["r_sin"] = r_sin.tolist()
+
     if z_cos is not None:
         params["z_cos"] = z_cos.tolist()
 
@@ -1706,15 +1714,15 @@ def _propose_p3_candidates_for_cycle(
     screen_budget: int,
     total_candidates: int | None = None,
     prev_feasibility_rate: float | None = None,
-    suggested_params: list[Mapping[str, Any]] | None = None,
+    suggested_params: list[dict[str, Any]] | None = None,
     generative_model: GenerativeDesignModel | DiffusionDesignModel | None = None,
-) -> tuple[list[Mapping[str, Any]], int, int, int]:
+) -> tuple[list[dict[str, Any]], int, int, int]:
     pool_size = total_candidates if total_candidates is not None else screen_budget
     total_candidates = int(pool_size)
     if total_candidates <= 0:
         return [], 0, 0, 0
 
-    agent_results: list[Mapping[str, Any]] = []
+    agent_results: list[dict[str, Any]] = []
     if suggested_params:
         for idx, params in enumerate(suggested_params):
             agent_results.append(
@@ -1731,7 +1739,7 @@ def _propose_p3_candidates_for_cycle(
     if remaining_candidates == 0:
         return agent_results, 0, 0, 0
 
-    gen_results: list[Mapping[str, Any]] = []
+    gen_results: list[dict[str, Any]] = []
     if generative_model and generative_model._trained:
         gen_target = int(remaining_candidates * 0.4)
         if gen_target > 0:
@@ -1743,11 +1751,17 @@ def _propose_p3_candidates_for_cycle(
                     "max_elongation": 1.5,
                     "edge_rotational_transform_over_n_field_periods": 0.4,
                 }
-                gen_results = generative_model.sample(
-                    gen_target, target_metrics=target_metrics, seed=seed_base
+                gen_results = cast(
+                    list[dict[str, Any]],
+                    generative_model.sample(
+                        gen_target, target_metrics=target_metrics, seed=seed_base
+                    ),
                 )
             else:
-                gen_results = generative_model.sample(gen_target, seed=seed_base)
+                gen_results = cast(
+                    list[dict[str, Any]],
+                    generative_model.sample(gen_target, seed=seed_base),
+                )
 
     remaining_candidates = max(0, remaining_candidates - len(gen_results))
 
@@ -1798,7 +1812,7 @@ def _propose_p3_candidates_for_cycle(
         for i in range(remaining_candidates)
     ]
     seed_iter = iter(candidate_seeds)
-    sampler_results: list[Mapping[str, Any]] = []
+    sampler_results: list[dict[str, Any]] = []
     for params in sampler_params:
         try:
             seed = next(seed_iter)
@@ -1807,7 +1821,7 @@ def _propose_p3_candidates_for_cycle(
         if isinstance(params, Mapping) and "params" in params:
             payload = params.get("params", {})
             constraint_distance = float(
-                params.get("normalized_constraint_distance", 0.0)
+                cast(Any, params.get("normalized_constraint_distance", 0.0))
             )
         else:
             payload = params
@@ -1816,7 +1830,7 @@ def _propose_p3_candidates_for_cycle(
             {
                 "seed": seed,
                 "params": payload,
-                "design_hash": tools.design_hash(payload),
+                "design_hash": tools.design_hash(cast(dict[str, Any], payload)),
                 "constraint_distance": constraint_distance,
                 "source": "constraint_sampler",
             }
@@ -1830,12 +1844,14 @@ def _propose_p3_candidates_for_cycle(
         except StopIteration:
             break
 
-    random_results: list[Mapping[str, Any]] = []
+    random_results: list[dict[str, Any]] = []
 
     if cfg.proposal_mix.sampler_type == "near_axis":
         try:
             sampler = NearAxisSampler(cfg.boundary_template)
-            random_results = sampler.generate(remaining_seeds)
+            random_results = cast(
+                list[dict[str, Any]], sampler.generate(remaining_seeds)
+            )
         except Exception as exc:
             print(
                 f"[runner] NearAxisSampler failed: {exc}; falling back to standard random"
@@ -1855,7 +1871,12 @@ def _propose_p3_candidates_for_cycle(
         )
 
     candidates = agent_results + gen_results + sampler_results + random_results
-    return candidates, len(sampler_results), len(random_results), len(gen_results)
+    return (
+        cast(list[dict[str, Any]], candidates),
+        len(sampler_results),
+        len(random_results),
+        len(gen_results),
+    )
 
 
 def _surrogate_candidate_pool_size(
@@ -1872,13 +1893,13 @@ def _surrogate_candidate_pool_size(
 def _surrogate_rank_screen_candidates(
     cfg: ai_config.ExperimentConfig,
     screen_budget: int,
-    candidates: list[Mapping[str, Any]],
+    candidates: list[dict[str, Any]],
     world_model: memory.WorldModel,
     surrogate_model: BaseSurrogate,
     *,
     cycle: int = 0,
     verbose: bool = False,
-) -> list[Mapping[str, Any]]:
+) -> list[dict[str, Any]]:
     if not candidates or screen_budget <= 0:
         return candidates
 
@@ -1919,7 +1940,7 @@ def _surrogate_rank_screen_candidates(
         metrics_list = ()
         target_values = ()
 
-    pool_entries: list[Mapping[str, Any]] = []
+    pool_entries: list[dict[str, Any]] = []
     for idx, candidate in enumerate(candidates):
         pool_entries.append(
             {
@@ -1997,7 +2018,7 @@ def _surrogate_rank_screen_candidates(
         if filtered_predictions:
             ranked_predictions = filtered_predictions
 
-    selected: list[Mapping[str, Any]] = []
+    selected: list[dict[str, Any]] = []
     needed = screen_budget
     for prediction in ranked_predictions:
         idx = int(prediction.metadata.get("__surrogate_candidate_index", -1))
