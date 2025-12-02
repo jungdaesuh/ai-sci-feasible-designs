@@ -326,12 +326,54 @@ class CycleExecutor:
                 generative_model.fit([item[0] for item in gen_history])
 
         # Train Feasibility Prefilter on historical data
-        # We need (X, y) where X are params and y is feasibility
-        # For now, we fetch from world_model if available, or just skip if empty
-        # This is a placeholder for fetching historical data
-        # In a real run, we would query world_model for all evaluations
-        # history = self.world_model.get_all_evaluations() ...
-        # self.prefilter.train(X, y)
+        # Query all historical evaluations from the database
+        try:
+            rows = self.world_model._conn.execute(
+                """
+                SELECT m.raw_json, m.is_feasible
+                FROM metrics m
+                JOIN candidates c ON m.candidate_id = c.id
+                WHERE c.experiment_id = ? AND c.problem = ?
+                AND m.raw_json IS NOT NULL
+                """,
+                (experiment_id, self.config.problem),
+            ).fetchall()
+
+            if len(rows) >= 10:
+                X_list = []
+                y_list = []
+                for row in rows:
+                    try:
+                        metrics = json.loads(row["raw_json"])
+                        # Extract features that the prefilter expects
+                        features = []
+                        has_all_features = True
+                        for key in self.prefilter.feature_keys:
+                            if key in metrics:
+                                features.append(metrics[key])
+                            else:
+                                has_all_features = False
+                                break
+
+                        if has_all_features:
+                            X_list.append(features)
+                            y_list.append(bool(row["is_feasible"]))
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
+                if len(X_list) >= 10:
+                    X = np.array(X_list)
+                    y = np.array(y_list)
+                    self.prefilter.train(X, y)
+                    if verbose:
+                        print(
+                            f"[runner][cycle={cycle_number}] Trained prefilter on {len(X)} historical evaluations."
+                        )
+        except Exception as e:
+            if verbose:
+                print(
+                    f"[runner][cycle={cycle_number}] Prefilter training failed: {e}. Continuing without prefilter."
+                )
 
         candidate_pool: list[dict[str, Any]] = []
 
