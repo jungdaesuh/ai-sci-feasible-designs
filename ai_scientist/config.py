@@ -204,6 +204,11 @@ class SurrogateConfig:
     epochs: int = 100
     hidden_dim: int = 64
     use_offline_dataset: bool = False
+    min_samples: int = 32
+    points_cadence: int = 64
+    cycle_cadence: int = 5
+    device: str = "cpu"
+    batch_size: int = 32
 
 
 @dataclass(frozen=True)
@@ -622,6 +627,11 @@ def _surrogate_config_from_dict(
         epochs=int(config.get("epochs", 100)),
         hidden_dim=int(config.get("hidden_dim", 64)),
         use_offline_dataset=bool(config.get("use_offline_dataset", False)),
+        min_samples=int(config.get("min_samples", 32)),
+        points_cadence=int(config.get("points_cadence", 64)),
+        cycle_cadence=int(config.get("cycle_cadence", 5)),
+        device=str(config.get("device", "cpu")),
+        batch_size=int(config.get("batch_size", 32)),
     )
 
 
