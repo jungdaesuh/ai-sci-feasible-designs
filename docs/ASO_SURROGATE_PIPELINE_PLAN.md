@@ -10,7 +10,7 @@
 
 ### 1.1 Add Surrogate Configuration to ASO Experiment Configs
 
-- [ ] **Update `configs/experiment.p1.aso.yaml`**
+- [x] **Update `configs/experiment.p1.aso.yaml`**
   ```yaml
   surrogate:
     backend: neural_operator
@@ -21,18 +21,18 @@
     use_offline_dataset: true
   ```
 
-- [ ] **Update `configs/experiment.p2.aso.yaml`** with same surrogate section
+- [x] **Update `configs/experiment.p2.aso.yaml`** with same surrogate section
 
-- [ ] **Update `configs/experiment.p3.aso.yaml`** with same surrogate section
+- [x] **Update `configs/experiment.p3.aso.yaml`** with same surrogate section
 
 ### 1.2 Ensure Surrogate Checkpoint Availability
 
-- [ ] **Verify checkpoint exists**: `checkpoints/surrogate_physics_v2.pt`
+- [x] **Verify checkpoint exists**: `checkpoints/surrogate_physics_v2.pt`
   - If missing, either:
     - [ ] Run offline training script to generate checkpoint
     - [ ] Set `use_offline_dataset: false` for cold-start training
 
-- [ ] **Add checkpoint validation** in `runner.py:_create_surrogate()`:
+- [x] **Add checkpoint validation** in `runner.py:_create_surrogate()`:
   - Log warning if `use_offline_dataset=true` but checkpoint missing
   - Provide clear error message with instructions
 
@@ -44,7 +44,7 @@
 
 **File**: `ai_scientist/coordinator.py`
 
-- [ ] **Update `produce_candidates_aso()` to generate larger seed pool**
+- [x] **Update `produce_candidates_aso()` to generate larger seed pool**
 
   Change:
   ```python
@@ -58,13 +58,13 @@
   raw_seeds = self._prepare_seeds(initial_seeds, cycle, pool_size)
   ```
 
-- [ ] **Add configurable `n_trajectories` parameter** (default: 1 for single-trajectory ASO)
+- [x] **Add configurable `n_trajectories` parameter** (default: 1 for single-trajectory ASO)
 
 ### 2.2 Implement Surrogate Pre-Screening
 
 **File**: `ai_scientist/coordinator.py`
 
-- [ ] **Add `_surrogate_rank_seeds()` method**:
+- [x] **Add `_surrogate_rank_seeds()` method**:
   ```python
   def _surrogate_rank_seeds(
       self,
@@ -91,7 +91,7 @@
       return [s[0] for s in scores[:top_k]]
   ```
 
-- [ ] **Add `_get_surrogate_prediction()` helper**:
+- [x] **Add `_get_surrogate_prediction()` helper**:
   ```python
   def _get_surrogate_prediction(self, seed: Dict[str, Any]) -> SurrogatePrediction:
       """Get surrogate prediction for a seed."""
@@ -104,7 +104,7 @@
 
 **File**: `ai_scientist/coordinator.py`
 
-- [ ] **Modify `produce_candidates_aso()` main flow**:
+- [x] **Modify `produce_candidates_aso()` main flow**:
   ```python
   def produce_candidates_aso(self, ...):
       # 1. Generate large seed pool
@@ -152,11 +152,11 @@
 
 **File**: `ai_scientist/optim/surrogate_v2.py`
 
-- [ ] **Verify `NeuralOperatorSurrogate.predict()` exists and returns proper structure**
+- [x] **Verify `NeuralOperatorSurrogate.predict()` exists and returns proper structure**
   - Should return objective estimate
   - Should return constraint violation estimates (or max_violation)
 
-- [ ] **Add `predict_batch()` method if missing** (for efficiency):
+- [x] **Add `predict_batch()` method if missing** (for efficiency):
   ```python
   def predict_batch(self, params_list: List[Dict]) -> List[SurrogatePrediction]:
       """Batch prediction for multiple candidates."""
@@ -164,13 +164,13 @@
       pass
   ```
 
-- [ ] **Ensure consistent return type** (`SurrogatePrediction` or similar dataclass)
+- [x] **Ensure consistent return type** (`SurrogatePrediction` or similar dataclass)
 
 ### 3.2 Add Fallback for Non-Neural Surrogates
 
 **File**: `ai_scientist/coordinator.py`
 
-- [ ] **Handle case when surrogate is `SurrogateBundle` (random forest)**
+- [x] **Handle case when surrogate is `SurrogateBundle` (random forest)**
   - Either skip pre-screening entirely
   - Or implement RF-compatible ranking interface
 
@@ -182,7 +182,7 @@
 
 **File**: `ai_scientist/coordinator.py`
 
-- [ ] **Log pre-screening statistics**:
+- [x] **Log pre-screening statistics**:
   ```python
   def _surrogate_rank_seeds(self, seeds, top_k):
       # ... ranking logic ...
@@ -198,7 +198,7 @@
       return [s[0] for s in scores[:top_k]]
   ```
 
-- [ ] **Add to telemetry events**:
+- [x] **Add to telemetry events**:
   ```python
   self.telemetry.append({
       # ... existing fields ...
@@ -215,18 +215,18 @@
 
 ### 5.1 Unit Tests
 
-- [ ] **Test surrogate ranking logic**:
+- [x] **Test surrogate ranking logic**:
   - `test_surrogate_rank_seeds_returns_top_k`
   - `test_surrogate_rank_seeds_handles_empty_pool`
   - `test_surrogate_rank_seeds_handles_prediction_failure`
 
-- [ ] **Test integration with produce_candidates_aso**:
+- [x] **Test integration with produce_candidates_aso**:
   - `test_aso_uses_surrogate_when_available`
   - `test_aso_falls_back_when_no_surrogate`
 
 ### 5.2 Integration Tests
 
-- [ ] **End-to-end ASO with surrogate pre-screening**:
+- [x] **End-to-end ASO with surrogate pre-screening**:
   - Generate 100 seeds
   - Verify surrogate ranking is called
   - Verify only top-k proceed to ALM
@@ -242,11 +242,11 @@
 
 ## Phase 6: Documentation
 
-- [ ] **Update `docs/run_protocol.md`** with surrogate configuration instructions
+- [x] **Update `docs/run_protocol.md`** with surrogate configuration instructions
 
-- [ ] **Update `docs/ASO_V4_IMPLEMENTATION_GUIDE.md`** with pre-screening architecture
+- [x] **Update `docs/ASO_V4_IMPLEMENTATION_GUIDE.md`** with pre-screening architecture
 
-- [ ] **Add inline code comments** explaining the surrogate pipeline flow
+- [x] **Add inline code comments** explaining the surrogate pipeline flow
 
 ---
 

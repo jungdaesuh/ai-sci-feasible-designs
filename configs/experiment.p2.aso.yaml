@@ -54,6 +54,14 @@ proposal_mix:
   jitter_scale: 0.02
   surrogate_pool_multiplier: 3.0
 
+surrogate:
+  backend: neural_operator
+  n_ensembles: 3
+  learning_rate: 1e-3
+  epochs: 50
+  hidden_dim: 64
+  use_offline_dataset: true
+
 # ALM Configuration
 alm:
   maxit: 30

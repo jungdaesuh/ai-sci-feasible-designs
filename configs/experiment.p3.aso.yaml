@@ -47,6 +47,14 @@ proposal_mix:
   jitter_scale: 0.01
   surrogate_pool_multiplier: 2.0
 
+surrogate:
+  backend: neural_operator
+  n_ensembles: 3
+  learning_rate: 1e-3
+  epochs: 50
+  hidden_dim: 64
+  use_offline_dataset: true
+
 # ASO Specific Configuration
 alm:
   maxit: 25

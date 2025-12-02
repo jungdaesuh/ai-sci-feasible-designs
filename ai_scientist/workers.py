@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -31,7 +31,9 @@ class OptimizationWorker(Worker):
     """Worker responsible for exploiting the search space using differentiable optimization."""
 
     def __init__(
-        self, cfg: ai_config.ExperimentConfig, surrogate: NeuralOperatorSurrogate
+        self,
+        cfg: ai_config.ExperimentConfig,
+        surrogate: Optional[NeuralOperatorSurrogate],
     ):
         self.cfg = cfg
         self.surrogate = surrogate

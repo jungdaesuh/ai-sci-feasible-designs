@@ -179,14 +179,28 @@ class Coordinator:
         """
         config = initial_config or self.cfg
 
-        # 1. Prepare seeds
-        seeds = self._prepare_seeds(initial_seeds, cycle, 1)
-        if not seeds:
+        # 1. Prepare seeds with Surrogate Ranking
+        # Calculate pool size based on multiplier
+        multiplier = config.proposal_mix.surrogate_pool_multiplier
+        pool_size = int(max(10, 1 * multiplier))  # We only need 1 candidate for ASO
+
+        # Generate larger pool
+        raw_seeds = self._prepare_seeds(initial_seeds, cycle, pool_size)
+
+        # Rank and select best
+        ranked_seeds = self._surrogate_rank_seeds(raw_seeds, cycle)
+
+        if not ranked_seeds:
             print("[Coordinator] No valid seeds, returning empty")
             return []
 
+        best_seed = ranked_seeds[0]
+        print(
+            f"[Coordinator] Selected best seed from {len(raw_seeds)} candidates (Score: {best_seed.get('surrogate_score', 'N/A')})"
+        )
+
         # 2. Run trajectory with real ALM
-        traj = TrajectoryState(id=0, seed=seeds[0])
+        traj = TrajectoryState(id=0, seed=best_seed)
         candidates = self._run_trajectory_aso(
             traj=traj,
             eval_budget=eval_budget,
@@ -235,7 +249,7 @@ class Coordinator:
 
             # 1. Execute ALM step
             result = step_alm(
-                context=traj.alm_context,
+                context=alm_context,
                 state=traj.alm_state,
                 budget=min(oracle_budget, eval_budget - traj.budget_used),
                 num_workers=alm.oracle_num_workers,
@@ -284,9 +298,7 @@ class Coordinator:
                 # Extract final candidate
                 candidates.append(
                     {
-                        "params": state_to_boundary_params(
-                            traj.alm_context, traj.alm_state
-                        ),
+                        "params": state_to_boundary_params(alm_context, traj.alm_state),
                         "objective": result.objective,
                         "max_violation": result.max_violation,
                         "source": "aso",
@@ -303,7 +315,7 @@ class Coordinator:
                     candidates.append(
                         {
                             "params": state_to_boundary_params(
-                                traj.alm_context, traj.alm_state
+                                alm_context, traj.alm_state
                             ),
                             "objective": result.objective,
                             "max_violation": result.max_violation,
@@ -318,6 +330,7 @@ class Coordinator:
                         problem=problem,
                         settings=settings,
                     )
+                    alm_context = new_context
                     traj = traj.model_copy(
                         update={
                             "seed": new_seeds[0],
@@ -363,9 +376,7 @@ class Coordinator:
                 print("[Coordinator] Auto-STOP (stagnation limit)")
                 candidates.append(
                     {
-                        "params": state_to_boundary_params(
-                            traj.alm_context, traj.alm_state
-                        ),
+                        "params": state_to_boundary_params(alm_context, traj.alm_state),
                         "objective": result.objective,
                         "max_violation": result.max_violation,
                         "source": "aso_stagnation",
@@ -394,6 +405,7 @@ class Coordinator:
                 - multipliers: Float[jnp.ndarray, "n_constraints"]
         """
         aso = self.cfg.aso
+        assert traj.alm_context is not None, "ALM context required for diagnostics"
         prev = traj.history[-2] if len(traj.history) >= 2 else None
 
         # Extract all fields from ALM state
@@ -546,6 +558,9 @@ class Coordinator:
                 "evals_used": traj.budget_used,
                 "wall_time_ms": wall_time_ms,
                 "llm_called": llm_called,
+                "surrogate_score": traj.seed.get("surrogate_score"),
+                "surrogate_rank": traj.seed.get("surrogate_rank"),
+                "surrogate_pool_size": traj.seed.get("surrogate_pool_size"),
             }
         )
 
@@ -566,6 +581,57 @@ class Coordinator:
                 f.write(json.dumps(event) + "\n")
 
         self.telemetry = []
+
+    def _surrogate_rank_seeds(
+        self, seeds: List[Dict[str, Any]], cycle: int
+    ) -> List[Dict[str, Any]]:
+        """Rank seeds using the surrogate model."""
+        if not seeds:
+            return []
+
+        if not self.surrogate or not self.surrogate._trained:
+            print("[Coordinator] Surrogate not ready, using random selection")
+            # Shuffle to avoid bias if generator is deterministic
+            import random
+
+            random.shuffle(seeds)
+            return seeds
+
+        print(
+            f"[Coordinator] Ranking {len(seeds)} seeds with Neural Operator Surrogate..."
+        )
+        try:
+            # Rank candidates (higher score is better)
+            ranked_preds = self.surrogate.rank_candidates(
+                seeds,
+                minimize_objective=True,
+                exploration_ratio=self.cfg.proposal_mix.exploration_ratio,
+            )
+
+            # Convert back to seed dicts with metadata
+            sorted_seeds = []
+            for i, pred in enumerate(ranked_preds):
+                # Cast to Dict to allow mutation (pyright sees Mapping)
+                seed_data = (
+                    dict(pred.metadata)
+                    if isinstance(pred.metadata, dict)
+                    else dict(pred.metadata)
+                )  # type: ignore
+
+                # Inject surrogate stats into seed for telemetry
+                seed_data["surrogate_score"] = pred.expected_value
+                seed_data["surrogate_rank"] = i
+                seed_data["surrogate_pool_size"] = len(seeds)
+                seed_data["surrogate_uncertainty"] = getattr(
+                    pred, "uncertainty", 0.0
+                )  # If available
+                sorted_seeds.append(seed_data)
+
+            return sorted_seeds
+
+        except Exception as e:
+            print(f"[Coordinator] Surrogate ranking failed: {e}")
+            return seeds
 
     # Helper methods
     def _prepare_seeds(self, initial_seeds, cycle, n_needed):

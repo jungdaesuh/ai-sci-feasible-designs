@@ -56,6 +56,14 @@ proposal_mix:
   surrogate_pool_multiplier: 4.0
   sampler_type: rotating_ellipse    # Use simpler sampler to ensure valid seeds
 
+surrogate:
+  backend: neural_operator
+  n_ensembles: 3
+  learning_rate: 1e-3
+  epochs: 50
+  hidden_dim: 64
+  use_offline_dataset: true
+
 # ALM Configuration for Geometry
 alm:
   maxit: 40                  # More iterations to refine geometry precisely

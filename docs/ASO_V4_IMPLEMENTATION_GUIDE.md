@@ -2154,3 +2154,69 @@ MHDStableQIStellarator: aspect_ratio, edge_rotational_transform,
 | Planner | `ai_scientist/planner.py` | `HeuristicSupervisor`, `supervise()` |
 | Coordinator | `ai_scientist/coordinator.py` | `produce_candidates_aso()` |
 | Runner | `ai_scientist/runner.py` | `--aso` flag, `_run_cycle()` |
+
+## Part 4: Surrogate Pre-Screening (V4.1)
+
+**Status:** Implemented
+**Date:** 2025-12-02
+
+The ASO loop has been enhanced with a "Look Before You Leap" pre-screening stage using a Neural Operator surrogate.
+
+### 4.1 Architecture
+
+1.  **Seed Generation**: The  generates a larger pool of candidates (controlled by , default 4.0).
+2.  **Surrogate Ranking**: The  predicts the objective and constraint violations for all seeds in the pool.
+3.  **Selection**: Seeds are ranked by a score combining objective and feasibility.
+    -
+4.  **Execution**: The top-ranked seed(s) (default 1) are selected for the expensive ALM trajectory.
+
+### 4.2 Configuration
+
+Add the `surrogate` section to your experiment YAML:
+
+```yaml
+surrogate:
+  backend: neural_operator
+  n_ensembles: 3
+  learning_rate: 1e-3
+  epochs: 50
+  hidden_dim: 64
+  use_offline_dataset: true
+```
+
+### 4.3 Fallback
+
+If the surrogate checkpoint is missing or the model is untrained, the system gracefully falls back to random selection (original behavior) and logs a warning.
+
+## Part 4: Surrogate Pre-Screening (V4.1)
+
+**Status:** Implemented
+**Date:** 2025-12-02
+
+The ASO loop has been enhanced with a "Look Before You Leap" pre-screening stage using a Neural Operator surrogate.
+
+### 4.1 Architecture
+
+1.  **Seed Generation**: The `Coordinator` generates a larger pool of candidates (controlled by `surrogate_pool_multiplier`, default 4.0).
+2.  **Surrogate Ranking**: The `NeuralOperatorSurrogate` predicts the objective and constraint violations for all seeds in the pool.
+3.  **Selection**: Seeds are ranked by a score combining objective and feasibility.
+    - `score = -(predicted_objective + 10.0 * max(0, predicted_violation))`
+4.  **Execution**: The top-ranked seed(s) (default 1) are selected for the expensive ALM trajectory.
+
+### 4.2 Configuration
+
+Add the `surrogate` section to your experiment YAML:
+
+```yaml
+surrogate:
+  backend: neural_operator
+  n_ensembles: 3
+  learning_rate: 1e-3
+  epochs: 50
+  hidden_dim: 64
+  use_offline_dataset: true
+```
+
+### 4.3 Fallback
+
+If the surrogate checkpoint is missing or the model is untrained, the system gracefully falls back to random selection (original behavior) and logs a warning.

@@ -68,3 +68,16 @@ python -m ai_scientist.runner --aso
 ```
 
 ASO mode uses real ALM state for supervision decisions. See `ASO_V4_IMPLEMENTATION_GUIDE.md` for details.
+
+### Surrogate Pre-Screening
+
+To enable Neural Operator surrogate pre-screening (V4.1), ensure your experiment config includes:
+
+```yaml
+surrogate:
+  backend: neural_operator
+  n_ensembles: 3
+  use_offline_dataset: true  # Requires checkpoints/surrogate_physics_v2.pt
+```
+
+This will automatically rank candidates and select the best ones for ALM optimization.

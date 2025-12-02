@@ -24,20 +24,24 @@ def create_surrogate(cfg: ai_config.ExperimentConfig) -> BaseSurrogate:
             f"[runner] V2 Active: Initializing NeuralOperatorSurrogate (Deep Learning Backend, Ensembles={cfg.surrogate.n_ensembles})."
         )
         surrogate = NeuralOperatorSurrogate(
+            min_samples=cfg.surrogate.min_samples,
+            points_cadence=cfg.surrogate.points_cadence,
+            cycle_cadence=cfg.surrogate.cycle_cadence,
+            device=cfg.surrogate.device,
             learning_rate=cfg.surrogate.learning_rate,
             epochs=cfg.surrogate.epochs,
+            batch_size=cfg.surrogate.batch_size,
             n_ensembles=cfg.surrogate.n_ensembles,
             hidden_dim=cfg.surrogate.hidden_dim,
         )
 
         if cfg.surrogate.use_offline_dataset:
-            ckpt_path = Path("checkpoints/surrogate_physics_v2.pt")
-            if ckpt_path.exists():
-                print(f"[runner] Loading offline surrogate checkpoint: {ckpt_path}")
-                surrogate.load_checkpoint(ckpt_path)
-            else:
-                print(
-                    f"[runner] Warning: use_offline_dataset=True but {ckpt_path} not found. Starting cold."
+            checkpoint_path = Path("checkpoints/surrogate_physics_v2.pt")
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(
+                    f"Surrogate checkpoint not found at {checkpoint_path}. "
+                    "Please run 'python scripts/train_surrogate.py' or set "
+                    "surrogate.use_offline_dataset=false in your config."
                 )
 
         return surrogate
