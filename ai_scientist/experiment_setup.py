@@ -43,6 +43,7 @@ def create_surrogate(cfg: ai_config.ExperimentConfig) -> BaseSurrogate:
                     "Please run 'python scripts/train_surrogate.py' or set "
                     "surrogate.use_offline_dataset=false in your config."
                 )
+            surrogate.load_checkpoint(checkpoint_path)
 
         return surrogate
     return SurrogateBundle()
