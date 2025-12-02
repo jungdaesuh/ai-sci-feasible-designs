@@ -1,9 +1,7 @@
 import sys
-from unittest.mock import MagicMock, patch
+
 
 import pytest
-
-
 
 
 def test_parser_help_mentions_screen_stage(runner_module) -> None:

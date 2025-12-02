@@ -6,6 +6,7 @@ Shim module to maintain backward compatibility after refactoring to experiment_r
 from ai_scientist.experiment_runner import *  # noqa: F403
 
 # Restore symbols expected by tests/external users
+from ai_scientist.experiment_setup import build_argument_parser  # noqa: F401
 
 if __name__ == "__main__":
     main()  # noqa: F405

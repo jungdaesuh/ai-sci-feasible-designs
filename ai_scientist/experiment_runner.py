@@ -25,7 +25,6 @@ from ai_scientist.cycle_executor import CycleExecutor, serialize_experiment_conf
 from ai_scientist.experiment_setup import (
     RunnerCLIConfig,
     apply_run_preset,
-    build_argument_parser,
     create_generative_model,
     create_surrogate,
     parse_args,
@@ -187,7 +186,7 @@ def run_experiment(
                 f"[runner] starting cycle {cycle_number} stage={governance_stage.upper()} "
                 f"screen_budget={cfg.budgets.screen_evals_per_cycle}"
             )
-            suggested_params: list[Mapping[str, Any]] | None = None
+            suggested_params: list[dict[str, Any]] | None = None
             config_overrides: Mapping[str, Any] | None = None
             if planning_agent:
                 stage_payload = [
@@ -210,7 +209,7 @@ def run_experiment(
                 print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
 
                 if plan_outcome.suggested_params:
-                    suggested_params = [plan_outcome.suggested_params]
+                    suggested_params = [dict(plan_outcome.suggested_params)]
                 if plan_outcome.config_overrides:
                     config_overrides = plan_outcome.config_overrides
 

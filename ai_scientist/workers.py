@@ -76,7 +76,7 @@ class ExplorationWorker(Worker):
     def __init__(
         self,
         cfg: ai_config.ExperimentConfig,
-        generative_model: GenerativeDesignModel | None,
+        generative_model: GenerativeDesignModel | DiffusionDesignModel | None,
         sampler: NearAxisSampler | OfflineSeedSampler | None = None,
     ):
         self.cfg = cfg

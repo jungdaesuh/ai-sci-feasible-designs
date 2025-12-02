@@ -22,7 +22,7 @@ from ai_scientist.optim.alm_bridge import (
     state_to_boundary_params,
     step_alm,
 )
-from ai_scientist.optim.generative import GenerativeDesignModel
+from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.planner import (
     ConstraintDiagnostic,
@@ -69,7 +69,7 @@ class Coordinator:
         world_model: memory.WorldModel,
         planner: PlanningAgent,
         surrogate: Optional[NeuralOperatorSurrogate] = None,
-        generative_model: Optional[GenerativeDesignModel] = None,
+        generative_model: Optional[GenerativeDesignModel | DiffusionDesignModel] = None,
     ):
         self.cfg = cfg
         self.world_model = world_model

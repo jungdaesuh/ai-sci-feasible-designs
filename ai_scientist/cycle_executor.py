@@ -181,7 +181,7 @@ class CycleExecutor:
         git_sha: str,
         constellaration_sha: str,
         surrogate_model: BaseSurrogate,
-        generative_model: GenerativeDesignModel | None = None,
+        generative_model: GenerativeDesignModel | DiffusionDesignModel | None = None,
         prev_feasibility_rate: float | None = None,
         suggested_params: list[dict[str, Any]] | None = None,
         config_overrides: Mapping[str, Any] | None = None,
