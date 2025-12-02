@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import sys
 
+
 class TestCoordinatorSurrogate(unittest.TestCase):
     def setUp(self):
         # Create mocks
@@ -45,9 +46,10 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         import ai_scientist.coordinator
         import ai_scientist.optim.surrogate
         import importlib
+
         importlib.reload(ai_scientist.optim.surrogate)
         importlib.reload(ai_scientist.coordinator)
-        
+
         self.Coordinator = ai_scientist.coordinator.Coordinator
         self.SurrogatePrediction = ai_scientist.optim.surrogate.SurrogatePrediction
 
@@ -79,9 +81,10 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         # Reload real modules if they were loaded before
         # This is a bit heavy-handed but ensures safety
         if "ai_scientist.coordinator" in sys.modules:
-             import ai_scientist.coordinator
-             import importlib
-             importlib.reload(ai_scientist.coordinator)
+            import ai_scientist.coordinator
+            import importlib
+
+            importlib.reload(ai_scientist.coordinator)
 
     def test_surrogate_rank_seeds(self):
         # Setup seeds
