@@ -612,11 +612,8 @@ class Coordinator:
             sorted_seeds = []
             for i, pred in enumerate(ranked_preds):
                 # Cast to Dict to allow mutation (pyright sees Mapping)
-                seed_data = (
-                    dict(pred.metadata)
-                    if isinstance(pred.metadata, dict)
-                    else dict(pred.metadata)
-                )  # type: ignore
+                # Cast to Dict to allow mutation (pyright sees Mapping)
+                seed_data = dict(pred.metadata)  # type: ignore
 
                 # Inject surrogate stats into seed for telemetry
                 seed_data["surrogate_score"] = pred.expected_value

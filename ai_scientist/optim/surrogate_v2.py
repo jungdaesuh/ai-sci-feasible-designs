@@ -564,6 +564,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             # Combine: Feasibility * (Performance + Exploration)
             # Or simply additive?
             # Let's stick to a robust scoring:
+            # Score: Improvement + Exploration Bonus - Violations
+            # Formula: score = base_score + exploration_bonus - (10.0 * constraint_distance)
+            # - base_score: The predicted objective value (negated if minimizing).
+            # - exploration_bonus: Adds value for uncertain predictions to encourage exploration (UCB).
+            # - constraint_distance: Penalty for geometric constraints (e.g. self-intersection).
+            #   The weight 10.0 is a heuristic to strongly discourage invalid geometries.
             score = base_score + exploration_bonus - (10.0 * constraint_distance)
 
             predictions.append(

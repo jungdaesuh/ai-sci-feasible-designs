@@ -2,55 +2,55 @@ import unittest
 from unittest.mock import MagicMock, patch
 import sys
 
-# Mock simsopt/simsoptpp before importing anything that uses them
-sys.modules["simsopt"] = MagicMock()
-sys.modules["simsoptpp"] = MagicMock()
-sys.modules["simsopt.geo"] = MagicMock()
-sys.modules["simsopt.field"] = MagicMock()
-sys.modules["pymoo"] = MagicMock()
-sys.modules["pymoo.indicators"] = MagicMock()
-sys.modules["pymoo.indicators.hv"] = MagicMock()
-
-# Create a package-like mock for jax
-jax = MagicMock()
-jax.numpy = MagicMock()
-jax.tree_util = MagicMock()
-sys.modules["jax"] = jax
-sys.modules["jax.numpy"] = jax.numpy
-sys.modules["jax.tree_util"] = jax.tree_util
-
-sys.modules["constellaration"] = MagicMock()
-sys.modules["constellaration.geometry"] = MagicMock()
-sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
-sys.modules["constellaration.optimization"] = MagicMock()
-sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
-sys.modules["constellaration.optimization.settings"] = MagicMock()
-sys.modules["constellaration.forward_model"] = MagicMock()
-sys.modules["constellaration.problems"] = MagicMock()
-sys.modules["constellaration.utils"] = MagicMock()
-sys.modules["constellaration.initial_guess"] = MagicMock()
-sys.modules["jaxtyping"] = MagicMock()
-sys.modules["nevergrad"] = MagicMock()
-# Create a package-like mock for torch
-torch = MagicMock()
-torch.nn = MagicMock()
-torch.nn.functional = MagicMock()
-torch.optim = MagicMock()
-torch.utils = MagicMock()
-torch.utils.data = MagicMock()
-sys.modules["torch"] = torch
-sys.modules["torch.nn"] = torch.nn
-sys.modules["torch.nn.functional"] = torch.nn.functional
-sys.modules["torch.optim"] = torch.optim
-sys.modules["torch.utils"] = torch.utils
-sys.modules["torch.utils.data"] = torch.utils.data
-
-from ai_scientist.coordinator import Coordinator  # noqa: E402
-from ai_scientist.optim.surrogate import SurrogatePrediction  # noqa: E402
-
-
 class TestCoordinatorSurrogate(unittest.TestCase):
     def setUp(self):
+        # Create mocks
+        self.mock_modules = {
+            "simsopt": MagicMock(),
+            "simsoptpp": MagicMock(),
+            "simsopt.geo": MagicMock(),
+            "simsopt.field": MagicMock(),
+            "pymoo": MagicMock(),
+            "pymoo.indicators": MagicMock(),
+            "pymoo.indicators.hv": MagicMock(),
+            "jax": MagicMock(),
+            "jax.numpy": MagicMock(),
+            "jax.tree_util": MagicMock(),
+            "constellaration": MagicMock(),
+            "constellaration.geometry": MagicMock(),
+            "constellaration.geometry.surface_rz_fourier": MagicMock(),
+            "constellaration.optimization": MagicMock(),
+            "constellaration.optimization.augmented_lagrangian": MagicMock(),
+            "constellaration.optimization.settings": MagicMock(),
+            "constellaration.forward_model": MagicMock(),
+            "constellaration.problems": MagicMock(),
+            "constellaration.utils": MagicMock(),
+            "constellaration.initial_guess": MagicMock(),
+            "jaxtyping": MagicMock(),
+            "nevergrad": MagicMock(),
+            "torch": MagicMock(),
+            "torch.nn": MagicMock(),
+            "torch.nn.functional": MagicMock(),
+            "torch.optim": MagicMock(),
+            "torch.utils": MagicMock(),
+            "torch.utils.data": MagicMock(),
+        }
+
+        # Start patcher
+        self.modules_patcher = patch.dict(sys.modules, self.mock_modules)
+        self.modules_patcher.start()
+
+        # Import modules under test (now using mocks)
+        # We need to reload them to ensure they pick up the mocks
+        import ai_scientist.coordinator
+        import ai_scientist.optim.surrogate
+        import importlib
+        importlib.reload(ai_scientist.optim.surrogate)
+        importlib.reload(ai_scientist.coordinator)
+        
+        self.Coordinator = ai_scientist.coordinator.Coordinator
+        self.SurrogatePrediction = ai_scientist.optim.surrogate.SurrogatePrediction
+
         # Mock configuration
         self.cfg = MagicMock()
         self.cfg.proposal_mix.surrogate_pool_multiplier = 5.0
@@ -62,7 +62,7 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         self.mock_surrogate = MagicMock()
         self.mock_surrogate._trained = True
 
-        self.coordinator = Coordinator(
+        self.coordinator = self.Coordinator(
             cfg=self.cfg,
             world_model=self.mock_world_model,
             planner=self.mock_planner,
@@ -74,19 +74,29 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         self.coordinator.geo_worker = MagicMock()
         self.coordinator.opt_worker = MagicMock()
 
+    def tearDown(self):
+        self.modules_patcher.stop()
+        # Reload real modules if they were loaded before
+        # This is a bit heavy-handed but ensures safety
+        if "ai_scientist.coordinator" in sys.modules:
+             import ai_scientist.coordinator
+             import importlib
+             importlib.reload(ai_scientist.coordinator)
+
     def test_surrogate_rank_seeds(self):
         # Setup seeds
         seeds = [{"id": 1, "params": {}}, {"id": 2, "params": {}}]
 
         # Setup surrogate predictions
-        pred1 = SurrogatePrediction(
+        # Setup surrogate predictions
+        pred1 = self.SurrogatePrediction(
             expected_value=0.8,
             prob_feasible=0.9,
             predicted_objective=0.5,
             minimize_objective=True,
             metadata=seeds[0],
         )
-        pred2 = SurrogatePrediction(
+        pred2 = self.SurrogatePrediction(
             expected_value=0.2,
             prob_feasible=0.4,
             predicted_objective=0.9,
