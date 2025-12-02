@@ -334,7 +334,7 @@ tests/
 
 ### From `SAS_TODO.md` (Stellarator AI Scientist)
 
-- [ ] **Dataset Tools** `datasets/sampler.py`
+- [x] **Dataset Tools** `datasets/sampler.py`
   - [x] HuggingFace dataset loading with filtering
   - [ ] PCA + GMM for latent space sampling
   - [ ] MCMC posterior sampling

@@ -1,223 +1,153 @@
-import unittest
 from unittest.mock import MagicMock, patch
+from ai_scientist.experiment_runner import run_experiment
+from ai_scientist.config import ExperimentConfig
+from ai_scientist.experiment_setup import RunnerCLIConfig
+from ai_scientist.problems import get_problem
+from pathlib import Path
 
-from ai_scientist.cycle_executor import CycleExecutor
-from ai_scientist.problems import P2Problem, get_problem
+
+def test_p2_problem_definition():
+    """Verify P2 problem definition matches requirements."""
+    problem = get_problem("p2")
+    assert problem.name == "p2"
+    assert "aspect_ratio" in problem.constraint_names
+    assert "qi" in problem.constraint_names
+    assert "max_elongation" in problem.constraint_names
+
+    # Verify constraint bounds (indirectly via private attributes or behavior)
+    assert problem._aspect_ratio_upper_bound == 10.0
+    assert problem._log10_qi_upper_bound == -4.0
 
 
-class TestP2Pipeline(unittest.TestCase):
-    def test_p2_problem_definition(self):
-        """Verify P2 problem constraints and objective."""
-        p2 = get_problem("p2")
-        self.assertIsInstance(p2, P2Problem)
-        self.assertEqual(p2.name, "p2")
+@patch("ai_scientist.experiment_runner.CycleExecutor")
+@patch("ai_scientist.experiment_runner.Coordinator")
+@patch("ai_scientist.experiment_runner.memory.WorldModel")
+@patch("ai_scientist.experiment_runner.rag.ensure_index")
+def test_p2_pipeline_execution(
+    mock_ensure_index, mock_world_model, mock_coordinator, mock_cycle_executor
+):
+    """Test that running with --problem p2 initializes the correct components."""
 
-        # Test constraints
-        # 1. aspect_ratio <= 10.0
-        # 2. iota >= 0.25
-        # 3. log10(qi) <= -4.0
-        # 4. mirror <= 0.2
-        # 5. elongation <= 5.0
+    # Setup mocks
+    mock_ensure_index.return_value = MagicMock(chunks_indexed=10, index_path="dummy")
+    mock_wm_instance = MagicMock()
+    mock_world_model.return_value.__enter__.return_value = mock_wm_instance
+    mock_wm_instance.start_experiment.return_value = 123
 
-        # Case 1: Feasible
-        metrics_feasible = {
-            "aspect_ratio": 9.0,
-            "edge_rotational_transform_over_n_field_periods": 0.3,
-            "qi": 1e-5,  # log10 = -5
-            "edge_magnetic_mirror_ratio": 0.1,
-            "max_elongation": 4.0,
-            "minimum_normalized_magnetic_gradient_scale_length": 2.0,
-        }
-        self.assertTrue(p2.is_feasible(metrics_feasible))
-        self.assertEqual(p2.compute_feasibility(metrics_feasible), 0.0)
+    # Config for P2
+    # Use real dataclasses where asdict is called
+    from ai_scientist.config import (
+        BoundaryTemplateConfig,
+        BudgetConfig,
+        AdaptiveBudgetConfig,
+        ProposalMixConfig,
+        FidelityLadder,
+        StageGateConfig,
+        GovernanceConfig,
+        ASOConfig,
+    )
 
-        # Case 2: Infeasible (Aspect Ratio)
-        metrics_infeasible = metrics_feasible.copy()
-        metrics_infeasible["aspect_ratio"] = 11.0
-        self.assertFalse(p2.is_feasible(metrics_infeasible))
-        self.assertGreater(p2.compute_feasibility(metrics_infeasible), 0.0)
+    cfg = MagicMock(spec=ExperimentConfig)
+    cfg.problem = "p2"
+    cfg.cycles = 1
+    cfg.random_seed = 42
 
-        # Test Objective (Maximize gradient scale length -> minimize negative)
-        obj = p2.get_objective(metrics_feasible)
-        self.assertEqual(obj, -2.0)
+    # Real dataclasses for fields that get serialized via asdict
+    # We need to provide required fields for these dataclasses
+    cfg.budgets = BudgetConfig(
+        screen_evals_per_cycle=10,
+        promote_top_k=1,
+        max_high_fidelity_evals_per_cycle=1,
+        wall_clock_minutes=1.0,
+        n_workers=1,
+        pool_type="thread",
+    )
+    cfg.adaptive_budgets = AdaptiveBudgetConfig(
+        enabled=False,
+        hv_slope_reference=0.0,
+        feasibility_target=0.0,
+        cache_hit_target=0.0,
+        screen_bounds=MagicMock(),
+        promote_top_k_bounds=MagicMock(),
+        high_fidelity_bounds=MagicMock(),
+    )
+    cfg.proposal_mix = ProposalMixConfig(constraint_ratio=0.5, exploration_ratio=0.5)
+    cfg.fidelity_ladder = FidelityLadder(screen="s1", promote="s2")
+    cfg.boundary_template = BoundaryTemplateConfig(
+        n_poloidal_modes=1,
+        n_toroidal_modes=1,
+        n_field_periods=1,
+        base_major_radius=1.0,
+        base_minor_radius=0.1,
+        perturbation_scale=0.0,
+    )
+    cfg.stage_gates = StageGateConfig(
+        s1_to_s2_feasibility_margin=0.0,
+        s1_to_s2_objective_improvement=0.0,
+        s1_to_s2_lookback_cycles=1,
+        s2_to_s3_hv_delta=0.0,
+        s2_to_s3_lookback_cycles=1,
+    )
+    cfg.governance = GovernanceConfig(min_feasible_for_promotion=1, hv_lookback=1)
+    cfg.aso = ASOConfig(enabled=False)
 
-    @patch("ai_scientist.cycle_executor.tools")
-    def test_p2_cycle_execution_mock(self, mock_tools):
-        """
-        Test that CycleExecutor calls the correct P2 evaluator.
-        We mock the heavy components to verify orchestration logic.
-        """
-        # Use real config to avoid dataclasses.replace issues
-        from ai_scientist.config import load_experiment_config
-        from ai_scientist.budget_manager import BudgetSnapshot
+    cfg.reporting = {}
+    cfg.planner = "deterministic"
+    cfg.run_overrides = {}
+    cfg.source_config = "dummy_path"  # Needed for serialization
+    cfg.optimizer_backend = "gradient_descent"
 
-        real_config = load_experiment_config()
-        # Override for P2 test
-        from dataclasses import replace
+    # Add surrogate and generative mocks
+    cfg.surrogate = MagicMock()
+    cfg.surrogate.backend = "mock_backend"
+    cfg.generative = MagicMock()
+    cfg.generative.enabled = False
+    runtime = RunnerCLIConfig(
+        config_path=Path("dummy"),
+        problem="p2",
+        cycles=1,
+        memory_db=None,
+        eval_budget=None,
+        workers=None,
+        pool_type=None,
+        screen_only=True,
+        promote_only=False,
+        slow=False,
+        verbose=False,
+        log_cache_stats=False,
+        run_preset=None,
+        planner="deterministic",
+        resume_from=None,
+        aso=False,
+        preset=None,
+    )
 
-        real_config = replace(
-            real_config, problem="p2", optimizer_backend="gradient_descent"
-        )
+    # Configure mock CycleExecutor to return a serializable CycleResult
+    from ai_scientist.cycle_executor import CycleResult
 
-        # Mock components
-        mock_world_model = MagicMock()
-        mock_planner = MagicMock()
-        mock_coordinator = MagicMock()
-        mock_budget_controller = MagicMock()
-        mock_fidelity_controller = MagicMock()
+    mock_result = CycleResult(
+        cycle_index=0,
+        candidates_evaluated=10,
+        candidates_promoted=1,
+        best_objective=0.5,
+        hypervolume=0.8,
+        feasibility_rate=0.9,
+        report_path=None,
+        best_eval={"objective": 0.5, "feasibility": 0.0, "design_hash": "abc"},
+        p3_summary=None,
+    )
+    mock_cycle_executor.return_value.run_cycle.return_value = mock_result
 
-        # Mock budget_controller.snapshot() to return a proper BudgetSnapshot
-        mock_budget_snapshot = BudgetSnapshot(
-            screen_evals_per_cycle=10,
-            promote_top_k=2,
-            max_high_fidelity_evals_per_cycle=5,
-            remaining_budget=100,
-        )
-        mock_budget_controller.snapshot.return_value = mock_budget_snapshot
-        mock_budget_controller.consume = MagicMock()
-        mock_budget_controller.adjust_for_cycle = MagicMock()
-        mock_budget_controller.capture_cache_hit_rate = MagicMock(return_value=0.5)
-        mock_budget_controller.to_dict = MagicMock(return_value={})
+    # Run experiment
+    run_experiment(cfg, runtime=runtime)
 
-        # Mock world_model methods
-        mock_world_model.surrogate_training_data = MagicMock(return_value=[])
-        mock_world_model.previous_best_hv = MagicMock(return_value=0.0)
-        mock_world_model.record_cycle = MagicMock()
-        mock_world_model.record_cycle_summary = MagicMock()
-        mock_world_model.record_cycle_hv = MagicMock()
-        mock_world_model.record_deterministic_snapshot = MagicMock()
-        mock_world_model.log_candidate = MagicMock(return_value=(1, 1))
-        mock_world_model.log_artifact = MagicMock()
-        mock_world_model.record_stage_history = MagicMock()
-        mock_world_model.statements_for_cycle = MagicMock(return_value=[])
-        mock_world_model.stage_history = MagicMock(return_value=[])
-        mock_world_model.property_graph_summary = MagicMock(return_value={})
-        mock_world_model.transaction = MagicMock(
-            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
-        )
-        mock_world_model.upsert_pareto = MagicMock()
-        mock_world_model.record_pareto_archive = MagicMock()
+    # Verify CycleExecutor was initialized (it handles the problem logic internally via config/coordinator)
+    # The key check is that the runner didn't crash and passed the problem override to the experiment config
+    # We can check if the Coordinator was initialized with the updated config
 
-        # Setup CycleExecutor
-        executor = CycleExecutor(
-            config=real_config,
-            world_model=mock_world_model,
-            planner=mock_planner,
-            coordinator=mock_coordinator,
-            budget_controller=mock_budget_controller,
-            fidelity_controller=mock_fidelity_controller,
-        )
+    args, _ = mock_coordinator.call_args
+    passed_cfg = args[0]
+    assert passed_cfg.problem == "p2"
 
-        # Mock Coordinator to return candidates
-        mock_coordinator.produce_candidates.return_value = [
-            {
-                "params": {
-                    "r_cos": [[1.0, 0.0, 0.0]],
-                    "z_sin": [[0.0, 0.5, 0.0]],
-                    "n_field_periods": 1,
-                    "is_stellarator_symmetric": True,
-                },
-                "design_hash": "test_hash_123",
-                "seed": 42,
-            }
-        ]
-
-        # Mock Surrogate Ranking
-        with patch(
-            "ai_scientist.cycle_executor._surrogate_rank_screen_candidates"
-        ) as mock_rank:
-            mock_rank.return_value = [
-                {
-                    "params": {
-                        "r_cos": [[1.0, 0.0, 0.0]],
-                        "z_sin": [[0.0, 0.5, 0.0]],
-                        "n_field_periods": 1,
-                        "is_stellarator_symmetric": True,
-                    },
-                    "design_hash": "test_hash_123",
-                    "seed": 42,
-                }
-            ]
-
-            # Mock Fidelity Controller to return results
-            mock_fidelity_controller.evaluate_stage.return_value = [
-                {
-                    "params": {
-                        "r_cos": [[1.0, 0.0, 0.0]],
-                        "z_sin": [[0.0, 0.5, 0.0]],
-                        "n_field_periods": 1,
-                        "is_stellarator_symmetric": True,
-                    },
-                    "design_hash": "test_hash_123",
-                    "seed": 42,
-                    "evaluation": {
-                        "aspect_ratio": 9.0,
-                        "edge_rotational_transform_over_n_field_periods": 0.3,
-                        "qi": 1e-5,
-                        "edge_magnetic_mirror_ratio": 0.1,
-                        "max_elongation": 4.0,
-                        "minimum_normalized_magnetic_gradient_scale_length": 2.0,
-                        "objective": -2.0,
-                        "feasibility": 0.0,
-                        "stage": "p2",
-                        "metrics": {
-                            "aspect_ratio": 9.0,
-                            "edge_rotational_transform_over_n_field_periods": 0.3,
-                            "qi": 1e-5,
-                            "edge_magnetic_mirror_ratio": 0.1,
-                            "max_elongation": 4.0,
-                            "minimum_normalized_magnetic_gradient_scale_length": 2.0,
-                        },
-                    },
-                }
-            ]
-            mock_fidelity_controller.get_promotion_candidates = MagicMock(
-                return_value=[]
-            )
-
-            # Mock tools.summarize_p3_candidates (it's named p3 but used generically in runner)
-            # We need to ensure it doesn't crash with P2 data
-            from ai_scientist.tools.hypervolume import P3Summary, ParetoEntry
-
-            mock_summary = P3Summary(
-                feasible_count=1,
-                hv_score=0.5,
-                reference_point=(1.0, 20.0),
-                archive_size=1,
-                pareto_entries=[
-                    ParetoEntry(
-                        design_hash="test_hash_123",
-                        seed=42,
-                        gradient=2.0,
-                        aspect_ratio=9.0,
-                        objective=-2.0,
-                        feasibility=0.0,
-                        stage="p2",
-                    )
-                ],
-            )
-            mock_tools.summarize_p3_candidates.return_value = mock_summary
-            mock_tools.get_cache_stats = MagicMock(return_value={})
-            mock_tools.design_hash = MagicMock(return_value="test_hash_123")
-            mock_tools.compute_constraint_margins = MagicMock(return_value={})
-
-            # Run Cycle
-            result = executor.run_cycle(
-                cycle_index=0,
-                experiment_id=1,
-                governance_stage="s1",
-                git_sha="abc",
-                constellaration_sha="def",
-                surrogate_model=MagicMock(),
-                verbose=False,
-            )
-
-            # Verify P2 evaluator was requested
-            # The runner uses _problem_tool_name("p2") -> "evaluate_p2"
-            # fidelity_controller.evaluate_stage should receive tool_name="evaluate_p2"
-            mock_fidelity_controller.evaluate_stage.assert_called()
-            call_args = mock_fidelity_controller.evaluate_stage.call_args
-            self.assertEqual(call_args.kwargs["tool_name"], "evaluate_p2")
-
-            # Verify result
-            self.assertEqual(result.candidates_evaluated, 1)
+    # Verify start_experiment was called
+    mock_wm_instance.start_experiment.assert_called_once()

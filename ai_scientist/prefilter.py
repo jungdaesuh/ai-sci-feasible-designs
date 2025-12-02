@@ -1,103 +1,117 @@
-from typing import Any, Dict, List, Optional
-
+from typing import List, Dict, Optional, Any
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier  # type: ignore
 
 
 class FeasibilityPrefilter:
-    """
-    Quick classifier to reject obviously infeasible candidates before expensive physics evaluation.
-    """
+    """Quick classifier to reject obviously infeasible candidates."""
 
     def __init__(self):
         self.model: Optional[RandomForestClassifier] = None
-        self.is_trained = False
+        self.feature_keys = [
+            "aspect_ratio",
+            "edge_rotational_transform_over_n_field_periods",
+            "edge_magnetic_mirror_ratio",
+            "max_elongation",
+            # Add other cheap geometric features if available before full physics eval
+            # For now, we assume these are available or computed cheaply
+        ]
+
+    @property
+    def is_trained(self) -> bool:
+        """Check if the model has been trained."""
+        return self.model is not None
 
     def train(self, X: np.ndarray, y_feasible: np.ndarray):
-        """
-        Train the prefilter on historical evaluations.
+        """Train on historical evaluations.
 
         Args:
-            X: Array of feature vectors (N, D).
-            y_feasible: Boolean array of feasibility labels (N,).
+            X: Feature matrix (n_samples, n_features)
+            y_feasible: Boolean array of feasibility labels
         """
-        if len(X) == 0:
-            return
-
-        # Handle case where all are feasible or all are infeasible
-        if len(np.unique(y_feasible)) < 2:
-            # Cannot train a classifier with only one class
-            # We mark as not trained so we default to passing everything
-            self.is_trained = False
+        if len(X) < 10 or len(np.unique(y_feasible)) < 2:
+            # Not enough data or only one class
             return
 
         self.model = RandomForestClassifier(n_estimators=100, random_state=42)
         self.model.fit(X, y_feasible)
-        self.is_trained = True
 
     def predict_feasible(self, X: np.ndarray, threshold: float = 0.5) -> np.ndarray:
-        """
-        Return boolean mask of likely-feasible candidates.
-
-        Args:
-            X: Array of feature vectors (N, D).
-            threshold: Probability threshold for feasibility.
-
-        Returns:
-            Boolean array (N,) where True means likely feasible.
-        """
-        if not self.is_trained or self.model is None:
+        """Return boolean mask of likely-feasible candidates."""
+        if self.model is None:
             return np.ones(len(X), dtype=bool)  # Pass all if not trained
 
-        # Predict probability of class 1 (feasible)
-        probs = self.model.predict_proba(X)[:, 1]
-        return probs >= threshold
+        try:
+            probs = self.model.predict_proba(X)[:, 1]
+            return probs >= threshold
+        except Exception as e:
+            print(f"[Prefilter] Prediction failed: {e}. Passing all.")
+            return np.ones(len(X), dtype=bool)
 
     def filter_candidates(
         self, candidates: List[Dict[str, Any]], threshold: float = 0.5
     ) -> List[Dict[str, Any]]:
-        """
-        Filter a list of candidate dictionaries, keeping only likely-feasible ones.
-        Assumes candidates have 'params' that can be flattened into features.
+        """Filter candidates, keeping only likely-feasible ones.
 
         Args:
-            candidates: List of candidate dicts.
-            threshold: Probability threshold.
+            candidates: List of candidate dictionaries. Must contain feature keys.
+            threshold: Probability threshold for keeping a candidate.
 
         Returns:
             Filtered list of candidates.
         """
-        if not self.is_trained or not candidates:
+        if self.model is None or not candidates:
             return candidates
 
-        # Extract features from candidates
-        # We assume a simple flattening strategy for now, or use specific keys
-        # This needs to match how 'X' was constructed during training
-        # For now, let's assume we extract 'r_cos' and 'z_sin' and flatten them
-        X = self._extract_features(candidates)
+        # Extract features
+        # We need to handle missing keys gracefully or skip filtering
+        try:
+            X = []
+            valid_indices = []
+            for i, cand in enumerate(candidates):
+                # Check if we have the features (e.g. from Geometer or previous steps)
+                # If features are missing (e.g. pure params), we can't filter yet.
+                # Assuming candidates here might have some metrics if they passed Geometer?
+                # Or if this is used after a cheap evaluation step.
+                # If candidates are just params, we can't use this unless we compute features.
+                # For now, let's assume candidates have these keys (e.g. from a cheap proxy).
+                # If not, we skip filtering for that candidate (or all).
 
-        mask = self.predict_feasible(X, threshold)
+                # Actually, Geometer computes some of these.
+                row = []
+                has_all = True
+                for key in self.feature_keys:
+                    if key not in cand:
+                        has_all = False
+                        break
+                    row.append(cand[key])
 
-        # Return only candidates where mask is True
-        return [c for c, m in zip(candidates, mask) if m]
+                if has_all:
+                    X.append(row)
+                    valid_indices.append(i)
 
-    def _extract_features(self, candidates: List[Dict[str, Any]]) -> np.ndarray:
-        """
-        Helper to extract feature matrix X from candidates.
-        """
-        features = []
-        for cand in candidates:
-            # Try to get params from 'params' key or the dict itself
-            params = cand.get("params", cand)
+            if not X:
+                return candidates
 
-            # Extract R and Z coefficients
-            # We flatten them into a single vector
-            # Handle both list and numpy array inputs
-            r_cos = np.array(params.get("r_cos", [])).flatten()
-            z_sin = np.array(params.get("z_sin", [])).flatten()
+            X_arr = np.array(X)
+            mask = self.predict_feasible(X_arr, threshold)
 
-            # Concatenate
-            feat = np.concatenate([r_cos, z_sin])
-            features.append(feat)
+            # Reconstruct list
+            kept_candidates = []
+            # Candidates that didn't have features are kept (conservative)
+            # Candidates that had features are kept if mask is True
 
-        return np.array(features)
+            mask_idx = 0
+            for i in range(len(candidates)):
+                if i in valid_indices:
+                    if mask[mask_idx]:
+                        kept_candidates.append(candidates[i])
+                    mask_idx += 1
+                else:
+                    kept_candidates.append(candidates[i])
+
+            return kept_candidates
+
+        except Exception as e:
+            print(f"[Prefilter] Filtering failed: {e}. Returning original list.")
+            return candidates
