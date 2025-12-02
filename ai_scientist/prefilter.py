@@ -10,11 +10,7 @@ class FeasibilityPrefilter:
         self.model: Optional[RandomForestClassifier] = None
         self.feature_keys = [
             "aspect_ratio",
-            "edge_rotational_transform_over_n_field_periods",
-            "edge_magnetic_mirror_ratio",
             "max_elongation",
-            # Add other cheap geometric features if available before full physics eval
-            # For now, we assume these are available or computed cheaply
         ]
 
     @property

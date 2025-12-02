@@ -42,7 +42,11 @@ def test_load_dataset_p1_filter(mock_load_dataset):
     filter_func = mock_ds.filter.call_args[0][0]
 
     # Valid P1 example
-    valid_ex = {"aspect_ratio": 4.05, "average_triangularity": -0.65}
+    valid_ex = {
+        "aspect_ratio": 4.05,
+        "average_triangularity": -0.65,
+        "edge_rotational_transform_over_n_field_periods": 0.35,
+    }
     assert filter_func(valid_ex) is True
 
     # Invalid aspect ratio

@@ -28,6 +28,8 @@ def load_constellaration_dataset(
                     and "average_triangularity" in ex
                     and abs(ex["aspect_ratio"] - 4.0) < 0.1
                     and abs(ex["average_triangularity"] + 0.6) < 0.1
+                    and "edge_rotational_transform_over_n_field_periods" in ex
+                    and ex["edge_rotational_transform_over_n_field_periods"] >= 0.3
                 )
             except (KeyError, TypeError):
                 return False

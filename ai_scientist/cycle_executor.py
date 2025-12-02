@@ -46,6 +46,7 @@ from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration import forward_model
 from orchestration import adaptation as adaptation_helpers
 from ai_scientist.prefilter import FeasibilityPrefilter
+from ai_scientist.optim import geometry
 
 # Constants
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -506,6 +507,45 @@ class CycleExecutor:
 
             # Apply Feasibility Prefilter
             if self.prefilter.is_trained:
+                # Compute geometric features for prefilter
+                try:
+                    import torch
+
+                    r_cos_list = []
+                    z_sin_list = []
+                    nfp_list = []
+                    indices_to_compute = []
+
+                    for i, cand in enumerate(candidate_pool):
+                        # Only compute if not already present
+                        if "aspect_ratio" not in cand or "max_elongation" not in cand:
+                            p = cand["params"]
+                            if "r_cos" in p and "z_sin" in p:
+                                r_cos_list.append(p["r_cos"])
+                                z_sin_list.append(p["z_sin"])
+                                nfp_list.append(p.get("n_field_periods", 1))
+                                indices_to_compute.append(i)
+
+                    if indices_to_compute:
+                        # Convert to tensors for geometry module
+                        r_cos_t = torch.tensor(r_cos_list, dtype=torch.float32)
+                        z_sin_t = torch.tensor(z_sin_list, dtype=torch.float32)
+                        nfp_t = torch.tensor(nfp_list, dtype=torch.float32)
+
+                        ar_batch = geometry.aspect_ratio(r_cos_t, z_sin_t, nfp_t)
+                        elo_batch = geometry.elongation(r_cos_t, z_sin_t, nfp_t)
+
+                        for k, idx in enumerate(indices_to_compute):
+                            candidate_pool[idx]["aspect_ratio"] = float(
+                                ar_batch[k].item()
+                            )
+                            candidate_pool[idx]["max_elongation"] = float(
+                                elo_batch[k].item()
+                            )
+                except Exception as e:
+                    if verbose:
+                        print(f"[runner] Failed to compute prefilter features: {e}")
+
                 original_count = len(candidate_pool)
                 candidate_pool = self.prefilter.filter_candidates(candidate_pool)
                 if verbose:
