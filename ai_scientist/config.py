@@ -195,6 +195,15 @@ class GenerativeConfig:
     epochs: int = 100
     kl_weight: float = 0.001
 
+    # StellarForge / Paper Specs (Padidar et al.)
+    checkpoint_path: Path | None = None
+    device: str = "cpu"  # "cuda" or "mps"
+    hidden_dim: int = 2048
+    n_layers: int = 4
+    pca_components: int = 50
+    batch_size: int = 4096
+    diffusion_timesteps: int = 200
+
 
 @dataclass(frozen=True)
 class SurrogateConfig:
@@ -604,6 +613,13 @@ def _generative_config_from_dict(
     data: Mapping[str, Any] | None,
 ) -> GenerativeConfig:
     config = data or {}
+
+    # Handle checkpoint_path: Path | None (with empty string edge case)
+    checkpoint_raw = config.get("checkpoint_path")
+    checkpoint_path = (
+        Path(checkpoint_raw) if checkpoint_raw and str(checkpoint_raw).strip() else None
+    )
+
     return GenerativeConfig(
         enabled=bool(config.get("enabled", False)),
         backend=str(config.get("backend", "vae")),
@@ -611,6 +627,14 @@ def _generative_config_from_dict(
         learning_rate=float(config.get("learning_rate", 1e-3)),
         epochs=int(config.get("epochs", 100)),
         kl_weight=float(config.get("kl_weight", 0.001)),
+        # StellarForge / Paper Specs (Padidar et al.)
+        checkpoint_path=checkpoint_path,
+        device=str(config.get("device", "cpu")),
+        hidden_dim=int(config.get("hidden_dim", 2048)),
+        n_layers=int(config.get("n_layers", 4)),
+        pca_components=int(config.get("pca_components", 50)),
+        batch_size=int(config.get("batch_size", 4096)),
+        diffusion_timesteps=int(config.get("diffusion_timesteps", 200)),
     )
 
 
