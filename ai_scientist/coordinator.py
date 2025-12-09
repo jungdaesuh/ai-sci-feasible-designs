@@ -32,7 +32,13 @@ from ai_scientist.planner import (
     PlanningAgent,
 )
 from ai_scientist.problems import get_problem
-from ai_scientist.workers import ExplorationWorker, GeometerWorker, OptimizationWorker
+from ai_scientist.workers import (
+    ExplorationWorker,
+    GeometerWorker,
+    OptimizationWorker,
+    PreRelaxWorker,
+    RLRefinementWorker,
+)
 
 
 class TrajectoryState(pydantic.BaseModel):
@@ -77,10 +83,14 @@ class Coordinator:
         self.surrogate = surrogate
         self.generative_model = generative_model
 
-        # Initialize Workers
         self.opt_worker = OptimizationWorker(cfg, self.surrogate)
         self.explore_worker = ExplorationWorker(cfg, self.generative_model)
         self.geo_worker = GeometerWorker(cfg)
+        self.rl_worker = RLRefinementWorker(cfg, self.surrogate)
+        self.prerelax_worker = PreRelaxWorker(
+            cfg,
+            surrogate_schema=self.surrogate._schema if self.surrogate else None,
+        )
 
         # State
         self.current_strategy = "HYBRID"  # Default to doing both
@@ -136,32 +146,108 @@ class Coordinator:
             candidates = res.get("candidates", [])
 
         elif strategy == "EXPLOIT":
-            # Pure exploitation: Take best previous, or generates seeds and heavily optimizes
-            # For now, we treat "EXPLOIT" as "Generate seeds -> Optimize"
+            # ═══════════════════════════════════════════════════════════
+            # QUAD-HYBRID PIPELINE (EXPLOIT mode)
+            # ═══════════════════════════════════════════════════════════
+
+            # STAGE 1: Dream - Generate N seeds
             explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
             seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
+            print(f"[Coordinator] Dreamer generated {len(seeds)} seeds")
 
-            # Filter seeds with Geometer
-            geo_ctx = {"candidates": seeds}
+            # STAGE 2: Pre-relax - Fast geometric smoothing
+            prerelax_ctx = {
+                "candidates": seeds,
+                "schema": self.surrogate._schema if self.surrogate else None,
+            }
+            prerelaxed = self.prerelax_worker.run(prerelax_ctx).get("candidates", [])
+            print(f"[Coordinator] Pre-relaxer smoothed {len(prerelaxed)} candidates")
+
+            # STAGE 3: Geometer - Validate geometric constraints
+            geo_ctx = {"candidates": prerelaxed}
             valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
+            print(
+                f"[Coordinator] Geometer passed {len(valid_seeds)}/{len(prerelaxed)} candidates"
+            )
 
-            opt_ctx = {"initial_guesses": valid_seeds}
+            # STAGE 4: Surrogate Rank - Select top-K
+            if valid_seeds and self.surrogate and self.surrogate._trained:
+                ranked_seeds = self._surrogate_rank_seeds(valid_seeds, cycle)
+                k = min(100, len(ranked_seeds))
+                top_k = ranked_seeds[:k]
+                print(
+                    f"[Coordinator] Surrogate selected top-{k} candidates for RL refinement"
+                )
+            else:
+                top_k = valid_seeds[:100]
+
+            # STAGE 5: RL Refine - Micro-surgery on top-K only
+            rl_ctx = {
+                "candidates": top_k,
+                "target_metrics": explore_ctx.get("target_metrics"),
+            }
+            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+
+            # STAGE 6: Optimize - Final gradient descent
+            opt_ctx = {"initial_guesses": refined}
             res = self.opt_worker.run(opt_ctx)
             candidates = res.get("candidates", [])
+            print(
+                f"[Coordinator] Quad-Hybrid pipeline complete: {len(candidates)} final candidates"
+            )
 
         else:  # HYBRID
-            # Standard workflow: Generate seeds -> Optimize
-            # But maybe we mix unoptimized seeds?
+            # ═══════════════════════════════════════════════════════════
+            # QUAD-HYBRID PIPELINE (HYBRID mode - standard)
+            # ═══════════════════════════════════════════════════════════
+
+            # STAGE 1: Dream - Generate N seeds
             explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
             seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
+            print(f"[Coordinator] Dreamer generated {len(seeds)} seeds")
 
-            # Filter seeds with Geometer
-            geo_ctx = {"candidates": seeds}
+            # STAGE 2: Pre-relax - Fast geometric smoothing
+            prerelax_ctx = {
+                "candidates": seeds,
+                "schema": self.surrogate._schema if self.surrogate else None,
+            }
+            prerelaxed = self.prerelax_worker.run(prerelax_ctx).get("candidates", [])
+            print(f"[Coordinator] Pre-relaxer smoothed {len(prerelaxed)} candidates")
+
+            # STAGE 3: Geometer - Validate geometric constraints
+            geo_ctx = {"candidates": prerelaxed}
             valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
+            print(
+                f"[Coordinator] Geometer passed {len(valid_seeds)}/{len(prerelaxed)} candidates"
+            )
 
-            opt_ctx = {"initial_guesses": valid_seeds}
+            # STAGE 4: Surrogate Rank - Select top-K
+            if valid_seeds and self.surrogate and self.surrogate._trained:
+                ranked_seeds = self._surrogate_rank_seeds(valid_seeds, cycle)
+                k = min(100, len(ranked_seeds))
+                top_k = ranked_seeds[:k]
+                print(
+                    f"[Coordinator] Surrogate selected top-{k} candidates for RL refinement"
+                )
+            else:
+                top_k = valid_seeds[:100]
+
+            # STAGE 5: RL Refine - Micro-surgery on top-K only
+            rl_ctx = {
+                "candidates": top_k,
+                "target_metrics": explore_ctx.get("target_metrics"),
+            }
+            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+
+            # STAGE 6: Optimize - Final gradient descent
+            opt_ctx = {"initial_guesses": refined}
             res = self.opt_worker.run(opt_ctx)
             candidates = res.get("candidates", [])
+            print(
+                f"[Coordinator] Quad-Hybrid pipeline complete: {len(candidates)} final candidates"
+            )
 
         return candidates
 
