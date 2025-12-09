@@ -355,8 +355,8 @@ Run these tasks in order. Each task depends on the previous:
 1. ✅ Task 1: Config loading (unblocks checkpoint loading)
 2. ✅ Task 2: experiment_setup (unblocks correct model init)
 3. ✅ Task 2.5: NFP propagation fix (Opus 4.5 - prevents downstream failures)
-4. ✅ Task 3A: Basic PreRelaxWorker (creates the new worker)
-5. ✅ Task 3B: Batched processing (10× speedup for large batches)
+4. ✅ Task 3A: Basic PreRelaxWorker (creates the new worker)  *← DONE*
+5. [ ] Task 3B: Batched processing (10× speedup for large batches)
 6. ✅ Task 4: Coordinator wiring (integrates everything)
 7. ✅ Verification (confirms it works)
 8. 🟡 Task 5: Offline training (optional, for production)

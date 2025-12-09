@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
+from ai_scientist.optim.prerelax import prerelax_boundary
 from ai_scientist.optim.samplers import (
     NearAxisSampler,
     OfflineSeedSampler,
@@ -272,6 +276,175 @@ class GeometerWorker(Worker):
             f"[GeometerWorker] Retained {len(valid_candidates)}/{len(candidates)} candidates."
         )
         return {"candidates": valid_candidates, "status": "filtered"}
+
+
+class PreRelaxWorker(Worker):
+    """Worker for Stage 2: Geometric Pre-relaxation (The Filter).
+
+    Applies fast gradient-based smoothing to Dreamer candidates.
+    Filters geometrically invalid candidates BEFORE expensive Surrogate/RL.
+
+    Expected impact: 30-40% reduction in downstream failures.
+    """
+
+    def __init__(
+        self,
+        cfg: ai_config.ExperimentConfig,
+        surrogate_schema: Optional[tools.FlattenSchema] = None,
+    ):
+        self.cfg = cfg
+        self.surrogate_schema = surrogate_schema
+
+        # Pre-relaxation settings (hardcoded for now)
+        self.steps = 50
+        self.lr = 0.01
+        self.target_ar = 8.0
+        self.energy_threshold = 1.0  # Reject candidates with energy > threshold
+        self.max_workers = 16
+        self.device = "cpu"
+
+    def _normalize_params(
+        self,
+        params: Dict[str, Any],
+        schema: Optional[tools.FlattenSchema],
+        nfp: int,
+    ) -> Dict[str, Any]:
+        """Normalize params to match Surrogate's expected schema dimensions.
+
+        This prevents shape mismatches when the Pre-relaxer outputs different
+        (mpol, ntor) dimensions than the Surrogate was trained on.
+        """
+        if schema is None:
+            return params
+
+        target_h = schema.mpol + 1
+        target_w = 2 * schema.ntor + 1
+
+        r_src = np.asarray(params["r_cos"], dtype=np.float32)
+        z_src = np.asarray(params["z_sin"], dtype=np.float32)
+
+        r_pad = np.zeros((target_h, target_w), dtype=np.float32)
+        z_pad = np.zeros((target_h, target_w), dtype=np.float32)
+
+        h_min = min(r_pad.shape[0], r_src.shape[0])
+        w_min = min(r_pad.shape[1], r_src.shape[1])
+
+        r_pad[:h_min, :w_min] = r_src[:h_min, :w_min]
+        z_pad[:h_min, :w_min] = z_src[:h_min, :w_min]
+
+        normalized = dict(params)
+        normalized["r_cos"] = r_pad.tolist()
+        normalized["z_sin"] = z_pad.tolist()
+        normalized["n_field_periods"] = int(nfp)
+        normalized["is_stellarator_symmetric"] = bool(
+            params.get("is_stellarator_symmetric", True)
+        )
+        return normalized
+
+    def _relax_single(
+        self,
+        candidate: Dict[str, Any],
+        nfp_default: int,
+        schema: Optional[tools.FlattenSchema],
+    ) -> Optional[Dict[str, Any]]:
+        """Relax a single candidate. Returns None if it fails validation."""
+        params = candidate.get("params")
+        if not params:
+            return None
+
+        # CRITICAL: Extract NFP from params (fixes hardcoded nfp=3 bug)
+        nfp = int(params.get("n_field_periods", params.get("nfp", nfp_default)))
+
+        try:
+            # Normalize to match surrogate schema
+            normalized = self._normalize_params(params, schema, nfp)
+
+            # Run geometric pre-relaxation with explicit NFP
+            optimized, final_energy = prerelax_boundary(
+                boundary_params=normalized,
+                steps=self.steps,
+                lr=self.lr,
+                target_ar=self.target_ar,
+                nfp=nfp,  # Pass NFP explicitly (fixes hardcoded bug)
+                device=self.device,
+            )
+
+            # Restore NFP in output (ensures downstream stages have correct value)
+            optimized["n_field_periods"] = nfp
+
+            # Reject high-energy (geometrically bad) candidates
+            if final_energy > self.energy_threshold:
+                return None
+
+            # Create new candidate (no aliasing - .copy() is safe)
+            new_cand = candidate.copy()
+            new_cand["params"] = optimized
+            new_cand["source"] = "prerelaxed"
+            new_cand["geometric_energy"] = float(final_energy)
+            return new_cand
+
+        except RuntimeError as exc:
+            # GPU OOM or tensor operation failure
+            logging.warning(f"[PreRelaxWorker] GPU/tensor error: {exc}")
+            return None
+        except ValueError as exc:
+            # Shape mismatch or invalid input
+            logging.warning(f"[PreRelaxWorker] Shape/value error: {exc}")
+            return None
+        except Exception as exc:
+            # Catch-all for unexpected errors (log at error level)
+            logging.error(f"[PreRelaxWorker] Unexpected error: {exc}")
+            return None
+
+    def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Apply geometric pre-relaxation to candidates.
+
+        Context keys:
+            candidates: List[Dict[str, Any]] - Candidates to pre-relax.
+            schema: Optional[FlattenSchema] - Override surrogate schema.
+
+        Returns:
+            Dict with:
+                - candidates: List[Dict[str, Any]] - Pre-relaxed, filtered candidates.
+                - status: str
+        """
+        candidates = context.get("candidates", [])
+        if not candidates:
+            return {"candidates": [], "status": "empty"}
+
+        # Thread-safe: use local schema variable (don't mutate self during run)
+        schema = context.get("schema") or self.surrogate_schema
+
+        nfp_default = self.cfg.boundary_template.n_field_periods
+
+        print(f"[PreRelaxWorker] Pre-relaxing {len(candidates)} candidates...")
+
+        # Parallel execution using ThreadPoolExecutor
+        # ThreadPool is appropriate for CPU-bound gradient descent (GIL released by PyTorch)
+        relaxed_candidates: List[Dict[str, Any]] = []
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [
+                executor.submit(self._relax_single, c, nfp_default, schema)
+                for c in candidates
+            ]
+            for future in futures:
+                result = future.result()
+                if result is not None:
+                    relaxed_candidates.append(result)
+
+        survived = len(relaxed_candidates)
+        rejected = len(candidates) - survived
+        avg_energy = sum(
+            c.get("geometric_energy", 0) for c in relaxed_candidates
+        ) / max(1, survived)
+        print(
+            f"[PreRelaxWorker] {survived}/{len(candidates)} survived "
+            f"({rejected} rejected, avg energy: {avg_energy:.3f})"
+        )
+
+        return {"candidates": relaxed_candidates, "status": "prerelaxed"}
 
 
 class RLRefinementWorker(Worker):
