@@ -301,14 +301,19 @@ class SurrogateBundle(BaseSurrogate):
 
             # MHD: vacuum_well (>=0 is good). We often want to predict violation or raw value.
             # Let's predict the raw value.
-            aux_targets["mhd"].append(float(m_payload.get("vacuum_well", -1.0)))
+            vacuum_well = m_payload.get("vacuum_well")
+            aux_targets["mhd"].append(
+                float(vacuum_well) if vacuum_well is not None else -1.0
+            )
 
             # QI: qi (lower is better)
-            aux_targets["qi"].append(float(m_payload.get("qi", 1.0)))
+            qi_val = m_payload.get("qi")
+            aux_targets["qi"].append(float(qi_val) if qi_val is not None else 1.0)
 
             # Elongation: max_elongation (lower is better)
+            elongation = m_payload.get("max_elongation")
             aux_targets["elongation"].append(
-                float(m_payload.get("max_elongation", 10.0))
+                float(elongation) if elongation is not None else 10.0
             )
 
         aux_target_arrays = {
@@ -396,7 +401,19 @@ class SurrogateBundle(BaseSurrogate):
 
         def _predict() -> tuple[np.ndarray, dict[str, np.ndarray]]:
             scaled = self._scaler.transform(feature_matrix)
-            prob = self._classifier.predict_proba(scaled)[:, 1]
+            proba = self._classifier.predict_proba(scaled)
+            # Handle single-class case: if only 1 class, probability of class 1 is 0 or 1
+            if proba.shape[1] == 1:
+                # Single class: if it's class 0, prob of feasibility is 0; if class 1, it's 1
+                if hasattr(self._classifier, "classes_"):
+                    if self._classifier.classes_[0] == 1:
+                        prob = proba[:, 0]
+                    else:
+                        prob = np.zeros(proba.shape[0])
+                else:
+                    prob = np.zeros(proba.shape[0])
+            else:
+                prob = proba[:, 1]
             preds = {}
             for name, reg in self._regressors.items():
                 preds[name] = reg.predict(scaled)
