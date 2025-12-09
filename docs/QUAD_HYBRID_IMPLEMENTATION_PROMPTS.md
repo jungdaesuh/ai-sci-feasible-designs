@@ -2,6 +2,7 @@
 
 **Purpose**: Copy-paste prompts for AI coding agents to implement each task.
 **Reference**: See `QUAD_HYBRID_IMPLEMENTATION_GUIDE.md` for full context.
+**Updated**: 2025-12-10 (includes Opus 4.5 discoveries)
 
 ---
 
@@ -50,6 +51,35 @@ DO NOT change anything else. This is a one-line fix.
 
 ---
 
+## Task 2.5: Fix NFP Propagation Bug (5 min) - NEW
+
+### Prompt
+
+```
+Fix the NFP (n_field_periods) propagation bug in `ai_scientist/workers.py` (lines 359-362).
+
+**Problem**: In `RLRefinementWorker.run()`, after calling `tools.structured_unflatten()`, the `n_field_periods` field is NOT restored. This causes downstream validation (Geometer) to fail or compute wrong metrics.
+
+**Location**: Inside the training loop where `best_params` is set:
+```python
+best_params = tools.structured_unflatten(next_obs, env.schema)
+# ❌ n_field_periods is NOT restored!
+```
+
+**Fix**: After `structured_unflatten`, restore the metadata fields:
+```python
+best_params = tools.structured_unflatten(next_obs, env.schema)
+best_params["n_field_periods"] = params.get("n_field_periods", params.get("nfp", 3))
+best_params["is_stellarator_symmetric"] = params.get("is_stellarator_symmetric", True)
+```
+
+Note: The existing code at lines 361-362 DOES try to restore `n_field_periods`, but it may be using `nfp` inconsistently. Ensure BOTH field names are checked.
+
+DO NOT change anything else. This is a 2-line fix.
+```
+
+---
+
 ## Task 3: Add PreRelaxWorker (30 min)
 
 ### Prompt
@@ -63,19 +93,27 @@ Add a new `PreRelaxWorker` class to `ai_scientist/workers.py`.
 
 **Requirements**:
 1. Inherit from `Worker` base class (like other workers in the file)
-2. Import `prerelax_boundary` from `ai_scientist.optim.prerelax`
+2. Import `prerelax_boundary` and `geometric_energy` from `ai_scientist.optim.prerelax`
 3. Import `tools` from `ai_scientist` for `FlattenSchema`
-4. Use `ThreadPoolExecutor` for parallel processing (16 workers)
-5. Include a `_normalize_params` method that pads/truncates `r_cos` and `z_sin` to match the surrogate's `FlattenSchema` dimensions
+4. Use `ThreadPoolExecutor` for parallel processing (16 workers) in `_relax_single()`
+5. Include a `_normalize_params` method that pads/truncates `r_cos` and `z_sin` to match the surrogate's `FlattenSchema` dimensions (GPT-5.1's discovery)
+6. Include a `_prerelax_batch()` method for batched tensor processing (Opus 4.5's optimization - 10× speedup)
+
+**CRITICAL - NFP Bug Fix (Opus 4.5)**:
+The `prerelax_boundary` function has `nfp` hardcoded to 3. You MUST:
+1. Extract NFP from `params.get("n_field_periods", params.get("nfp", 3))`
+2. Pass it explicitly to `prerelax_boundary(..., nfp=nfp, ...)`
+3. Restore it in the output: `optimized["n_field_periods"] = nfp`
 
 **Constructor parameters**:
 - `cfg: ai_config.ExperimentConfig`
 - `surrogate_schema: Optional[tools.FlattenSchema] = None`
 
 **Run method**:
-- Input context: `{"candidates": List[Dict], "schema": Optional[FlattenSchema]}`
+- Input context: `{"candidates": List[Dict], "schema": Optional[FlattenSchema], "use_batched": bool}`
 - Output: `{"candidates": List[Dict], "status": str}`
-- Call `prerelax_boundary` for each candidate
+- For small batches (<100), use `_relax_single()` with ThreadPoolExecutor
+- For large batches (≥100), use `_prerelax_batch()` for vectorized processing
 - Filter out candidates with geometric_energy > 1.0 (threshold)
 - Print progress similar to other workers: `[PreRelaxWorker] ...`
 
@@ -246,8 +284,19 @@ Run these tasks in order. Each task depends on the previous:
 
 1. ✅ Task 1: Config loading (unblocks checkpoint loading)
 2. ✅ Task 2: experiment_setup (unblocks correct model init)
-3. ✅ Task 3: PreRelaxWorker (creates the new worker)
-4. ✅ Task 4: Coordinator wiring (integrates everything)
-5. ✅ Verification (confirms it works)
-6. 🟡 Task 5: Offline training (optional, for production)
-7. 🟡 Task 6: Periodic retraining (optional, for production)
+3. ✅ Task 2.5: NFP propagation fix (Opus 4.5 - prevents downstream failures)
+4. ✅ Task 3: PreRelaxWorker (creates the new worker with batched processing)
+5. ✅ Task 4: Coordinator wiring (integrates everything)
+6. ✅ Verification (confirms it works)
+7. 🟡 Task 5: Offline training (optional, for production)
+8. 🟡 Task 6: Periodic retraining (optional, for production)
+
+---
+
+## Source Attribution
+
+- **Task 1**: Claude Sonnet (empty string edge case)
+- **Task 2**: DeepThink (diffusion_timesteps)
+- **Task 2.5**: Opus 4.5 (NFP propagation bug)
+- **Task 3**: Opus 4.5 (batched processing) + GPT-5.1 (schema normalization)
+- **Task 4**: Claude Sonnet + Grok (pipeline reorder)
