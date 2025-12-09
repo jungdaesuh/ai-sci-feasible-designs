@@ -72,3 +72,80 @@ def test_stellarator_diffusion_shapes():
     out = model(x, t, metrics)
 
     assert out.shape == x.shape
+
+
+def test_diffusion_fine_tune_on_elites():
+    """Test fine_tune_on_elites preserves PCA and normalization."""
+    from ai_scientist import test_helpers
+
+    # 1. Create initial training data
+    candidates = []
+    for i in range(5):
+        params = test_helpers.base_params()
+        params["r_cos"][0][2] += i * 0.1
+
+        metrics = test_helpers.dummy_metrics_with(
+            aspect_ratio=4.0 + i * 0.1,
+            max_elongation=1.5 + i * 0.1,
+            minimum_normalized_magnetic_gradient_scale_length=20.0 + i,
+            edge_rotational_transform_over_n_field_periods=0.4,
+        )
+
+        candidates.append(
+            {"params": params, "metrics": metrics, "design_hash": f"hash_{i}"}
+        )
+
+    # 2. Initialize and train model
+    model = generative.DiffusionDesignModel(
+        min_samples=2,
+        learning_rate=1e-3,
+        epochs=2,
+        batch_size=2,
+        timesteps=10,
+        device="cpu",
+    )
+
+    model.fit(candidates)
+    assert model._trained
+
+    # Store original PCA and normalization
+    original_pca = model.pca
+    original_m_mean = model.m_mean.clone()
+    original_m_std = model.m_std.clone()
+
+    # 3. Create elite candidates (new data with slightly different metrics)
+    elites = []
+    for i in range(3):
+        params = test_helpers.base_params()
+        params["r_cos"][0][3] += i * 0.2  # Different modification
+
+        metrics = test_helpers.dummy_metrics_with(
+            aspect_ratio=5.0 + i * 0.1,  # Different range
+            max_elongation=1.8 + i * 0.1,
+            minimum_normalized_magnetic_gradient_scale_length=25.0 + i,
+            edge_rotational_transform_over_n_field_periods=0.5,
+        )
+
+        elites.append(
+            {"params": params, "metrics": metrics, "design_hash": f"elite_{i}"}
+        )
+
+    # 4. Fine-tune on elites
+    model.fine_tune_on_elites(elites, epochs=2)
+
+    # 5. Verify PCA and normalization are preserved (same object/values)
+    assert model.pca is original_pca  # Same PCA object
+    assert torch.allclose(model.m_mean, original_m_mean)  # Same normalization
+    assert torch.allclose(model.m_std, original_m_std)
+
+    # 6. Verify model still works
+    target_metrics = {
+        "aspect_ratio": 5.0,
+        "minimum_normalized_magnetic_gradient_scale_length": 25.0,
+        "max_elongation": 1.8,
+        "edge_rotational_transform_over_n_field_periods": 0.5,
+    }
+
+    generated = model.sample(n_samples=1, target_metrics=target_metrics, seed=42)
+    assert len(generated) == 1
+    assert "params" in generated[0]

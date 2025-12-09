@@ -331,11 +331,27 @@ class Coordinator:
             f"[Coordinator] Periodic retraining triggered (cycle {cycle}, reason: {reason})"
         )
 
-        # Collect elite candidates (top N by objective, assumed lower is better)
-        # Sort by any available score metric
+        # Collect elite candidates (top N by score)
+        # Sort by any available score metric with fallback chain
         elites = []
         for cand in candidates:
-            score = cand.get("rl_score", cand.get("surrogate_score", 0.0))
+            # Fallback chain: rl_score -> surrogate_score -> objective (negated)
+            # -> geometric_energy (negated, lower is better)
+            score = cand.get("rl_score")
+            if score is None:
+                score = cand.get("surrogate_score")
+            if score is None:
+                # For objective, lower is better so negate for sorting
+                obj = cand.get("objective")
+                if obj is not None:
+                    score = -float(obj)
+            if score is None:
+                # For geometric_energy, lower is better so negate
+                energy = cand.get("geometric_energy")
+                if energy is not None:
+                    score = -float(energy)
+            if score is None:
+                score = 0.0
             elites.append((score, cand))
 
         # Sort by score (higher is better for RL/surrogate scores)
@@ -349,16 +365,23 @@ class Coordinator:
             )
             return
 
-        # 1. Retrain Generative Model (if available and supports fine-tuning)
+        # 1. Fine-tune Generative Model (if available and supports fine-tuning)
         if self.generative_model is not None:
             try:
-                # DiffusionDesignModel.fit() can be used for fine-tuning
-                if hasattr(self.generative_model, "fit"):
+                # Use fine_tune_on_elites for incremental training (preserves PCA)
+                if hasattr(self.generative_model, "fine_tune_on_elites"):
                     print(
                         f"[Coordinator] Fine-tuning generative model on {len(top_elites)} elites..."
                     )
-                    self.generative_model.fit(top_elites)
+                    self.generative_model.fine_tune_on_elites(top_elites)
                     print("[Coordinator] Generative model fine-tuning complete")
+                elif hasattr(self.generative_model, "fit"):
+                    # Fallback to fit() for VAE or other models
+                    print(
+                        f"[Coordinator] Retraining generative model on {len(top_elites)} elites..."
+                    )
+                    self.generative_model.fit(top_elites)
+                    print("[Coordinator] Generative model retraining complete")
             except Exception as e:
                 print(f"[Coordinator] Generative model retraining failed: {e}")
 

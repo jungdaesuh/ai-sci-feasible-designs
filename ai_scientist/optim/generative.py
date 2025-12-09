@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -351,6 +352,121 @@ class DiffusionDesignModel:
 
         self._trained = True
         _LOGGER.info("[diffusion] Training complete.")
+
+    def fine_tune_on_elites(
+        self,
+        elites: Sequence[Mapping[str, Any]],
+        epochs: int | None = None,
+    ) -> None:
+        """Incrementally fine-tune the model on elite candidates.
+
+        Unlike fit(), this method:
+        - Preserves existing PCA transform (no re-fitting)
+        - Uses fewer epochs by default (20 vs 200)
+        - Preserves metric normalization parameters
+
+        Args:
+            elites: Elite candidates to fine-tune on.
+            epochs: Number of fine-tuning epochs (default: 20).
+        """
+        if not self._trained or self._model is None:
+            _LOGGER.warning(
+                "[diffusion] Cannot fine-tune: model not trained. Use fit() first."
+            )
+            return
+
+        if self.pca is None:
+            _LOGGER.warning("[diffusion] Cannot fine-tune: PCA not initialized.")
+            return
+
+        if self.m_mean is None or self.m_std is None:
+            _LOGGER.warning(
+                "[diffusion] Cannot fine-tune: metric normalization not set."
+            )
+            return
+
+        sample_count = len(elites)
+        if sample_count < self._min_samples:
+            _LOGGER.info(
+                "[diffusion] Skipping fine-tune: %d elites < %d min_samples",
+                sample_count,
+                self._min_samples,
+            )
+            return
+
+        fine_tune_epochs = epochs if epochs is not None else 20
+
+        _LOGGER.info(
+            "[diffusion] Fine-tuning on %d elites for %d epochs...",
+            sample_count,
+            fine_tune_epochs,
+        )
+
+        # 1. Prepare Data (reuse existing PCA and normalization)
+        vectors = []
+        metrics_list = []
+
+        for cand in elites:
+            params = cand.get("params") or cand.get("candidate_params")
+            if not params:
+                continue
+
+            # Get geometry - use existing schema
+            vec, _ = tools.structured_flatten(params, schema=self._schema)
+
+            # Get metrics
+            m_vec = self._extract_metrics(cand)
+            if m_vec is None:
+                continue
+
+            vectors.append(vec)
+            metrics_list.append(m_vec)
+
+        if not vectors:
+            _LOGGER.warning("[diffusion] No valid elites to fine-tune on.")
+            return
+
+        # Convert to numpy and apply existing PCA transform (not fit_transform!)
+        X_np = np.vstack(vectors)
+        X_latent = self.pca.transform(X_np)
+
+        X = torch.tensor(X_latent, dtype=torch.float32).to(self._device)
+        M = torch.tensor(np.vstack(metrics_list), dtype=torch.float32).to(self._device)
+
+        # Apply existing normalization (not recalculating!)
+        M = (M - self.m_mean) / self.m_std
+
+        dataset = TensorDataset(X, M)
+        loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
+
+        # Fine-tune the model
+        self._model.train()
+
+        for epoch in range(fine_tune_epochs):
+            epoch_loss = 0.0
+            for xb, mb in loader:
+                self._optimizer.zero_grad()
+
+                B = xb.shape[0]
+                t = torch.randint(0, self._timesteps, (B,), device=self._device).long()
+                noise = torch.randn_like(xb)
+
+                alpha_hat_t = self.alpha_hat[t][:, None]
+                xt = torch.sqrt(alpha_hat_t) * xb + torch.sqrt(1 - alpha_hat_t) * noise
+
+                noise_pred = self._model(xt, t, mb)
+                loss = F.mse_loss(noise_pred, noise)
+                loss.backward()
+                self._optimizer.step()
+
+                epoch_loss += loss.item()
+
+            if self._log_interval > 0 and epoch % self._log_interval == 0:
+                _LOGGER.info(
+                    f"[fine-tune] Epoch {epoch}/{fine_tune_epochs}: loss={epoch_loss:.4f}"
+                )
+
+        _LOGGER.info("[diffusion] Fine-tuning complete.")
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Load model state and PCA from checkpoint."""
