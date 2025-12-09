@@ -696,8 +696,8 @@ python -m ai_scientist.experiment_runner \
 | 1. ✅ Fix Config Loading | 15 min | ✅ Done | `config.py:612-623` |
 | 2. ✅ Fix experiment_setup.py | 5 min | ✅ Done | `experiment_setup.py` |
 | 3. ✅ Fix NFP Propagation in RL | 5 min | ✅ Done | `workers.py:359-362` |
-| 4. Add PreRelaxWorker | 30 min | 🟠 High | `workers.py` |
-| 5. Wire Coordinator | 30 min | 🟠 High | `coordinator.py` |
+| 4. ✅ Add PreRelaxWorker | 30 min | ✅ Done | `workers.py` |
+| 5. ✅ Wire Coordinator | 30 min | ✅ Done | `coordinator.py` |
 | 6. Test End-to-End | 1 hour | 🟡 Validation | - |
 
 **Total**: ~2.5 hours for minimum viable integration

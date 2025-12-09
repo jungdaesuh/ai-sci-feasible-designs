@@ -139,11 +139,37 @@ class Coordinator:
         candidates = []
 
         if strategy == "EXPLORE":
-            # Pure exploration: Generate more samples, skip aggressive optimization
-            # Increase VAE ratio to 80% to escape local minima
+            # ═══════════════════════════════════════════════════════════
+            # QUAD-HYBRID PIPELINE (EXPLORE mode - lightweight)
+            # Skip Surrogate ranking and RL refinement to focus on diversity
+            # ═══════════════════════════════════════════════════════════
+
+            # STAGE 1: Dream - Generate N seeds (increased VAE ratio for diversity)
             explore_ctx = {"n_samples": n_candidates, "cycle": cycle, "vae_ratio": 0.8}
-            res = self.explore_worker.run(explore_ctx)
-            candidates = res.get("candidates", [])
+            seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
+            print(f"[Coordinator] Dreamer generated {len(seeds)} seeds (EXPLORE mode)")
+
+            # STAGE 2: Pre-relax - Fast geometric smoothing
+            prerelax_ctx = {
+                "candidates": seeds,
+                "schema": self.surrogate._schema if self.surrogate else None,
+            }
+            prerelaxed = self.prerelax_worker.run(prerelax_ctx).get("candidates", [])
+            print(f"[Coordinator] Pre-relaxer smoothed {len(prerelaxed)} candidates")
+
+            # STAGE 3: Geometer - Validate geometric constraints
+            geo_ctx = {"candidates": prerelaxed}
+            candidates = self.geo_worker.run(geo_ctx).get("candidates", [])
+            print(
+                f"[Coordinator] Geometer passed {len(candidates)}/{len(prerelaxed)} candidates"
+            )
+
+            # EXPLORE mode: Skip Surrogate ranking and RL refinement
+            # to maximize diversity and escape local minima
+            print(
+                f"[Coordinator] Explore pipeline complete: {len(candidates)} candidates "
+                "(skipped Surrogate/RL for diversity)"
+            )
 
         elif strategy == "EXPLOIT":
             # ═══════════════════════════════════════════════════════════
