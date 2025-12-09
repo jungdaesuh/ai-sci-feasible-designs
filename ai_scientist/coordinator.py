@@ -249,7 +249,127 @@ class Coordinator:
                 f"[Coordinator] Quad-Hybrid pipeline complete: {len(candidates)} final candidates"
             )
 
+        # Check for periodic retraining
+        if candidates:
+            self._periodic_retrain(cycle, experiment_id, candidates)
+
         return candidates
+
+    def _should_retrain(self, cycle: int, experiment_id: int) -> tuple[bool, str]:
+        """Check if retraining should be triggered.
+
+        Returns:
+            (should_retrain, reason)
+        """
+        retraining_cfg = self.cfg.retraining
+
+        if not retraining_cfg.enabled:
+            return False, "disabled"
+
+        # Trigger 1: Cycle cadence (every N cycles)
+        if cycle > 0 and cycle % retraining_cfg.cycle_cadence == 0:
+            return (
+                True,
+                f"cycle_cadence ({cycle} % {retraining_cfg.cycle_cadence} == 0)",
+            )
+
+        # Trigger 2: HV stagnation
+        hv_delta = self.world_model.average_recent_hv_delta(
+            experiment_id, lookback=retraining_cfg.hv_stagnation_lookback
+        )
+        if hv_delta is not None and hv_delta < retraining_cfg.hv_stagnation_threshold:
+            return True, f"hv_stagnation (delta={hv_delta:.6f})"
+
+        return False, "no_trigger"
+
+    def _periodic_retrain(
+        self,
+        cycle: int,
+        experiment_id: int,
+        candidates: List[Dict[str, Any]],
+    ) -> None:
+        """Perform periodic retraining of generative model and surrogate.
+
+        Args:
+            cycle: Current cycle number.
+            experiment_id: Experiment ID for world model queries.
+            candidates: Candidates from the current cycle.
+        """
+        should_retrain, reason = self._should_retrain(cycle, experiment_id)
+
+        if not should_retrain:
+            return
+
+        retraining_cfg = self.cfg.retraining
+        print(
+            f"[Coordinator] Periodic retraining triggered (cycle {cycle}, reason: {reason})"
+        )
+
+        # Collect elite candidates (top N by objective, assumed lower is better)
+        # Sort by any available score metric
+        elites = []
+        for cand in candidates:
+            score = cand.get("rl_score", cand.get("surrogate_score", 0.0))
+            elites.append((score, cand))
+
+        # Sort by score (higher is better for RL/surrogate scores)
+        elites.sort(key=lambda x: x[0], reverse=True)
+        top_elites = [cand for _, cand in elites[: retraining_cfg.min_elites]]
+
+        if len(top_elites) < retraining_cfg.min_elites:
+            print(
+                f"[Coordinator] Skipping retraining: only {len(top_elites)} elites "
+                f"(need {retraining_cfg.min_elites})"
+            )
+            return
+
+        # 1. Retrain Generative Model (if available and supports fine-tuning)
+        if self.generative_model is not None:
+            try:
+                # DiffusionDesignModel.fit() can be used for fine-tuning
+                if hasattr(self.generative_model, "fit"):
+                    print(
+                        f"[Coordinator] Fine-tuning generative model on {len(top_elites)} elites..."
+                    )
+                    self.generative_model.fit(top_elites)
+                    print("[Coordinator] Generative model fine-tuning complete")
+            except Exception as e:
+                print(f"[Coordinator] Generative model retraining failed: {e}")
+
+        # 2. Retrain Surrogate (if available)
+        if self.surrogate is not None:
+            try:
+                # Prepare training data from elites
+                metrics_list = []
+                target_values = []
+
+                for cand in top_elites:
+                    params = cand.get("params", cand.get("candidate_params"))
+                    if params is None:
+                        continue
+
+                    # Use the best available objective value
+                    target = cand.get(
+                        "objective",
+                        cand.get(
+                            "rl_score",
+                            cand.get("surrogate_score", 0.0),
+                        ),
+                    )
+
+                    metrics_list.append({"candidate_params": params, "metrics": cand})
+                    target_values.append(float(target))
+
+                if metrics_list:
+                    print(
+                        f"[Coordinator] Retraining surrogate on {len(metrics_list)} samples..."
+                    )
+                    self.surrogate.fit(
+                        metrics_list, target_values, minimize_objective=True
+                    )
+                    print("[Coordinator] Surrogate retraining complete")
+            except Exception as e:
+                print(f"[Coordinator] Surrogate retraining failed: {e}")
 
     def produce_candidates_aso(
         self,

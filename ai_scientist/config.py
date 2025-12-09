@@ -221,6 +221,17 @@ class SurrogateConfig:
 
 
 @dataclass(frozen=True)
+class RetrainingConfig:
+    """Configuration for periodic retraining of generative/surrogate models."""
+
+    enabled: bool = True
+    cycle_cadence: int = 5  # Retrain every N cycles
+    min_elites: int = 32  # Minimum elite candidates to trigger retraining
+    hv_stagnation_threshold: float = 0.005  # HV delta below this triggers retraining
+    hv_stagnation_lookback: int = 3  # Number of cycles to check for stagnation
+
+
+@dataclass(frozen=True)
 class ALMConfig:
     """ALM hyperparameters (mirrors constellaration settings)."""
 
@@ -340,6 +351,7 @@ class ExperimentConfig:
     constraint_weights: ConstraintWeightsConfig
     generative: GenerativeConfig
     surrogate: SurrogateConfig = field(default_factory=SurrogateConfig)
+    retraining: RetrainingConfig = field(default_factory=RetrainingConfig)
     alm: ALMConfig = field(default_factory=ALMConfig)
     aso: ASOConfig = field(default_factory=ASOConfig)
     optimizer_backend: str = "nevergrad"
@@ -711,6 +723,17 @@ def _aso_config_from_dict(data: Mapping[str, Any] | None) -> ASOConfig:
     )
 
 
+def _retraining_config_from_dict(data: Mapping[str, Any] | None) -> RetrainingConfig:
+    config = data or {}
+    return RetrainingConfig(
+        enabled=bool(config.get("enabled", True)),
+        cycle_cadence=int(config.get("cycle_cadence", 5)),
+        min_elites=int(config.get("min_elites", 32)),
+        hv_stagnation_threshold=float(config.get("hv_stagnation_threshold", 0.005)),
+        hv_stagnation_lookback=int(config.get("hv_stagnation_lookback", 3)),
+    )
+
+
 def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
     config_path = Path(path) if path is not None else DEFAULT_EXPERIMENT_CONFIG_PATH
     payload = load(config_path)
@@ -762,6 +785,7 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         ),
         generative=_generative_config_from_dict(payload.get("generative")),
         surrogate=surrogate_config,
+        retraining=_retraining_config_from_dict(payload.get("retraining")),
         alm=_alm_config_from_dict(payload.get("alm")),
         aso=_aso_config_from_dict(payload.get("aso")),
         optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
