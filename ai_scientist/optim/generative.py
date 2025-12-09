@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.decomposition import PCA
 
 from ai_scientist import tools
 
@@ -41,51 +42,27 @@ class SinusoidalPositionEmbeddings(nn.Module):
         return embeddings
 
 
-class Block(nn.Module):
+class StellaratorDiffusion(nn.Module):
+    """Conditional Diffusion Model for Stellarator Geometries (MLP-based).
+
+    Architecture follows Padidar et al. (2025):
+    - Input: PCA-compressed latent vector (default 50 dims)
+    - Architecture: 4 hidden layers, width 2048, GELU activation
+    - Conditioning: Sinusoidal time embedding + Metric embedding
+    """
+
     def __init__(
-        self, in_ch: int, out_ch: int, time_emb_dim: int, dropout: float = 0.1
+        self,
+        input_dim: int = 50,  # PCA/Latent dimension
+        hidden_dim: int = 2048,  # Paper: 2048
+        n_layers: int = 4,  # Paper: 4
+        condition_dim: int = 128,  # Paper: y -> 128
+        time_dim: int = 128,  # Paper: t -> 128
+        input_embed_dim: int = 64,  # Paper: x -> 64
     ):
         super().__init__()
-        self.time_mlp = nn.Linear(time_emb_dim, out_ch)
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.transform = nn.Conv2d(out_ch, out_ch, 4, 2, 1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.bnorm1 = nn.BatchNorm2d(out_ch)
-        self.bnorm2 = nn.BatchNorm2d(out_ch)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        # First Conv
-        h = self.conv1(x)
-        h = self.relu(h)
-        h = self.bnorm1(h)
-
-        # Time embedding
-        time_emb = self.relu(self.time_mlp(t))
-        # Broadcast time embedding
-        h = h + time_emb[(...,) + (None,) * 2]
-
-        # Second Conv
-        h = self.conv2(h)
-        h = self.relu(h)
-        h = self.bnorm2(h)
-
-        return self.dropout(h)
-
-
-class StellaratorDiffusion(nn.Module):
-    """Conditional Diffusion Model for Stellarator Geometries using a simple ResNet architecture."""
-
-    def __init__(self, mpol: int, ntor: int, metric_dim: int, hidden_dim: int = 64):
-        super().__init__()
-        self.mpol = mpol
-        self.ntor = ntor
-        self.grid_h = mpol + 1
-        self.grid_w = 2 * ntor + 1
-        self.input_channels = 2
-        time_dim = 32
-
+        # 1. Embeddings
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(time_dim),
             nn.Linear(time_dim, time_dim),
@@ -93,42 +70,60 @@ class StellaratorDiffusion(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        self.metric_mlp = nn.Sequential(
-            nn.Linear(metric_dim, time_dim),
+        self.input_mlp = nn.Linear(input_dim, input_embed_dim)
+
+        # Metric conditioning: (ι, A, nfp, N) -> 4 dims
+        self.condition_mlp = nn.Sequential(
+            nn.Linear(4, condition_dim),
             nn.SiLU(),
-            nn.Linear(time_dim, time_dim),
+            nn.Linear(condition_dim, condition_dim),
         )
 
-        self.inc = nn.Conv2d(self.input_channels, hidden_dim, 3, padding=1)
+        # 2. Main MLP Trunk
+        # Input to trunk is concatenation of all embeddings
+        concat_dim = input_embed_dim + time_dim + condition_dim
 
-        self.blocks = nn.ModuleList(
-            [Block(hidden_dim, hidden_dim, time_dim) for _ in range(4)]
-        )
+        layers = []
+        in_d = concat_dim
+        for _ in range(n_layers):
+            layers.append(nn.Linear(in_d, hidden_dim))
+            layers.append(nn.GELU())  # Paper specifies GELU
+            in_d = hidden_dim
 
-        self.outc = nn.Conv2d(hidden_dim, self.input_channels, 1)
+        self.trunk = nn.Sequential(*layers)
+
+        # 3. Output Head (predicts noise)
+        self.head = nn.Linear(hidden_dim, input_dim)
 
     def forward(
         self, x: torch.Tensor, t: torch.Tensor, metrics: torch.Tensor
     ) -> torch.Tensor:
+        """
+        Args:
+            x: (B, input_dim) - Noisy latent state
+            t: (B,) - Timesteps
+            metrics: (B, 4) - Conditional metrics (ι, A, nfp, N)
+        """
+        x_emb = self.input_mlp(x)
         t_emb = self.time_mlp(t)
-        m_emb = self.metric_mlp(metrics)
-        cond = t_emb + m_emb
+        c_emb = self.condition_mlp(metrics)
 
-        h = self.inc(x)
-        for block in self.blocks:
-            h = h + block(h, cond)  # Residual connection
+        # Concatenate: [x_emb, t_emb, c_emb]
+        h = torch.cat([x_emb, t_emb, c_emb], dim=1)
 
-        return self.outc(h)
+        h = self.trunk(h)
+        return self.head(h)
 
 
 class DiffusionDesignModel:
-    """Manager for Conditional Diffusion Model."""
+    """Manager for Conditional Diffusion Model (StellarForge v1)."""
 
+    # Metrics used for conditioning (Padidar et al.: ι, A, nfp, N)
     METRIC_KEYS = [
+        "edge_rotational_transform_over_n_field_periods",  # iota
         "aspect_ratio",
-        "minimum_normalized_magnetic_gradient_scale_length",
-        "max_elongation",
-        "edge_rotational_transform_over_n_field_periods",
+        "number_of_field_periods",  # nfp, often in params not metrics
+        "is_quasihelical",  # N (0=QA, 1=QH)
     ]
 
     def __init__(
@@ -137,22 +132,38 @@ class DiffusionDesignModel:
         min_samples: int = 32,
         learning_rate: float = 1e-3,
         epochs: int = 200,
-        batch_size: int = 32,
+        batch_size: int = 4096,  # Default to paper spec
         device: str = "cpu",
-        timesteps: int = 300,
+        timesteps: int = 200,  # Paper: 200
+        # Architecture args
+        hidden_dim: int = 2048,
+        n_layers: int = 4,
+        pca_components: int = 50,
+        log_interval: int = 10,
     ) -> None:
         self._min_samples = min_samples
         self._lr = learning_rate
         self._epochs = epochs
         self._batch_size = batch_size
-        self._device = (
-            device if torch.cuda.is_available() and device == "cuda" else "cpu"
-        )
+        self._device = device if torch.cuda.is_available() or device == "mps" else "cpu"
+        # Handle MPS explicitly
+        if device == "mps" and not torch.backends.mps.is_available():
+            _LOGGER.warning("MPS requested but not available. Falling back to CPU.")
+            self._device = "cpu"
+
         self._timesteps = timesteps
+
+        # Architecture params
+        self._hidden_dim = hidden_dim
+        self._n_layers = n_layers
+        self._pca_components = pca_components
+        self._log_interval = log_interval
 
         self._model: StellaratorDiffusion | None = None
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
+        self.pca: PCA | None = None
+
         self._trained = False
         self.m_mean: torch.Tensor | None = None
         self.m_std: torch.Tensor | None = None
@@ -165,12 +176,21 @@ class DiffusionDesignModel:
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 
     def _ensure_model(self) -> None:
-        if self._schema is None or self._model is not None:
+        if self._model is not None:
             return
+
+        # Input dim is PCA latent dim (or raw if no PCA)
+        input_dim = (
+            self._pca_components
+            if self.pca
+            else self._schema.mpol * self._schema.ntor * 2
+        )  # Fallback
+
         self._model = StellaratorDiffusion(
-            mpol=self._schema.mpol,
-            ntor=self._schema.ntor,
-            metric_dim=len(self.METRIC_KEYS),
+            input_dim=input_dim,
+            hidden_dim=self._hidden_dim,
+            n_layers=self._n_layers,
+            # condition_dim, time_dim, input_embed_dim use defaults
         ).to(self._device)
         self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
 
@@ -186,23 +206,51 @@ class DiffusionDesignModel:
         return torch.tensor(data, dtype=torch.float32, device=self._device)
 
     def _extract_metrics(self, cand: Mapping[str, Any]) -> np.ndarray | None:
-        """Extract normalized metrics vector."""
-        # Robust extraction: handle various locations
+        """Extract conditioning metrics (iota, A, nfp, N)."""
         metrics = cand.get("metrics") or cand
-        if not isinstance(metrics, dict):
-            # Try model_dump if pydantic
-            if hasattr(metrics, "model_dump"):
-                metrics = metrics.model_dump()
-            else:
-                return None
+        params = cand.get("params") or cand.get("candidate_params") or {}
 
-        vec = []
-        for k in self.METRIC_KEYS:
-            val = metrics.get(k)
-            if val is None:
-                return None  # Skip incomplete data
-            vec.append(float(val))
-        return np.array(vec, dtype=np.float32)
+        # Helper to find values in metrics or params
+        def get_val(key):
+            if isinstance(metrics, dict):
+                v = metrics.get(key)
+                if v is not None:
+                    return float(v)
+            if isinstance(params, dict):
+                v = params.get(key)
+                if v is not None:
+                    return float(v)
+            return None
+
+        # 1. Iota
+        iota = get_val("edge_rotational_transform_over_n_field_periods")
+        if iota is None:
+            return None  # Strict requirement
+
+        # 2. Aspect Ratio
+        ar = get_val("aspect_ratio")
+        if ar is None:
+            return None
+
+        # 3. NFP (Usually in params)
+        nfp = get_val("number_of_field_periods") or get_val("nfp")
+        if nfp is None:
+            nfp = 3.0  # Fallback check? Or fail?
+
+        # 4. N (QA vs QH)
+        # Try to infer from params or metrics or config
+        is_qh = get_val("is_quasihelical")
+        if is_qh is None:
+            # Fallback heuristic: check helicity in config if available?
+            # For now, default to 0 (QA) if not found, to be safe?
+            # Or try "quasisymmetry_type" which might be "QA" or "QH"
+            qs_type = params.get("quasisymmetry_type")
+            if qs_type == "QH":
+                is_qh = 1.0
+            else:
+                is_qh = 0.0
+
+        return np.array([iota, ar, nfp, is_qh], dtype=np.float32)
 
     def fit(self, candidates: Sequence[Mapping[str, Any]]) -> None:
         sample_count = len(candidates)
@@ -214,9 +262,13 @@ class DiffusionDesignModel:
             )
             return
 
-        _LOGGER.info("[diffusion] Training on %d samples...", sample_count)
+        _LOGGER.info(
+            "[diffusion] Training on %d samples (PCA=%d)...",
+            sample_count,
+            self._pca_components,
+        )
 
-        # Prepare Data
+        # 1. Prepare Data
         vectors = []
         metrics_list = []
 
@@ -241,12 +293,21 @@ class DiffusionDesignModel:
         if not vectors:
             return
 
-        X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
+        # Convert to numpy for PCA
+        X_np = np.vstack(vectors)
+
+        # Fit PCA
+        if self._pca_components > 0:
+            self.pca = PCA(n_components=self._pca_components)
+            X_latent = self.pca.fit_transform(X_np)
+        else:
+            self.pca = None
+            X_latent = X_np
+
+        X = torch.tensor(X_latent, dtype=torch.float32).to(self._device)
         M = torch.tensor(np.vstack(metrics_list), dtype=torch.float32).to(self._device)
 
-        # Normalize metrics (simple min-max or z-score?)
-        # For now, just use raw. Ideally we should normalize.
-        # Let's do simple standardization
+        # Normalize metrics
         self.m_mean = M.mean(dim=0)
         self.m_std = M.std(dim=0) + 1e-6
         M = (M - self.m_mean) / self.m_std
@@ -255,42 +316,26 @@ class DiffusionDesignModel:
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
         # Init Model
-        if self._schema is None:
-            return
-
         self._ensure_model()
-        if self._model is None:
-            return
-
         self._model.train()
-
-        grid_size = self._model.grid_h * self._model.grid_w
-        half_size = grid_size
 
         for epoch in range(self._epochs):
             epoch_loss = 0.0
             for xb, mb in loader:
                 self._optimizer.zero_grad()
 
-                # Reshape geometry
+                # xb is (B, latent_dim)
                 B = xb.shape[0]
-                r_cos = xb[:, :half_size].view(
-                    B, 1, self._model.grid_h, self._model.grid_w
-                )
-                z_sin = xb[:, half_size:].view(
-                    B, 1, self._model.grid_h, self._model.grid_w
-                )
-                x0 = torch.cat([r_cos, z_sin], dim=1)
 
                 # Sample t
                 t = torch.randint(0, self._timesteps, (B,), device=self._device).long()
 
                 # Noise
-                noise = torch.randn_like(x0)
+                noise = torch.randn_like(xb)
 
                 # Forward diffusion q(x_t | x_0)
-                alpha_hat_t = self.alpha_hat[t][:, None, None, None]
-                xt = torch.sqrt(alpha_hat_t) * x0 + torch.sqrt(1 - alpha_hat_t) * noise
+                alpha_hat_t = self.alpha_hat[t][:, None]  # (B, 1)
+                xt = torch.sqrt(alpha_hat_t) * xb + torch.sqrt(1 - alpha_hat_t) * noise
 
                 # Predict noise
                 noise_pred = self._model(xt, t, mb)
@@ -301,11 +346,17 @@ class DiffusionDesignModel:
 
                 epoch_loss += loss.item()
 
-            if epoch % 50 == 0:
-                _LOGGER.info(f"Epoch {epoch}: loss={epoch_loss:.4f}")
+            if self._log_interval > 0 and epoch % self._log_interval == 0:
+                _LOGGER.info(f"Epoch {epoch}/{self._epochs}: loss={epoch_loss:.4f}")
 
         self._trained = True
         _LOGGER.info("[diffusion] Training complete.")
+
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load model state and PCA from checkpoint."""
+        _LOGGER.info(f"[diffusion] Loading checkpoint from {path}")
+        checkpoint = torch.load(path, map_location=self._device)
+        self.load_state_dict(checkpoint)
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -314,10 +365,12 @@ class DiffusionDesignModel:
             "trained": self._trained,
             "m_mean": self._tensor_to_list(self.m_mean),
             "m_std": self._tensor_to_list(self.m_std),
-            "beta": self._tensor_to_list(self.beta),
-            "alpha": self._tensor_to_list(self.alpha),
-            "alpha_hat": self._tensor_to_list(self.alpha_hat),
-            "timesteps": int(self._timesteps),
+            "pca": self.pca,  # Pickled PCA object
+            "configs": {
+                "hidden_dim": self._hidden_dim,
+                "n_layers": self._n_layers,
+                "pca_components": self._pca_components,
+            },
         }
 
     def load_state_dict(self, checkpoint: Mapping[str, Any]) -> None:
@@ -325,27 +378,30 @@ class DiffusionDesignModel:
         if saved_schema:
             self._schema = tools.FlattenSchema(**saved_schema)
 
-        saved_timesteps = checkpoint.get("timesteps")
-        if isinstance(saved_timesteps, int):
-            self._timesteps = saved_timesteps
-        self._build_noise_schedule()
+        # Load PCA
+        self.pca = checkpoint.get("pca")
+        if self.pca:
+            self._pca_components = self.pca.n_components_
 
-        beta_data = checkpoint.get("beta")
-        if beta_data:
-            self.beta = self._tensor_from_list(beta_data)
-        alpha_data = checkpoint.get("alpha")
-        if alpha_data:
-            self.alpha = self._tensor_from_list(alpha_data)
-        alpha_hat_data = checkpoint.get("alpha_hat")
-        if alpha_hat_data:
-            self.alpha_hat = self._tensor_from_list(alpha_hat_data)
+        # Load configs if present
+        configs = checkpoint.get("configs", {})
+        if "hidden_dim" in configs:
+            self._hidden_dim = configs["hidden_dim"]
+        if "n_layers" in configs:
+            self._n_layers = configs["n_layers"]
+
+        self._build_noise_schedule()  # Rebuild in case device changed
 
         if self._schema:
             self._ensure_model()
-            if self._model is not None:
-                model_state = checkpoint.get("model_state")
-                if model_state:
+            model_state = checkpoint.get("model_state")
+            if model_state and self._model:
+                try:
                     self._model.load_state_dict(model_state)
+                except RuntimeError as e:
+                    _LOGGER.warning(
+                        f"Failed to load model state: {e}. Architecture mismatch?"
+                    )
 
         self.m_mean = self._tensor_from_list(checkpoint.get("m_mean"))
         self.m_std = self._tensor_from_list(checkpoint.get("m_std"))
@@ -360,13 +416,20 @@ class DiffusionDesignModel:
             return []
 
         # Prepare target metrics tensor
-        m_vec = []
-        for k in self.METRIC_KEYS:
-            m_vec.append(target_metrics.get(k, 0.0))
+        # Must match _extract_metrics logic
+        # target_metrics usually comes from exploration worker which has good keys
+        iota = target_metrics.get("iota_bar", 0.0)  # check keys
+        ar = target_metrics.get("aspect_ratio", 0.0)
+        nfp = target_metrics.get("nfp", 3.0)
+        is_qh = target_metrics.get("N", 0.0)  # 0 for QA
+
+        m_vec = [iota, ar, nfp, is_qh]
 
         M = torch.tensor([m_vec], dtype=torch.float32).to(self._device)
-        # Normalize
-        M = (M - self.m_mean) / self.m_std
+
+        if self.m_mean is not None and self.m_std is not None:
+            M = (M - self.m_mean) / self.m_std
+
         M = M.repeat(n_samples, 1)  # (N, metric_dim)
 
         self._model.eval()
@@ -374,12 +437,16 @@ class DiffusionDesignModel:
         rng.manual_seed(seed)
 
         with torch.no_grad():
+            latent_dim = (
+                self._pca_components
+                if self.pca
+                else (self._schema.mpol * self._schema.ntor * 2)
+            )
+
             # Start from noise
             x = torch.randn(
                 n_samples,
-                2,
-                self._model.grid_h,
-                self._model.grid_w,
+                latent_dim,
                 device=self._device,
                 generator=rng,
             )
@@ -401,10 +468,14 @@ class DiffusionDesignModel:
                     x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise
                 ) + torch.sqrt(beta) * noise
 
-            # Decode x -> params
-            r_cos = x[:, 0].flatten(1)
-            z_sin = x[:, 1].flatten(1)
-            flattened = torch.cat([r_cos, z_sin], dim=1).cpu().numpy()
+            # Move to CPU
+            latent_samples = x.cpu().numpy()
+
+            # Inverse PCA
+            if self.pca:
+                flattened = self.pca.inverse_transform(latent_samples)
+            else:
+                flattened = latent_samples
 
         candidates = []
         for k in range(n_samples):

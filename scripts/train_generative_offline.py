@@ -156,6 +156,12 @@ def main():
         default=10,
         help="Print progress every N epochs (default: 10)",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="proxima-fusion/constellaration",
+        help="Hugging Face dataset name (default: proxima-fusion/constellaration)",
+    )
 
     args = parser.parse_args()
 
@@ -185,6 +191,8 @@ def main():
     print(f"N layers: {args.n_layers}")
     print(f"PCA components: {args.pca_components}")
     print(f"Timesteps: {args.timesteps}")
+    print(f"Log interval: {args.log_interval}")
+    print(f"Dataset: {args.dataset}")
     print(f"Output: {args.output}")
     print("=" * 60)
 
@@ -222,6 +230,7 @@ def main():
         hidden_dim=args.hidden_dim,
         n_layers=args.n_layers,
         pca_components=args.pca_components,
+        log_interval=args.log_interval,
     )
 
     # Custom training loop to print progress
