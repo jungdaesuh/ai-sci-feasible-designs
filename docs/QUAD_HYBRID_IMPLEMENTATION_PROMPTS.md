@@ -80,7 +80,7 @@ DO NOT change anything else. This is a 2-line fix.
 
 ---
 
-## Task 3: Add PreRelaxWorker (30 min)
+## Task 3A: Add Basic PreRelaxWorker (20 min)
 
 ### Prompt
 
@@ -93,11 +93,10 @@ Add a new `PreRelaxWorker` class to `ai_scientist/workers.py`.
 
 **Requirements**:
 1. Inherit from `Worker` base class (like other workers in the file)
-2. Import `prerelax_boundary` and `geometric_energy` from `ai_scientist.optim.prerelax`
+2. Import `logging`, `prerelax_boundary` from `ai_scientist.optim.prerelax`
 3. Import `tools` from `ai_scientist` for `FlattenSchema`
 4. Use `ThreadPoolExecutor` for parallel processing (16 workers) in `_relax_single()`
-5. Include a `_normalize_params` method that pads/truncates `r_cos` and `z_sin` to match the surrogate's `FlattenSchema` dimensions (GPT-5.1's discovery)
-6. Include a `_prerelax_batch()` method for batched tensor processing (Opus 4.5's optimization - 10× speedup)
+5. Include a `_normalize_params` method that pads/truncates `r_cos` and `z_sin` to match the surrogate's `FlattenSchema` dimensions
 
 **CRITICAL - NFP Bug Fix (Opus 4.5)**:
 The `prerelax_boundary` function has `nfp` hardcoded to 3. You MUST:
@@ -105,15 +104,18 @@ The `prerelax_boundary` function has `nfp` hardcoded to 3. You MUST:
 2. Pass it explicitly to `prerelax_boundary(..., nfp=nfp, ...)`
 3. Restore it in the output: `optimized["n_field_periods"] = nfp`
 
+**Exception handling** (use these specific types):
+- `RuntimeError`: GPU OOM or tensor operation failure
+- `ValueError`: Shape mismatch or invalid input
+- `Exception`: Catch-all (log at error level)
+
 **Constructor parameters**:
 - `cfg: ai_config.ExperimentConfig`
 - `surrogate_schema: Optional[tools.FlattenSchema] = None`
 
 **Run method**:
-- Input context: `{"candidates": List[Dict], "schema": Optional[FlattenSchema], "use_batched": bool}`
+- Input context: `{"candidates": List[Dict], "schema": Optional[FlattenSchema]}`
 - Output: `{"candidates": List[Dict], "status": str}`
-- For small batches (<100), use `_relax_single()` with ThreadPoolExecutor
-- For large batches (≥100), use `_prerelax_batch()` for vectorized processing
 - Filter out candidates with geometric_energy > 1.0 (threshold)
 - Print progress similar to other workers: `[PreRelaxWorker] ...`
 
@@ -126,6 +128,54 @@ The `prerelax_boundary` function has `nfp` hardcoded to 3. You MUST:
 - device = "cpu"
 
 Follow the existing code patterns in `workers.py` exactly. Look at `GeometerWorker` for reference.
+```
+
+**Rollback**: If this breaks the build, revert with:
+```bash
+git checkout HEAD -- ai_scientist/workers.py
+```
+
+---
+
+## Task 3B: Add Batched Processing (10 min)
+
+### Prompt
+
+```
+Extend the `PreRelaxWorker` class in `ai_scientist/workers.py` with a `_prerelax_batch()` method.
+
+**Purpose**: Batched tensor processing for 10× speedup on large candidate sets.
+
+**Requirements**:
+1. Add `_prerelax_batch(self, candidates, schema, target_ar) -> List[Dict]`
+2. PARTITION candidates by NFP before batching (fixes lossy approximation issue)
+3. Process each NFP group separately with vectorized gradient descent
+4. Pass `schema` as a parameter, not instance attribute (thread safety)
+
+**Key implementation detail** (from reviewer):
+```python
+# Partition by NFP to avoid lossy approximation
+nfp_groups: Dict[int, List[Tuple[int, Dict]]] = defaultdict(list)
+for idx, cand in enumerate(candidates):
+    params = cand.get("params") or cand
+    nfp = int(params.get("n_field_periods", params.get("nfp", 3)))
+    nfp_groups[nfp].append((idx, cand))
+
+# Process each NFP group separately
+for nfp, group in nfp_groups.items():
+    # ... batch processing with correct NFP value
+```
+
+**Update run() method**:
+- If `len(candidates) >= 100` and `context.get("use_batched", True)`, use `_prerelax_batch()`
+- Otherwise use `_relax_single()` with ThreadPoolExecutor
+
+DO NOT modify the `_relax_single()` or `_normalize_params()` methods from Task 3A.
+```
+
+**Rollback**: If this breaks the build, revert with:
+```bash
+git checkout HEAD -- ai_scientist/workers.py
 ```
 
 ---
@@ -174,6 +224,11 @@ New order (CORRECT):
 - `[Coordinator] Quad-Hybrid pipeline complete: N final candidates`
 
 Also update the EXPLOIT branch (lines 144-160) with the same pattern.
+```
+
+**Rollback**: If this breaks the build, revert with:
+```bash
+git checkout HEAD -- ai_scientist/coordinator.py
 ```
 
 ---
@@ -273,6 +328,21 @@ python -m ai_scientist.experiment_runner \
 7. `[RLRefinementWorker] Refining Z candidates...`
 8. `[Coordinator] Quad-Hybrid pipeline complete`
 
+**Expected timing** (10 candidates):
+- Dreamer: <1s
+- Pre-relaxer: <2s
+- Geometer: <0.5s
+- Surrogate: <0.5s
+- RL Agent: <5s
+
+**Error diagnosis**:
+| Error Message | Task to Fix |
+|--------------|-------------|
+| `KeyError: n_field_periods` | Task 2.5 |
+| `AttributeError: 'NoneType' object has no attribute '_schema'` | Task 4 (surrogate init) |
+| `ValueError: shape mismatch` | Task 3A (_normalize_params) |
+| PreRelaxWorker rejects >80% | Increase energy_threshold in Task 3A |
+
 If any step fails, report the error message and which task needs fixing.
 ```
 
@@ -285,11 +355,12 @@ Run these tasks in order. Each task depends on the previous:
 1. ✅ Task 1: Config loading (unblocks checkpoint loading)
 2. ✅ Task 2: experiment_setup (unblocks correct model init)
 3. ✅ Task 2.5: NFP propagation fix (Opus 4.5 - prevents downstream failures)
-4. ✅ Task 3: PreRelaxWorker (creates the new worker with batched processing)
-5. ✅ Task 4: Coordinator wiring (integrates everything)
-6. ✅ Verification (confirms it works)
-7. 🟡 Task 5: Offline training (optional, for production)
-8. 🟡 Task 6: Periodic retraining (optional, for production)
+4. ✅ Task 3A: Basic PreRelaxWorker (creates the new worker)
+5. ✅ Task 3B: Batched processing (10× speedup for large batches)
+6. ✅ Task 4: Coordinator wiring (integrates everything)
+7. ✅ Verification (confirms it works)
+8. 🟡 Task 5: Offline training (optional, for production)
+9. 🟡 Task 6: Periodic retraining (optional, for production)
 
 ---
 
@@ -298,5 +369,6 @@ Run these tasks in order. Each task depends on the previous:
 - **Task 1**: Claude Sonnet (empty string edge case)
 - **Task 2**: DeepThink (diffusion_timesteps)
 - **Task 2.5**: Opus 4.5 (NFP propagation bug)
-- **Task 3**: Opus 4.5 (batched processing) + GPT-5.1 (schema normalization)
+- **Task 3A**: Grok (drop-in patterns) + GPT-5.1 (schema normalization)
+- **Task 3B**: Opus 4.5 (batched processing + NFP partitioning)
 - **Task 4**: Claude Sonnet + Grok (pipeline reorder)

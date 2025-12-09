@@ -166,9 +166,10 @@ def _normalize_params(
 > Opus 4.5's batched tensor operations provide **10× speedup** over sequential processing (5s vs 50s for 1000 candidates).
 
 ```python
+import logging
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
@@ -273,9 +274,17 @@ class PreRelaxWorker(Worker):
             new_cand["geometric_energy"] = float(final_energy)
             return new_cand
 
+        except RuntimeError as exc:
+            # GPU OOM or tensor operation failure
+            logging.warning(f"[PreRelaxWorker] GPU/tensor error: {exc}")
+            return None
+        except ValueError as exc:
+            # Shape mismatch or invalid input
+            logging.warning(f"[PreRelaxWorker] Shape/value error: {exc}")
+            return None
         except Exception as exc:
-            # Log but don't crash - just filter out bad candidates
-            print(f"[PreRelaxWorker] Relaxation failed: {exc}")
+            # Catch-all for unexpected errors (log at error level)
+            logging.error(f"[PreRelaxWorker] Unexpected error: {exc}")
             return None
 
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -295,9 +304,8 @@ class PreRelaxWorker(Worker):
         if not candidates:
             return {"candidates": [], "status": "empty"}
 
-        # Allow runtime schema override
+        # Thread-safe: use local schema variable (don't mutate self during run)
         schema = context.get("schema") or self.surrogate_schema
-        self.surrogate_schema = schema
 
         nfp_default = self.cfg.boundary_template.n_field_periods
 
@@ -330,77 +338,89 @@ class PreRelaxWorker(Worker):
     def _prerelax_batch(
         self,
         candidates: List[Dict[str, Any]],
+        schema: Optional[tools.FlattenSchema],  # Pass as param, not instance attr
         target_ar: float = 8.0,
     ) -> List[Dict[str, Any]]:
         """
         OPTIONAL: Batched tensor processing for maximum performance.
-        Processes all candidates in a single optimization loop.
+        Processes candidates in a single optimization loop PER NFP GROUP.
 
         Use when: len(candidates) > 100 and GPU available.
         Speedup: ~10× (5s vs 50s for 1000 candidates)
+
+        NOTE: Candidates are partitioned by NFP to avoid lossy approximation.
         """
         import torch
+        from collections import defaultdict
         from ai_scientist.optim.prerelax import geometric_energy
 
         if not candidates:
             return []
 
-        # Extract and stack all params
-        r_cos_list, z_sin_list, nfp_list, metadata_list = [], [], [], []
-
-        for cand in candidates:
+        # ═══════════════════════════════════════════════════════════
+        # PARTITION BY NFP (fixes lossy approximation issue)
+        # ═══════════════════════════════════════════════════════════
+        nfp_groups: Dict[int, List[Tuple[int, Dict]]] = defaultdict(list)
+        for idx, cand in enumerate(candidates):
             params = cand.get("params") or cand
-            r_cos_list.append(np.array(params["r_cos"], dtype=np.float32))
-            z_sin_list.append(np.array(params["z_sin"], dtype=np.float32))
-            nfp_list.append(int(params.get("n_field_periods", params.get("nfp", 3))))
-            metadata_list.append({k: v for k, v in cand.items() if k != "params"})
+            nfp = int(params.get("n_field_periods", params.get("nfp", 3)))
+            nfp_groups[nfp].append((idx, cand))
 
-        # Stack into batch tensors: (B, mpol+1, 2*ntor+1)
-        r_cos_batch = torch.tensor(np.stack(r_cos_list), device=self.device)
-        z_sin_batch = torch.tensor(np.stack(z_sin_list), device=self.device)
-        r_cos_batch.requires_grad_(True)
-        z_sin_batch.requires_grad_(True)
+        all_relaxed = []
 
-        # Use most common NFP for batch (approximation)
-        nfp_mode = max(set(nfp_list), key=nfp_list.count)
+        for nfp, group in nfp_groups.items():
+            indices, group_candidates = zip(*group)
 
-        optimizer = torch.optim.Adam([r_cos_batch, z_sin_batch], lr=self.lr)
+            # Extract and stack params for this NFP group
+            r_cos_list, z_sin_list, metadata_list = [], [], []
+            for cand in group_candidates:
+                params = cand.get("params") or cand
+                r_cos_list.append(np.array(params["r_cos"], dtype=np.float32))
+                z_sin_list.append(np.array(params["z_sin"], dtype=np.float32))
+                metadata_list.append({k: v for k, v in cand.items() if k != "params"})
 
-        for _ in range(self.steps):
-            optimizer.zero_grad()
-            loss = geometric_energy(r_cos_batch, z_sin_batch, nfp_mode, target_ar=target_ar)
-            loss.mean().backward()
-            optimizer.step()
+            # Stack into batch tensors: (B, mpol+1, 2*ntor+1)
+            r_cos_batch = torch.tensor(np.stack(r_cos_list), device=self.device)
+            z_sin_batch = torch.tensor(np.stack(z_sin_list), device=self.device)
+            r_cos_batch.requires_grad_(True)
+            z_sin_batch.requires_grad_(True)
 
-        # Extract final energies
-        with torch.no_grad():
-            final_energies = geometric_energy(
-                r_cos_batch, z_sin_batch, nfp_mode, target_ar=target_ar
-            ).cpu().numpy()
+            optimizer = torch.optim.Adam([r_cos_batch, z_sin_batch], lr=self.lr)
 
-        # Convert back to candidate format
-        r_cos_np = r_cos_batch.detach().cpu().numpy()
-        z_sin_np = z_sin_batch.detach().cpu().numpy()
+            for _ in range(self.steps):
+                optimizer.zero_grad()
+                loss = geometric_energy(r_cos_batch, z_sin_batch, nfp, target_ar=target_ar)
+                loss.mean().backward()
+                optimizer.step()
 
-        relaxed = []
-        for i, (cand, energy) in enumerate(zip(candidates, final_energies)):
-            if energy < self.energy_threshold:
-                new_params = {
-                    "r_cos": r_cos_np[i].tolist(),
-                    "z_sin": z_sin_np[i].tolist(),
-                    "n_field_periods": nfp_list[i],
-                    "is_stellarator_symmetric": cand.get("params", cand).get(
-                        "is_stellarator_symmetric", True
-                    ),
-                }
-                relaxed.append({
-                    **metadata_list[i],
-                    "params": new_params,
-                    "prerelax_energy": float(energy),
-                    "source": "prerelaxed_batch",
-                })
+            # Extract final energies
+            with torch.no_grad():
+                final_energies = geometric_energy(
+                    r_cos_batch, z_sin_batch, nfp, target_ar=target_ar
+                ).cpu().numpy()
 
-        return relaxed
+            # Convert back to candidate format
+            r_cos_np = r_cos_batch.detach().cpu().numpy()
+            z_sin_np = z_sin_batch.detach().cpu().numpy()
+
+            for i, (cand, energy) in enumerate(zip(group_candidates, final_energies)):
+                if energy < self.energy_threshold:
+                    new_params = {
+                        "r_cos": r_cos_np[i].tolist(),
+                        "z_sin": z_sin_np[i].tolist(),
+                        "n_field_periods": nfp,
+                        "is_stellarator_symmetric": cand.get("params", cand).get(
+                            "is_stellarator_symmetric", True
+                        ),
+                    }
+                    all_relaxed.append({
+                        **metadata_list[i],
+                        "params": new_params,
+                        "prerelax_energy": float(energy),
+                        "source": "prerelaxed_batch",
+                    })
+
+        return all_relaxed
 ```
 
 ---
@@ -644,6 +664,28 @@ python -m ai_scientist.experiment_runner \
 | **Wall-Clock (1000 seeds)** | ~253s | ~80s | <100s |
 | **VMEC++ Calls** | ~500 | ~150 | <200 |
 | **Feasibility Rate** | ~5% | ~25% | 30-40% |
+
+### Expected Timing (10 candidates)
+
+| Stage | Expected Time | If Exceeded, Check... |
+|-------|--------------|----------------------|
+| Dreamer | <1s | GPU availability, checkpoint loaded |
+| Pre-relaxer | <2s | `device` setting, batch size |
+| Geometer | <0.5s | N/A (fast) |
+| Surrogate | <0.5s | Model loaded, schema match |
+| RL Agent | <5s | `updates_per_candidate` setting |
+
+### Failure Mode Checklist
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| `KeyError: n_field_periods` | Task 2.5 not applied | Apply NFP propagation fix in `workers.py:359-362` |
+| PreRelaxWorker rejects >80% | `energy_threshold` too low | Increase from 1.0 to 5.0 or 10.0 |
+| `RuntimeError: CUDA out of memory` | Batch too large for GPU | Reduce `batch_size` or use CPU for pre-relax |
+| `AttributeError: 'NoneType' object has no attribute '_schema'` | Surrogate not initialized | Check `surrogate._trained` before using schema |
+| `ValueError: shape mismatch` | Schema normalization missing | Verify `_normalize_params` is called |
+| All candidates filtered by Geometer | Pre-relaxer not smoothing enough | Increase `steps` from 50 to 100 |
+| RL takes >200s for 100 candidates | Wrong pipeline order | Verify RL runs AFTER surrogate ranking |
 
 ---
 
