@@ -21,6 +21,9 @@ from sklearn.preprocessing import StandardScaler
 
 from ai_scientist import memory, tools
 
+# Define locally to avoid circular import (tools → evaluation → forward_model → optim → surrogate → tools)
+_DEFAULT_RELATIVE_TOLERANCE = 1e-2
+
 
 def _flatten_boundary_params(params: Mapping[str, Any]) -> np.ndarray:
     values: list[np.ndarray] = []
@@ -192,7 +195,7 @@ class SurrogateBundle(BaseSurrogate):
         *,
         min_samples: int = 8,
         min_feasible_for_regressor: int = 4,
-        feasibility_tolerance: float = tools._DEFAULT_RELATIVE_TOLERANCE,
+        feasibility_tolerance: float = _DEFAULT_RELATIVE_TOLERANCE,
         timeout_seconds: float = 1.0,
         points_cadence: int = 16,
         cycle_cadence: int = 1,
