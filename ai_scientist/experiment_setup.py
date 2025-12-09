@@ -58,11 +58,30 @@ def create_generative_model(
 
     if cfg.generative.backend == "diffusion":
         print("[runner] Generative Model Enabled (Diffusion).")
-        return DiffusionDesignModel(
+        model = DiffusionDesignModel(
             learning_rate=cfg.generative.learning_rate,
             epochs=cfg.generative.epochs,
-            min_samples=32,
+            # StellarForge Upgrades
+            hidden_dim=cfg.generative.hidden_dim,
+            n_layers=cfg.generative.n_layers,
+            pca_components=cfg.generative.pca_components,
+            batch_size=cfg.generative.batch_size,
+            diffusion_timesteps=cfg.generative.diffusion_timesteps,
+            device=cfg.generative.device,
         )
+
+        if cfg.generative.checkpoint_path:
+            if cfg.generative.checkpoint_path.exists():
+                print(
+                    f"[runner] Loading Generative Model checkpoint: {cfg.generative.checkpoint_path}"
+                )
+                model.load_checkpoint(cfg.generative.checkpoint_path)
+            else:
+                print(
+                    f"[runner] Warning: Checkpoint not found at {cfg.generative.checkpoint_path}"
+                )
+
+        return model
 
     print("[runner] Generative Model Enabled (VAE).")
     return GenerativeDesignModel(
