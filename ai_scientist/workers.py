@@ -433,11 +433,14 @@ class PreRelaxWorker(Worker):
             indices, group_candidates = zip(*group)
 
             # Extract and stack params for this NFP group
+            # CRITICAL: Normalize all candidates to same shape before stacking
             r_cos_list, z_sin_list, metadata_list = [], [], []
             for cand in group_candidates:
                 params = cand.get("params") or cand
-                r_cos_list.append(np.array(params["r_cos"], dtype=np.float32))
-                z_sin_list.append(np.array(params["z_sin"], dtype=np.float32))
+                # Normalize to match surrogate schema (fixes shape mismatch bug)
+                normalized = self._normalize_params(params, schema, nfp)
+                r_cos_list.append(np.array(normalized["r_cos"], dtype=np.float32))
+                z_sin_list.append(np.array(normalized["z_sin"], dtype=np.float32))
                 metadata_list.append({k: v for k, v in cand.items() if k != "params"})
 
             # Stack into batch tensors: (B, mpol+1, 2*ntor+1)
