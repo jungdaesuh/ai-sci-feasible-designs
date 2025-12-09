@@ -216,6 +216,9 @@ class SurrogateBundle(BaseSurrogate):
         self._trained = False
         self._last_fit_count = 0
         self._last_fit_cycle = 0
+        self._single_class_fallback: int | None = (
+            None  # Tracks degenerate training state
+        )
 
     def _with_timeout(self, func):
         executor = ThreadPoolExecutor(max_workers=1)
@@ -332,6 +335,18 @@ class SurrogateBundle(BaseSurrogate):
                 random_state=0,
                 n_jobs=1,
             )
+
+            # Validate training data has both classes (fixes silent degradation)
+            unique_classes = np.unique(feasibility_labels)
+            if len(unique_classes) < 2:
+                logging.warning(
+                    f"[surrogate] Single-class training data (class={unique_classes[0]}) "
+                    "- classifier cannot discriminate between feasible/infeasible"
+                )
+                self._single_class_fallback = int(unique_classes[0])
+            else:
+                self._single_class_fallback = None
+
             clf.fit(scaled_class, feasibility_labels)
 
             regressors = {}
@@ -401,19 +416,18 @@ class SurrogateBundle(BaseSurrogate):
 
         def _predict() -> tuple[np.ndarray, dict[str, np.ndarray]]:
             scaled = self._scaler.transform(feature_matrix)
-            proba = self._classifier.predict_proba(scaled)
-            # Handle single-class case: if only 1 class, probability of class 1 is 0 or 1
-            if proba.shape[1] == 1:
-                # Single class: if it's class 0, prob of feasibility is 0; if class 1, it's 1
-                if hasattr(self._classifier, "classes_"):
-                    if self._classifier.classes_[0] == 1:
-                        prob = proba[:, 0]
-                    else:
-                        prob = np.zeros(proba.shape[0])
+
+            # Use tracked single-class fallback instead of runtime detection
+            if self._single_class_fallback is not None:
+                # Degenerate classifier: return constant probability based on known class
+                if self._single_class_fallback == 1:
+                    prob = np.ones(scaled.shape[0])  # All "feasible"
                 else:
-                    prob = np.zeros(proba.shape[0])
+                    prob = np.zeros(scaled.shape[0])  # All "infeasible"
             else:
+                proba = self._classifier.predict_proba(scaled)
                 prob = proba[:, 1]
+
             preds = {}
             for name, reg in self._regressors.items():
                 preds[name] = reg.predict(scaled)
