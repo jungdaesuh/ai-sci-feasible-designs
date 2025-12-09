@@ -359,7 +359,7 @@ Run these tasks in order. Each task depends on the previous:
 5. ✅ Task 3B: Batched processing (10× speedup for large batches)  *← DONE*
 6. ✅ Task 4: Coordinator wiring (integrates everything)  *← DONE*
 7. [ ] Verification (confirms it works)
-8. 🟡 Task 5: Offline training (optional, for production)
+8. ✅ Task 5: Offline training (optional, for production)  *← DONE*
 9. 🟡 Task 6: Periodic retraining (optional, for production)
 
 ---
