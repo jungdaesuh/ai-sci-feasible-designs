@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import torch
 
 from ai_scientist import config as ai_config
+from ai_scientist import tools
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.generative import DiffusionDesignModel, GenerativeDesignModel
 from ai_scientist.optim.samplers import (
@@ -136,12 +137,16 @@ class ExplorationWorker(Worker):
 
                 try:
                     if isinstance(self.generative_model, DiffusionDesignModel):
-                        target_metrics = {
-                            "aspect_ratio": 8.0,
-                            "minimum_normalized_magnetic_gradient_scale_length": 20.0,
-                            "max_elongation": 1.5,
-                            "edge_rotational_transform_over_n_field_periods": 0.4,
-                        }
+                        # Dynamic target metrics for StellarForge
+                        target_metrics = context.get(
+                            "target_metrics",
+                            {
+                                "edge_rotational_transform_over_n_field_periods": 0.42,  # iota
+                                "aspect_ratio": 8.0,
+                                "number_of_field_periods": 3.0,
+                                "is_quasihelical": 0.0,  # QA
+                            },
+                        )
                         vae_candidates = self.generative_model.sample(
                             vae_count, target_metrics=target_metrics, seed=seed_base
                         )
@@ -267,3 +272,153 @@ class GeometerWorker(Worker):
             f"[GeometerWorker] Retained {len(valid_candidates)}/{len(candidates)} candidates."
         )
         return {"candidates": valid_candidates, "status": "filtered"}
+
+
+class RLRefinementWorker(Worker):
+    """Worker responsible for refining candidates using RL (The Engineer)."""
+
+    def __init__(
+        self,
+        cfg: ai_config.ExperimentConfig,
+        surrogate: Optional[NeuralOperatorSurrogate],
+    ):
+        self.cfg = cfg
+        self.surrogate = surrogate
+        # Optimization settings
+        self.steps_per_candidate = 20
+        self.updates_per_candidate = 5
+
+    def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Refine candidates using PPO.
+
+        Context keys:
+            candidates: List[Dict[str, Any]]
+        """
+        candidates = context.get("candidates", [])
+        if not candidates or not self.surrogate or not self.surrogate._trained:
+            print(
+                "[RLRefinementWorker] Skipping RL (no candidates or untrained surrogate)."
+            )
+            return {"candidates": candidates, "status": "skipped"}
+
+        print(f"[RLRefinementWorker] Refining {len(candidates)} candidates with PPO...")
+
+        from ai_scientist.rl_env import StellaratorEnv
+        from ai_scientist.optim.rl_ppo import PPOEngine, PPOBuffer
+
+        refined_candidates = []
+        for i, cand in enumerate(candidates):
+            params = cand.get("params") or cand.get("candidate_params")
+            if not params:
+                continue
+
+            # Determine Target Metrics from context or config
+            # Use same logic as ExplorationWorker
+            target_metrics = context.get(
+                "target_metrics",
+                {
+                    "aspect_ratio": 8.0,
+                    # ... defaults ...
+                },
+            )
+
+            # Initialize Env
+            env = StellaratorEnv(
+                surrogate=self.surrogate,
+                initial_params=params,
+                target_metrics=target_metrics,
+                max_steps=self.steps_per_candidate,
+                device=self.surrogate._device,
+            )
+
+            # Initialize PPO
+            # State dim = env.dim
+            ppo = PPOEngine(
+                input_dim=env.dim,
+                action_dim=env.dim,
+                lr=1e-3,
+                device=self.surrogate._device,
+            )
+
+            buffer = PPOBuffer(
+                env.dim,
+                env.dim,
+                self.steps_per_candidate,
+                device=self.surrogate._device,
+            )
+
+            # Optimization Loop
+            best_score = env.initial_score
+            best_params = params
+
+            obs, _ = env.reset()
+
+            for update in range(self.updates_per_candidate):
+                buffer.reset()
+
+                # Rollout
+                for step in range(self.steps_per_candidate):
+                    with torch.no_grad():
+                        obs_tensor = torch.tensor(obs, dtype=torch.float32).to(
+                            ppo.device
+                        )
+                        action, logprob, _, value = ppo.agent.get_action_and_value(
+                            obs_tensor.unsqueeze(0)
+                        )
+
+                    next_obs, reward, terminated, truncated, info = env.step(
+                        action.cpu().numpy().flatten()
+                    )
+
+                    score = info["score"]
+                    if score > best_score:
+                        best_score = score
+                        # Reconstruct params from current vec
+                        best_params = tools.structured_unflatten(next_obs, env.schema)
+                        # Restore metadata fields not in the flattened vector
+                        best_params["n_field_periods"] = params.get(
+                            "n_field_periods", params.get("nfp", 3)
+                        )
+                        best_params["is_stellarator_symmetric"] = params.get(
+                            "is_stellarator_symmetric", True
+                        )
+
+                    buffer.add(
+                        obs,
+                        action.cpu().numpy().flatten(),
+                        logprob,
+                        reward,
+                        terminated,
+                        value,
+                    )
+                    obs = next_obs
+
+                    if terminated or truncated:
+                        obs, info = env.reset(
+                            options={"params": best_params}
+                        )  # Reset to best? Or just current?
+                        break
+
+                # Update PPO (Micro-surgery)
+                # Next value for bootstrap
+                with torch.no_grad():
+                    next_val = ppo.agent.get_value(
+                        torch.tensor(obs, dtype=torch.float32)
+                        .to(ppo.device)
+                        .unsqueeze(0)
+                    )
+
+                loss, kl = ppo.train_step(
+                    buffer, next_val, torch.tensor(0.0).to(ppo.device)
+                )
+                # print(f"  Cand {i} Update {update}: Loss={loss:.4f} Score={best_score:.2f}")
+
+            # Save refined candidate
+            new_cand = cand.copy()
+            new_cand["params"] = best_params
+            new_cand["source"] = "rl_refined"
+            new_cand["rl_score"] = float(best_score)
+            refined_candidates.append(new_cand)
+
+        return {"candidates": refined_candidates, "status": "refined"}
