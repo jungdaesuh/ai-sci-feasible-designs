@@ -58,20 +58,25 @@ def test_diffusion_model_training_and_sampling():
 
 
 def test_stellarator_diffusion_shapes():
-    mpol = 4
-    ntor = 4
-    metric_dim = 5
+    """Test StellaratorDiffusion model shape handling.
+
+    StellaratorDiffusion expects:
+    - x: (B, input_dim) - 2D PCA-compressed latent vector
+    - metrics: (B, 4) - Conditioning metrics (iota, A, nfp, N)
+    """
+    input_dim = 50  # PCA latent dimension (paper default)
+    metric_dim = 4  # (iota, A, nfp, N) - fixed by model architecture
     B = 2
 
-    model = generative.StellaratorDiffusion(mpol, ntor, metric_dim)
+    model = generative.StellaratorDiffusion(input_dim=input_dim)
 
-    x = torch.randn(B, 2, mpol + 1, 2 * ntor + 1)
+    x = torch.randn(B, input_dim)  # 2D: PCA-compressed latent
     t = torch.randint(0, 10, (B,))
     metrics = torch.randn(B, metric_dim)
 
     out = model(x, t, metrics)
 
-    assert out.shape == x.shape
+    assert out.shape == x.shape  # (B, input_dim)
 
 
 def test_diffusion_fine_tune_on_elites():
