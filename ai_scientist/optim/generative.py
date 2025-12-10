@@ -623,8 +623,12 @@ class DiffusionDesignModel:
                 flattened = latent_samples
 
         candidates = []
-        # Extract nfp from target_metrics (default 3 per AGENTS.md)
-        nfp = int(target_metrics.get("number_of_field_periods", 3))
+        # Extract nfp from target_metrics - must match conditioning logic (line 568)
+        # Check "nfp" first (used by conditioning), then "number_of_field_periods"
+        nfp_value = target_metrics.get(
+            "nfp", target_metrics.get("number_of_field_periods", 3.0)
+        )
+        nfp = int(nfp_value)
 
         for k in range(n_samples):
             try:
