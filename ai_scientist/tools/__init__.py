@@ -6,6 +6,7 @@ This module has been split into submodules but maintains the original API.
 from .design_manipulation import (
     normalized_constraint_distance_sampler,
     structured_flatten,
+    structured_unflatten,
 )
 from .evaluation import (
     _DEFAULT_RELATIVE_TOLERANCE,
@@ -28,6 +29,7 @@ __all__ = [
     "_DEFAULT_RELATIVE_TOLERANCE",
     "FlattenSchema",
     "structured_flatten",
+    "structured_unflatten",
     "evaluate_p1",
     "evaluate_p2",
     "evaluate_p3",

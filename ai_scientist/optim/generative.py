@@ -339,6 +339,7 @@ class DiffusionDesignModel:
                 xt = torch.sqrt(alpha_hat_t) * xb + torch.sqrt(1 - alpha_hat_t) * noise
 
                 # Predict noise
+                assert self._model is not None
                 noise_pred = self._model(xt, t, mb)
 
                 loss = F.mse_loss(noise_pred, noise)
@@ -469,9 +470,14 @@ class DiffusionDesignModel:
         _LOGGER.info("[diffusion] Fine-tuning complete.")
 
     def load_checkpoint(self, path: str | Path) -> None:
-        """Load model state and PCA from checkpoint."""
+        """Load model state and PCA from checkpoint.
+
+        Note: Uses weights_only=False because checkpoint contains sklearn PCA
+        which has nested numpy dependencies. This is safe for trusted checkpoints
+        (our own training output). See PyTorch docs on serialization security.
+        """
         _LOGGER.info(f"[diffusion] Loading checkpoint from {path}")
-        checkpoint = torch.load(path, map_location=self._device)
+        checkpoint = torch.load(path, map_location=self._device, weights_only=False)
         self.load_state_dict(checkpoint)
 
     def state_dict(self) -> dict[str, Any]:
@@ -805,6 +811,7 @@ class GenerativeDesignModel:
 
             for (xb,) in loader:
                 self._optimizer.zero_grad()
+                assert self._model is not None
 
                 # Reshape input flattened -> (B, 2, H, W)
                 batch_size = xb.shape[0]
