@@ -160,7 +160,7 @@ class DiffusionDesignModel:
         self._pca_components = pca_components
         self._log_interval = log_interval
 
-        self._model: StellaratorDiffusion | None = None
+        self.__model: StellaratorDiffusion | None = None  # Use property for access
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
         self.pca: PCA | None = None
@@ -171,13 +171,35 @@ class DiffusionDesignModel:
 
         self._build_noise_schedule()
 
+    @property
+    def _model(self) -> StellaratorDiffusion:
+        """Access the diffusion model, raising if not initialized.
+
+        Raises:
+            RuntimeError: If model has not been created via fit() or load_checkpoint().
+        """
+        if self.__model is None:
+            raise RuntimeError(
+                "DiffusionDesignModel not initialized. "
+                "Call fit() or load_checkpoint() first."
+            )
+        return self.__model
+
+    @_model.setter
+    def _model(self, value: StellaratorDiffusion | None) -> None:
+        self.__model = value
+
+    def _has_model(self) -> bool:
+        """Check if model exists without raising."""
+        return self.__model is not None
+
     def _build_noise_schedule(self) -> None:
         self.beta = torch.linspace(1e-4, 0.02, self._timesteps, device=self._device)
         self.alpha = 1.0 - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 
     def _ensure_model(self) -> None:
-        if self._model is not None:
+        if self.__model is not None:
             return
 
         # Input dim is PCA latent dim (or raw if no PCA)
@@ -318,7 +340,7 @@ class DiffusionDesignModel:
 
         # Init Model
         self._ensure_model()
-        self._model.train()
+        self._model.train()  # Property guarantees non-None after _ensure_model
 
         for epoch in range(self._epochs):
             epoch_loss = 0.0
@@ -339,7 +361,6 @@ class DiffusionDesignModel:
                 xt = torch.sqrt(alpha_hat_t) * xb + torch.sqrt(1 - alpha_hat_t) * noise
 
                 # Predict noise
-                assert self._model is not None
                 noise_pred = self._model(xt, t, mb)
 
                 loss = F.mse_loss(noise_pred, noise)
@@ -370,7 +391,7 @@ class DiffusionDesignModel:
             elites: Elite candidates to fine-tune on.
             epochs: Number of fine-tuning epochs (default: 20).
         """
-        if not self._trained or self._model is None:
+        if not self._trained or not self._has_model():
             _LOGGER.warning(
                 "[diffusion] Cannot fine-tune: model not trained. Use fit() first."
             )
@@ -483,7 +504,7 @@ class DiffusionDesignModel:
     def state_dict(self) -> dict[str, Any]:
         return {
             "schema": asdict(self._schema) if self._schema else None,
-            "model_state": self._model.state_dict() if self._model else None,
+            "model_state": self._model.state_dict() if self._has_model() else None,
             "trained": self._trained,
             "m_mean": self._tensor_to_list(self.m_mean),
             "m_std": self._tensor_to_list(self.m_std),
@@ -517,9 +538,11 @@ class DiffusionDesignModel:
         if self._schema:
             self._ensure_model()
             model_state = checkpoint.get("model_state")
-            if model_state and self._model:
+            if model_state and self._has_model():
                 try:
-                    self._model.load_state_dict(model_state)
+                    self.__model.load_state_dict(
+                        model_state
+                    )  # Direct access for assignment
                 except RuntimeError as e:
                     _LOGGER.warning(
                         f"Failed to load model state: {e}. Architecture mismatch?"
@@ -533,7 +556,7 @@ class DiffusionDesignModel:
         self, n_samples: int, target_metrics: Mapping[str, float], seed: int
     ) -> list[Mapping[str, Any]]:
         """Generate candidates conditioned on target metrics."""
-        if not self._trained or self._model is None or self._schema is None:
+        if not self._trained or not self._has_model() or self._schema is None:
             _LOGGER.warning("[diffusion] Model not trained.")
             return []
 
@@ -600,9 +623,14 @@ class DiffusionDesignModel:
                 flattened = latent_samples
 
         candidates = []
+        # Extract nfp from target_metrics (default 3 per AGENTS.md)
+        nfp = int(target_metrics.get("number_of_field_periods", 3))
+
         for k in range(n_samples):
             try:
                 params = tools.structured_unflatten(flattened[k], self._schema)
+                # Add n_field_periods to params (required for downstream evaluation)
+                params["n_field_periods"] = nfp
                 candidates.append(
                     {
                         "seed": seed + k,
@@ -738,11 +766,33 @@ class GenerativeDesignModel:
         )
         self._kl_weight = kl_weight
 
-        self._model: StellaratorVAE | None = None
+        self.__model: StellaratorVAE | None = None  # Use property for access
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
         self._trained = False
         self._last_fit_count = 0
+
+    @property
+    def _model(self) -> StellaratorVAE:
+        """Access the VAE model, raising if not initialized.
+
+        Raises:
+            RuntimeError: If model has not been created via fit().
+        """
+        if self.__model is None:
+            raise RuntimeError(
+                "GenerativeDesignModel not initialized. "
+                "Call fit() with sufficient samples first."
+            )
+        return self.__model
+
+    @_model.setter
+    def _model(self, value: StellaratorVAE | None) -> None:
+        self.__model = value
+
+    def _has_model(self) -> bool:
+        """Check if model exists without raising."""
+        return self.__model is not None
 
     def fit(
         self,
@@ -790,7 +840,7 @@ class GenerativeDesignModel:
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
         # 2. Initialize Model
-        if self._model is None:
+        if not self._has_model():
             self._model = StellaratorVAE(
                 mpol=self._schema.mpol,
                 ntor=self._schema.ntor,
@@ -799,7 +849,7 @@ class GenerativeDesignModel:
             self._optimizer = optim.Adam(self._model.parameters(), lr=self._lr)
 
         # 3. Train Loop
-        self._model.train()
+        self._model.train()  # Property guarantees non-None after init above
 
         grid_size = self._model.grid_h * self._model.grid_w
         half_size = grid_size  # for one channel in flattened vector
@@ -811,7 +861,6 @@ class GenerativeDesignModel:
 
             for (xb,) in loader:
                 self._optimizer.zero_grad()
-                assert self._model is not None
 
                 # Reshape input flattened -> (B, 2, H, W)
                 batch_size = xb.shape[0]
@@ -853,7 +902,7 @@ class GenerativeDesignModel:
 
     def sample(self, n_samples: int, seed: int) -> list[Mapping[str, Any]]:
         """Generate new candidates by sampling from the latent space."""
-        if not self._trained or self._model is None or self._schema is None:
+        if not self._trained or not self._has_model() or self._schema is None:
             _LOGGER.warning("[generative] Model not trained, cannot sample.")
             return []
 

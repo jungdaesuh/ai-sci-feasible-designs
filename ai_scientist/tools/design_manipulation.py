@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TypedDict
 
 import numpy as np
 
@@ -14,6 +14,20 @@ from ai_scientist.tools.evaluation import (
     _ensure_mapping,
     _quantize_float,
 )
+
+# Type for sampler results when include_distances=True
+DesignParams = Mapping[str, float | Sequence[float]]
+
+
+class SamplerResultWithDistance(TypedDict):
+    """Result from normalized_constraint_distance_sampler with distance info."""
+
+    params: DesignParams
+    normalized_constraint_distance: float
+
+
+# Union type for sampler results (with or without distance)
+SamplerResult = DesignParams | SamplerResultWithDistance
 
 
 def propose_boundary(
@@ -56,14 +70,14 @@ def propose_boundary(
 
 
 def normalized_constraint_distance_sampler(
-    base_designs: Sequence[Mapping[str, Sequence[float] | float]],
+    base_designs: Sequence[DesignParams],
     *,
     normalized_distances: Sequence[float],
     proposal_count: int,
     jitter_scale: float = 0.01,
     rng: np.random.Generator | None = None,
     include_distances: bool = False,
-) -> list[Mapping[str, float | Sequence[float]]]:
+) -> list[SamplerResult]:
     """Constraint-aware sampler for Task X.6 (docs/TASKS_CODEX_MINI.md:233).
 
     Designs with smaller normalized constraint distances are preferred so the curriculum
@@ -93,7 +107,7 @@ def normalized_constraint_distance_sampler(
 
     probabilities = (weights / weights_sum).astype(float)
     chosen_indices = rng.choice(total_candidates, size=proposal_count, p=probabilities)
-    proposals: list[Mapping[str, float | Sequence[float]]] = []
+    proposals: list[SamplerResult] = []
 
     for idx in chosen_indices:
         candidate = base_designs[idx]
@@ -231,7 +245,7 @@ def structured_flatten(
 def structured_unflatten(
     flattened_vector: np.ndarray,
     schema: FlattenSchema,
-) -> Mapping[str, Any]:
+) -> dict[str, Any]:
     """Convert a flattened array of Fourier coefficients back to a dictionary of parameters.
 
     Args:
