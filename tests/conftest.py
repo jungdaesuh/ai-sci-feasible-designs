@@ -23,15 +23,17 @@ if "constellaration.geometry" not in sys.modules:
     mock_surface = MagicMock()
     mock_surface.r_cos = MagicMock()
     mock_surface.r_cos.shape = (2, 5)
-    mock_surface.r_cos.__getitem__.return_value = 0.2  # For test_make_boundary... assertion
+    mock_surface.r_cos.__getitem__.return_value = (
+        0.2  # For test_make_boundary... assertion
+    )
     mock_surface.z_sin = MagicMock()
     mock_surface.z_sin.shape = (2, 5)
-    
+
     # Mock the submodule surface_rz_fourier
     mock_srf_module = MagicMock()
     mock_srf_module.SurfaceRZFourier.return_value = mock_surface
     sys.modules["constellaration.geometry"].surface_rz_fourier = mock_srf_module
-    
+
     # Also set it directly on geometry just in case
     sys.modules["constellaration.geometry"].SurfaceRZFourier.return_value = mock_surface
     sys.modules["constellaration.geometry"].__spec__ = None
