@@ -1,4 +1,5 @@
 # ruff: noqa: F722, F821
+# pyright: reportUndefinedVariable=false
 """Geometry utilities for stellarator optimization.
 
 This module implements Phase 1.1 of the V2 upgrade: Hybrid Representation.

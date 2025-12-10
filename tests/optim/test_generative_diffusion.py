@@ -10,7 +10,7 @@ def test_diffusion_model_training_and_sampling():
     for i in range(5):
         params = test_helpers.base_params()
         # Add some noise to params so they aren't identical
-        params["r_cos"][0][2] += i * 0.1
+        params["r_cos"][0][2] += i * 0.1  # pyright: ignore[reportIndexIssue]
 
         metrics = test_helpers.dummy_metrics_with(
             aspect_ratio=4.0 + i * 0.1,
@@ -82,7 +82,7 @@ def test_diffusion_fine_tune_on_elites():
     candidates = []
     for i in range(5):
         params = test_helpers.base_params()
-        params["r_cos"][0][2] += i * 0.1
+        params["r_cos"][0][2] += i * 0.1  # pyright: ignore[reportIndexIssue]
 
         metrics = test_helpers.dummy_metrics_with(
             aspect_ratio=4.0 + i * 0.1,
@@ -117,7 +117,7 @@ def test_diffusion_fine_tune_on_elites():
     elites = []
     for i in range(3):
         params = test_helpers.base_params()
-        params["r_cos"][0][3] += i * 0.2  # Different modification
+        params["r_cos"][0][3] += i * 0.2  # pyright: ignore[reportIndexIssue]
 
         metrics = test_helpers.dummy_metrics_with(
             aspect_ratio=5.0 + i * 0.1,  # Different range

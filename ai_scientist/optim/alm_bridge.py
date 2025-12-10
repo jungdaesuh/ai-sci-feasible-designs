@@ -1,4 +1,5 @@
 # ruff: noqa: F722, F821
+# pyright: reportUndefinedVariable=false
 """Bridge between ai_scientist ASO loop and constellaration ALM infrastructure.
 
 This module provides a steppable interface to the ALM optimization loop,

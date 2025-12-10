@@ -1,4 +1,5 @@
 # ruff: noqa: F722, F821
+# pyright: reportUndefinedVariable=false
 """Version 2.0 Surrogate: Neural Operator & Geometric Deep Learning.
 
 This module implements the Physics-Informed Surrogate (Phase 2) of the AI Scientist V2 upgrade.
@@ -91,11 +92,12 @@ class StellaratorNeuralOp(nn.Module):
         self.head_qi = nn.Linear(hidden_dim, 1)
 
     def forward(
-        self, x: Float[torch.Tensor, "batch input_dim"]
+        self,
+        x: Float[torch.Tensor, "batch input_dim"],  # pyright: ignore[reportUndefinedVariable]
     ) -> tuple[
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
     ]:
         """
         Args:
@@ -417,14 +419,15 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         return (cycle - self._last_fit_cycle) >= self._cycle_cadence
 
     def predict_torch(
-        self, x: Float[torch.Tensor, "batch input_dim"]
+        self,
+        x: Float[torch.Tensor, "batch input_dim"],  # pyright: ignore[reportUndefinedVariable]
     ) -> tuple[
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
-        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
     ]:
         """Differentiable prediction for optimization loop (Mean + Std).
 

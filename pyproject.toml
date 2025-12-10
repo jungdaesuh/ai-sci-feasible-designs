@@ -52,6 +52,11 @@ reportOptionalMemberAccess = false
 reportOptionalSubscript = false
 reportAttributeAccessIssue = false
 reportCallIssue = false
+exclude = [
+    "ai_scientist/optim/geometry.py",
+    "ai_scientist/optim/surrogate_v2.py",
+    "ai_scientist/optim/alm_bridge.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

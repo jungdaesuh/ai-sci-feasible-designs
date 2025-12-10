@@ -88,7 +88,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         self.FidelityController = FidelityController
 
         self.config = MockConfig()
-        self.controller = self.FidelityController(self.config)
+        self.controller = self.FidelityController(self.config)  # pyright: ignore[reportArgumentType]
         self.budgets = MockBudget()
 
     def tearDown(self):
@@ -132,7 +132,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         results = self.controller.evaluate_stage(
             candidates,
             stage,
-            self.budgets,
+            self.budgets,  # pyright: ignore[reportArgumentType]
             cycle_start,
             evaluate_fn=None,
             tool_name=tool_name,
@@ -194,7 +194,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         results = self.controller.evaluate_stage(
             candidates,
             stage,
-            self.budgets,
+            self.budgets,  # pyright: ignore[reportArgumentType]
             cycle_start,
             evaluate_fn=None,
             tool_name=tool_name,

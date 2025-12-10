@@ -99,7 +99,7 @@ def test_batch_evaluation(mock_constellaration_forward):
         MOCK_BOUNDARY_PARAMS,
     ]  # same params for simplicity
 
-    results = forward_model_batch(boundaries, settings, n_workers=2)
+    results = forward_model_batch(boundaries, settings, n_workers=2)  # pyright: ignore[reportArgumentType]
 
     assert len(results) == 2
     assert results[0].design_hash == results[1].design_hash
