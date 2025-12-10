@@ -24,7 +24,13 @@ sys.modules[
 ].AugmentedLagrangianState = MagicMock
 sys.modules["constellaration.optimization.settings"] = MagicMock()
 sys.modules["constellaration.utils"] = MagicMock()
-sys.modules["constellaration.utils.pytree"] = MagicMock()
+# Configure pytree mock to return proper 2-tuple for mask_and_ravel
+mock_pytree = MagicMock()
+mock_pytree.mask_and_ravel.return_value = (
+    MagicMock(),  # flat array (initial_guess)
+    lambda x: MagicMock(),  # unravel function
+)
+sys.modules["constellaration.utils.pytree"] = mock_pytree
 sys.modules["constellaration.problems"] = MagicMock()
 sys.modules["constellaration.initial_guess"] = MagicMock()
 
@@ -80,6 +86,9 @@ class TestCoordinatorASO:
         cfg.alm = ALMConfig()
         cfg.problem = "p3"
         cfg.reporting_dir = "reports"
+        # Add proposal_mix for produce_candidates_aso
+        cfg.proposal_mix = MagicMock()
+        cfg.proposal_mix.surrogate_pool_multiplier = 2.0
         return cfg
 
     @pytest.fixture
@@ -113,9 +122,14 @@ class TestCoordinatorASO:
             bounds=jnp.ones(10) * 0.5,
         )
 
-        # Setup trajectory with history
+        # Setup trajectory with history and alm_context (required by _generate_diagnostics)
+        mock_alm_context = MagicMock(spec=ALMContext)
         traj = TrajectoryState(
-            id=0, seed={}, history=[prev_state, current_state], steps=1
+            id=0,
+            seed={},
+            history=[prev_state, current_state],
+            steps=1,
+            alm_context=mock_alm_context,
         )
 
         # Run generation
