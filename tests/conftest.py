@@ -235,3 +235,40 @@ warnings.filterwarnings(
     message="Importing from numpy.matlib is deprecated",
     category=PendingDeprecationWarning,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_evaluation_state():
+    """Reset all cache state before and after each test for proper isolation.
+
+    This fixture addresses test order-dependency issues caused by:
+    1. Global _EVALUATION_CACHE and _CACHE_STATS in forward_model.py
+    2. Similar global state in tools/evaluation.py
+
+    The autouse=True ensures this runs for EVERY test without explicit opt-in.
+    """
+    # Import here to avoid circular imports and handle mocked modules
+    try:
+        from ai_scientist import forward_model as fm
+        from ai_scientist.tools import evaluation as tools_eval
+
+        # Clear before test
+        fm.clear_cache()
+        tools_eval._EVALUATION_CACHE.clear()
+        tools_eval._CACHE_STATS.clear()
+    except (ImportError, AttributeError):
+        # Modules may be mocked or not available in all test contexts
+        pass
+
+    yield
+
+    # Clear after test for completeness
+    try:
+        from ai_scientist import forward_model as fm
+        from ai_scientist.tools import evaluation as tools_eval
+
+        fm.clear_cache()
+        tools_eval._EVALUATION_CACHE.clear()
+        tools_eval._CACHE_STATS.clear()
+    except (ImportError, AttributeError):
+        pass
