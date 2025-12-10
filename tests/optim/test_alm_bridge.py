@@ -4,6 +4,14 @@ import pytest
 import hypothesis
 from hypothesis import strategies as st
 
+# IMPORTANT: Import pytree_guard FIRST to install the registration guard
+# before any constellaration modules that register PyTree types.
+# This prevents "Duplicate custom PyTreeDef type registration" errors.
+try:
+    import ai_scientist.pytree_guard  # noqa: F401 - side effect: installs guard
+except ImportError:
+    pass  # If ai_scientist not available, skip guard installation
+
 # Check if constellaration is available
 try:
     import constellaration.forward_model as forward_model
@@ -14,17 +22,6 @@ try:
         AugmentedLagrangianSettings,
         AugmentedLagrangianState,
     )
-    from constellaration.utils.pytree import register_pydantic_data
-
-    # Register SurfaceRZFourier as a pytree node to ensure mask_and_ravel works
-    # This is likely done implicitly in the full app but needed explicitly here
-    try:
-        register_pydantic_data(
-            surface_rz_fourier.SurfaceRZFourier,
-            meta_fields=["n_field_periods", "is_stellarator_symmetric"],
-        )
-    except ValueError:
-        pass
 except ImportError:
     pytest.skip("constellaration not installed", allow_module_level=True)
 

@@ -1,42 +1,68 @@
 # ruff: noqa: E402
 """Tests for periodic retraining in coordinator."""
 
-import importlib
+import dataclasses
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock dependencies at module level to avoid environment issues
-sys.modules["vmecpp"] = MagicMock()
-sys.modules["vmecpp.cpp"] = MagicMock()
-sys.modules["vmecpp.cpp._vmecpp"] = MagicMock()
+# Check if real constellaration is available BEFORE any mocking
+_CONSTELLARATION_AVAILABLE = False
+try:
+    import constellaration.forward_model as _check_fm
 
-constellaration = MagicMock()
-sys.modules["constellaration"] = constellaration
-sys.modules["constellaration.forward_model"] = MagicMock()
-sys.modules["constellaration.boozer"] = MagicMock()
-sys.modules["constellaration.mhd"] = MagicMock()
-sys.modules["constellaration.geometry"] = MagicMock()
-sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
-sys.modules["constellaration.optimization"] = MagicMock()
-sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
-sys.modules[
-    "constellaration.optimization.augmented_lagrangian"
-].AugmentedLagrangianState = MagicMock
-sys.modules["constellaration.optimization.settings"] = MagicMock()
-sys.modules["constellaration.utils"] = MagicMock()
-sys.modules["constellaration.utils.pytree"] = MagicMock()
-sys.modules["constellaration.problems"] = MagicMock()
-sys.modules["constellaration.initial_guess"] = MagicMock()
+    _CONSTELLARATION_AVAILABLE = True
+    del _check_fm
+except ImportError:
+    pass
 
-# Reload coordinator to ensure it picks up the mocked dependencies
-if "ai_scientist.coordinator" in sys.modules:
-    import ai_scientist.coordinator
 
-    importlib.reload(ai_scientist.coordinator)
+@pytest.fixture(autouse=True, scope="module")
+def mock_constellaration_modules():
+    """Mock constellaration modules for testing when not available.
 
-import dataclasses
+    Uses patch.dict context manager to ensure cleanup after tests.
+    This prevents pollution of sys.modules for subsequent test files.
+    """
+    if _CONSTELLARATION_AVAILABLE:
+        # Real modules available, no mocking needed
+        yield
+        return
+
+    # Create mock modules
+    mock_constellaration = MagicMock()
+    mock_alm = MagicMock()
+    mock_alm.AugmentedLagrangianState = MagicMock
+
+    mock_modules = {
+        "vmecpp": MagicMock(),
+        "vmecpp.cpp": MagicMock(),
+        "vmecpp.cpp._vmecpp": MagicMock(),
+        "constellaration": mock_constellaration,
+        "constellaration.forward_model": MagicMock(),
+        "constellaration.boozer": MagicMock(),
+        "constellaration.mhd": MagicMock(),
+        "constellaration.geometry": MagicMock(),
+        "constellaration.geometry.surface_rz_fourier": MagicMock(),
+        "constellaration.optimization": MagicMock(),
+        "constellaration.optimization.augmented_lagrangian": mock_alm,
+        "constellaration.optimization.settings": MagicMock(),
+        "constellaration.utils": MagicMock(),
+        "constellaration.utils.pytree": MagicMock(),
+        "constellaration.problems": MagicMock(),
+        "constellaration.initial_guess": MagicMock(),
+    }
+
+    with patch.dict(sys.modules, mock_modules):
+        # Force re-import of coordinator to pick up mocks
+        if "ai_scientist.coordinator" in sys.modules:
+            del sys.modules["ai_scientist.coordinator"]
+        yield
+        # Cleanup: remove coordinator so it gets re-imported fresh next time
+        if "ai_scientist.coordinator" in sys.modules:
+            del sys.modules["ai_scientist.coordinator"]
+
 
 from ai_scientist.config import RetrainingConfig, load_experiment_config
 from ai_scientist.coordinator import Coordinator
