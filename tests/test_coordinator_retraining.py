@@ -24,6 +24,12 @@ def mock_constellaration_modules():
 
     Uses patch.dict context manager to ensure cleanup after tests.
     This prevents pollution of sys.modules for subsequent test files.
+
+    Note on scope="module":
+    - Module scope is appropriate here because tests only READ from mocks
+    - If any test needs to MUTATE mock state, consider using scope="function"
+      or create test-specific mocks to avoid cross-test pollution
+    - The patch.dict context ensures all mocks are removed at module teardown
     """
     if _CONSTELLARATION_AVAILABLE:
         # Real modules available, no mocking needed

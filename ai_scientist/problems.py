@@ -183,6 +183,9 @@ class P3Problem(Problem):
     _edge_magnetic_mirror_ratio_upper_bound = 0.25
     _flux_compression_in_regions_of_bad_curvature_upper_bound = 0.9
     _vacuum_well_lower_bound = 0.0
+    # Normalization constant for vacuum_well when bound is 0 (avoids division by zero).
+    # Value matches constellaration.problems.MHDStableQIStellarator implementation.
+    _vacuum_well_normalization_fallback = 0.1
 
     def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
         # Constraints from constellaration.problems.MHDStableQIStellarator
@@ -197,7 +200,7 @@ class P3Problem(Problem):
         mirror_limit = self._edge_magnetic_mirror_ratio_upper_bound
         flux_limit = self._flux_compression_in_regions_of_bad_curvature_upper_bound
         well_limit = self._vacuum_well_lower_bound
-        well_norm = max(1e-1, well_limit)  # From constellaration code
+        well_norm = max(self._vacuum_well_normalization_fallback, abs(well_limit))
 
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
         qi = metrics.get("qi", 1.0)

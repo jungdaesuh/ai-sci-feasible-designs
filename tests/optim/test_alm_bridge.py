@@ -9,8 +9,10 @@ from hypothesis import strategies as st
 # This prevents "Duplicate custom PyTreeDef type registration" errors.
 try:
     import ai_scientist.pytree_guard  # noqa: F401 - side effect: installs guard
-except ImportError:
-    pass  # If ai_scientist not available, skip guard installation
+except ImportError as e:
+    # Only ignore if the module itself is missing, not internal import errors
+    if "pytree_guard" not in str(e) and "ai_scientist" not in str(e):
+        raise  # Re-raise internal import errors for debugging
 
 # Check if constellaration is available
 try:

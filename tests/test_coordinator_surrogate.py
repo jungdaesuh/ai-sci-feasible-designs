@@ -92,21 +92,26 @@ class TestCoordinatorSurrogate(unittest.TestCase):
     def tearDown(self):
         self.modules_patcher.stop()
 
-        # Clean up only modules that were explicitly reloaded during setUp.
+        # Clean up modules that were explicitly reloaded during setUp.
         # Do NOT include ai_scientist.forward_model here - it was never mocked,
         # and deleting it causes pickle identity issues for ProcessPoolExecutor
         # in subsequent tests (the _process_worker_initializer function reference
         # becomes stale when the module is reloaded).
+        #
+        # Include parent modules (ai_scientist.optim) because they may have
+        # cached references to the reloaded submodules. Clean in reverse
+        # dependency order (children first) to avoid dangling references.
         modules_to_clean = [
             "ai_scientist.coordinator",
             "ai_scientist.optim.surrogate",
+            "ai_scientist.optim",  # Parent may cache references to surrogate
         ]
 
         for mod_name in modules_to_clean:
             if mod_name in sys.modules:
                 del sys.modules[mod_name]
 
-        # Also force garbage collection of the mock objects to be safe
+        # Force garbage collection of the mock objects to prevent leaks
         self.mock_modules = None
         self.modules_patcher = None
 
