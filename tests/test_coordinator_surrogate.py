@@ -47,11 +47,24 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         import ai_scientist.optim.surrogate
         import importlib
 
-        importlib.reload(ai_scientist.optim.surrogate)
-        importlib.reload(ai_scientist.coordinator)
+        if "ai_scientist.optim.surrogate" in sys.modules:
+            mod = sys.modules["ai_scientist.optim.surrogate"]
+            importlib.reload(mod)
+        else:
+            import ai_scientist.optim.surrogate
 
-        self.Coordinator = ai_scientist.coordinator.Coordinator
-        self.SurrogatePrediction = ai_scientist.optim.surrogate.SurrogatePrediction
+        if "ai_scientist.coordinator" in sys.modules:
+            mod = sys.modules["ai_scientist.coordinator"]
+            importlib.reload(mod)
+            self.Coordinator = mod.Coordinator
+        else:
+            import ai_scientist.coordinator
+
+            self.Coordinator = ai_scientist.coordinator.Coordinator
+
+        self.SurrogatePrediction = sys.modules[
+            "ai_scientist.optim.surrogate"
+        ].SurrogatePrediction
 
         # Mock configuration
         self.cfg = MagicMock()
@@ -78,13 +91,24 @@ class TestCoordinatorSurrogate(unittest.TestCase):
 
     def tearDown(self):
         self.modules_patcher.stop()
-        # Reload real modules if they were loaded before
-        # This is a bit heavy-handed but ensures safety
-        if "ai_scientist.coordinator" in sys.modules:
-            import ai_scientist.coordinator
-            import importlib
 
-            importlib.reload(ai_scientist.coordinator)
+        # Clean up only modules that were explicitly reloaded during setUp.
+        # Do NOT include ai_scientist.forward_model here - it was never mocked,
+        # and deleting it causes pickle identity issues for ProcessPoolExecutor
+        # in subsequent tests (the _process_worker_initializer function reference
+        # becomes stale when the module is reloaded).
+        modules_to_clean = [
+            "ai_scientist.coordinator",
+            "ai_scientist.optim.surrogate",
+        ]
+
+        for mod_name in modules_to_clean:
+            if mod_name in sys.modules:
+                del sys.modules[mod_name]
+
+        # Also force garbage collection of the mock objects to be safe
+        self.mock_modules = None
+        self.modules_patcher = None
 
     def test_surrogate_rank_seeds(self):
         # Setup seeds
