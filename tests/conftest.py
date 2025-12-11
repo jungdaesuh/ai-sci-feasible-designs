@@ -259,11 +259,12 @@ warnings.filterwarnings(
 
 @pytest.fixture(autouse=True)
 def reset_evaluation_state():
-    """Reset all cache state before and after each test for proper isolation.
+    """Reset all cache state and backend before and after each test.
 
     This fixture addresses test order-dependency issues caused by:
     1. Global _EVALUATION_CACHE and _CACHE_STATS in forward_model.py
     2. Similar global state in tools/evaluation.py
+    3. Global _BACKEND state in forward_model.py
 
     The autouse=True ensures this runs for EVERY test without explicit opt-in.
     """
@@ -271,9 +272,13 @@ def reset_evaluation_state():
     try:
         from ai_scientist import forward_model as fm
         from ai_scientist.tools import evaluation as tools_eval
+        from ai_scientist.backends import MockPhysicsBackend
 
         # Clear before test
         fm.clear_cache()
+        # Default to mock backend for all tests.
+        # Tests requiring real backend must use the 'real_backend' fixture.
+        fm.set_backend(MockPhysicsBackend())
         tools_eval._EVALUATION_CACHE.clear()
         tools_eval._CACHE_STATS.clear()
     except (ImportError, AttributeError):
@@ -288,7 +293,69 @@ def reset_evaluation_state():
         from ai_scientist.tools import evaluation as tools_eval
 
         fm.clear_cache()
+        fm.reset_backend()
         tools_eval._EVALUATION_CACHE.clear()
         tools_eval._CACHE_STATS.clear()
     except (ImportError, AttributeError):
         pass
+
+
+@pytest.fixture
+def mock_backend():
+    """Fixture to explicitly use mock physics backend.
+
+    Returns the MockPhysicsBackend instance for assertions.
+
+    Example:
+        def test_something(mock_backend):
+            # ... run code that calls forward_model ...
+            assert mock_backend.call_count == expected_calls
+    """
+    try:
+        from ai_scientist import forward_model as fm
+        from ai_scientist.backends.mock import MockPhysicsBackend
+
+        backend = MockPhysicsBackend()
+        fm.set_backend(backend)
+        yield backend
+        fm.reset_backend()
+    except ImportError:
+        yield None
+
+
+@pytest.fixture
+def real_backend():
+    """Fixture for tests that require real physics backend.
+
+    Skips the test if constellaration is not available.
+
+    Example:
+        @pytest.mark.integration
+        def test_physics(real_backend):
+            # This test requires real constellaration
+            ...
+    """
+    try:
+        from ai_scientist import forward_model as fm
+        from ai_scientist.backends.real import RealPhysicsBackend
+
+        backend = RealPhysicsBackend()
+        if not backend.is_available():
+            pytest.skip("Real physics backend requires constellaration")
+
+        fm.set_backend(backend)
+        yield backend
+        fm.reset_backend()
+    except ImportError:
+        pytest.skip("Real physics backend requires constellaration")
+
+
+def pytest_configure(config):
+    """Register custom pytest markers."""
+    config.addinivalue_line(
+        "markers",
+        "integration: mark test as integration test (may require real physics)",
+    )
+    config.addinivalue_line(
+        "markers", "slow: mark test as slow (involves physics calculations)"
+    )

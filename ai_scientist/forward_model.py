@@ -8,16 +8,31 @@ import json
 import logging
 import math
 import os
-import time
 from collections import defaultdict
 from typing import Any, Dict, List, Mapping
 
 import numpy as np
 import pydantic
-from constellaration.geometry import surface_rz_fourier
-from ai_scientist.optim.prerelax import prerelax_boundary
 
-from constellaration import forward_model as constellaration_forward
+from ai_scientist.backends.base import PhysicsBackend
+
+# Type-only imports for static analysis
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass
+
+# Runtime imports - may fail if constellaration not installed
+try:
+    from constellaration.geometry import surface_rz_fourier
+    from constellaration import forward_model as constellaration_forward
+
+    _CONSTELLARATION_AVAILABLE = True
+except ImportError:
+    surface_rz_fourier = None  # type: ignore[assignment]
+    constellaration_forward = None  # type: ignore[assignment]
+    _CONSTELLARATION_AVAILABLE = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +43,108 @@ _CACHE_STATS: Dict[str, int] = defaultdict(int)
 _CANONICAL_PRECISION = 1e-8
 _DEFAULT_ROUNDING = 1e-6
 _DEFAULT_SCHEMA_VERSION = 1
+
+# --- Backend Registry ---
+
+_BACKEND: PhysicsBackend | None = None
+
+
+def get_backend() -> "PhysicsBackend":
+    """Get the current physics backend, auto-selecting if needed.
+
+    Returns:
+        The active PhysicsBackend instance.
+
+    Note:
+        If no backend is set, auto-selects based on:
+        1. AI_SCIENTIST_PHYSICS_BACKEND environment variable
+        2. Real backend if constellaration is available
+        3. Mock backend as fallback
+    """
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = _auto_select_backend()
+    return _BACKEND
+
+
+def set_backend(backend: PhysicsBackend | str) -> None:
+    """Set the physics backend explicitly.
+
+    Args:
+        backend: Either a PhysicsBackend instance or a string name
+                 ("mock", "real", "auto").
+
+    Example:
+        >>> from ai_scientist.backends import MockPhysicsBackend
+        >>> set_backend(MockPhysicsBackend())
+        >>> # or
+        >>> set_backend("mock")
+    """
+    global _BACKEND
+    if isinstance(backend, str):
+        backend = _create_backend(backend)
+    _BACKEND = backend
+    logger.info(f"Physics backend set to: {_BACKEND.name}")
+
+
+def reset_backend() -> None:
+    """Reset the backend to trigger auto-selection on next use."""
+    global _BACKEND
+    _BACKEND = None
+
+
+def _create_backend(name: str) -> "PhysicsBackend":
+    """Create a backend by name."""
+    from ai_scientist.backends.mock import MockPhysicsBackend
+
+    name = name.lower()
+    if name == "mock":
+        return MockPhysicsBackend()
+    elif name == "real":
+        from ai_scientist.backends.real import RealPhysicsBackend
+
+        return RealPhysicsBackend()
+    elif name == "auto":
+        return _auto_select_backend()
+    else:
+        raise ValueError(f"Unknown backend: {name!r}. Use 'mock', 'real', or 'auto'.")
+
+
+def _auto_select_backend() -> "PhysicsBackend":
+    """Auto-select backend based on environment and availability."""
+    from ai_scientist.backends.mock import MockPhysicsBackend
+
+    # Check environment variable first
+    env_backend = os.environ.get("AI_SCIENTIST_PHYSICS_BACKEND", "auto").lower()
+
+    if env_backend == "mock":
+        logger.debug("Using mock backend (AI_SCIENTIST_PHYSICS_BACKEND=mock)")
+        return MockPhysicsBackend()
+    elif env_backend == "real":
+        from ai_scientist.backends.real import RealPhysicsBackend
+
+        backend = RealPhysicsBackend()
+        if not backend.is_available():
+            logger.warning(
+                "AI_SCIENTIST_PHYSICS_BACKEND=real but constellaration not available, "
+                "falling back to mock"
+            )
+            return MockPhysicsBackend()
+        logger.debug("Using real backend (AI_SCIENTIST_PHYSICS_BACKEND=real)")
+        return backend
+    else:  # auto
+        # Try real first, fall back to mock
+        try:
+            from ai_scientist.backends.real import RealPhysicsBackend
+
+            backend = RealPhysicsBackend()
+            if backend.is_available():
+                logger.debug("Auto-selected real physics backend")
+                return backend
+        except ImportError:
+            pass
+        logger.debug("Auto-selected mock physics backend")
+        return MockPhysicsBackend()
 
 
 def get_cache_stats() -> Dict[str, int]:
@@ -54,8 +171,12 @@ class ForwardModelSettings(pydantic.BaseModel):
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
-    constellaration_settings: constellaration_forward.ConstellarationSettings = (
-        pydantic.Field(default_factory=constellaration_forward.ConstellarationSettings)
+    constellaration_settings: Any = pydantic.Field(
+        default_factory=lambda: (
+            constellaration_forward.ConstellarationSettings()
+            if constellaration_forward
+            else None
+        )
     )
     problem: str = "p3"  # p1, p2, p3, etc.
     stage: str = "unknown"
@@ -73,8 +194,8 @@ class EvaluationResult(pydantic.BaseModel):
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
-    # Core metrics from constellaration
-    metrics: constellaration_forward.ConstellarationMetrics
+    # Core metrics from constellaration (Any to avoid type issues when module unavailable)
+    metrics: Any
 
     # Optimization-relevant fields
     objective: float
@@ -189,7 +310,7 @@ def compute_design_hash(
 
 def make_boundary_from_params(
     params: Mapping[str, Any],
-) -> surface_rz_fourier.SurfaceRZFourier:
+) -> Any:
     """Construct a SurfaceRZFourier boundary from a parameter dictionary."""
     payload: dict[str, Any] = {
         "r_cos": np.asarray(params["r_cos"], dtype=float),
@@ -218,7 +339,7 @@ def _log10_or_large(value: float | None) -> float:
 
 
 def compute_constraint_margins(
-    metrics: constellaration_forward.ConstellarationMetrics,
+    metrics: Any,
     problem: str,
 ) -> Dict[str, float]:
     """Compute margins for constraints based on the problem definition.
@@ -289,7 +410,7 @@ def compute_constraint_margins(
 
 
 def compute_objective(
-    metrics: constellaration_forward.ConstellarationMetrics,
+    metrics: Any,
     problem: str,
 ) -> float:
     """Compute the primary objective function value."""
@@ -327,8 +448,6 @@ def forward_model(
     - Calling constellaration forward_model
     - Result packaging
     """
-    start_time = time.time()
-
     # 1. Compute Design Hash
     d_hash = compute_design_hash(boundary)
 
@@ -359,64 +478,12 @@ def forward_model(
 
     _CACHE_STATS["misses"] += 1
 
-    # 3. Prepare Boundary
-    if settings.prerelax:
-        try:
-            # Need nfp for geometry
-            nfp_val = boundary.get("n_field_periods") or boundary.get("nfp") or 1
-            boundary, relax_loss = prerelax_boundary(
-                dict(boundary),
-                steps=settings.prerelax_steps,
-                lr=settings.prerelax_lr,
-                nfp=int(nfp_val),
-            )
-            # logger.info(f"Pre-relaxed boundary (Final Energy: {relax_loss:.4f})")
-        except Exception as e:
-            logger.warning(f"Pre-relaxation failed: {e}")
+    # 3. Delegate to the pluggable backend
+    # This allows MockPhysicsBackend to handle evaluation in tests
+    backend = get_backend()
+    result = backend.evaluate(boundary, settings)
 
-    try:
-        surf = make_boundary_from_params(boundary)
-    except Exception as e:
-        logger.error(f"Failed to create boundary: {e}")
-        raise ValueError(f"Invalid boundary parameters: {e}") from e
-
-    # 4. Run Physics Model
-    try:
-        metrics, _ = constellaration_forward.forward_model(
-            boundary=surf,
-            settings=settings.constellaration_settings,
-        )
-    except Exception as e:
-        logger.error(f"Physics evaluation failed: {e}")
-        # We might want to return a penalized result or re-raise.
-        # For robust orchestration, re-raising allows the caller to handle it.
-        raise RuntimeError(f"Physics evaluation failed: {e}") from e
-
-    # 5. Compute Derived Values
-    objective = compute_objective(metrics, settings.problem)
-    constraints_map = compute_constraint_margins(metrics, settings.problem)
-    feasibility = max_violation(constraints_map)
-    is_feasible = feasibility <= 1e-2  # Tolerance
-
-    evaluation_time = time.time() - start_time
-
-    result = EvaluationResult(
-        metrics=metrics,
-        objective=objective,
-        constraints=list(constraints_map.values()),
-        constraint_names=list(constraints_map.keys()),
-        feasibility=feasibility,
-        is_feasible=is_feasible,
-        cache_hit=False,
-        design_hash=d_hash,
-        evaluation_time_sec=evaluation_time,
-        settings=settings,
-        fidelity=settings.fidelity,
-        equilibrium_converged=True,
-        error_message=None,
-    )
-
-    # 6. Update Cache
+    # 4. Update Cache
     if use_cache:
         _EVALUATION_CACHE[cache_key] = result
 
@@ -465,21 +532,34 @@ def forward_model_batch(
                 # we can use a placeholder hash or recompute it if needed.
                 # But EvaluationResult requires metrics.
 
-                # Create dummy metrics with all required fields
-                dummy_metrics = constellaration_forward.ConstellarationMetrics(
-                    aspect_ratio=float("inf"),
-                    aspect_ratio_over_edge_rotational_transform=float("inf"),
-                    max_elongation=float("inf"),
-                    axis_rotational_transform_over_n_field_periods=0.0,
-                    edge_rotational_transform_over_n_field_periods=0.0,
-                    axis_magnetic_mirror_ratio=float("inf"),
-                    edge_magnetic_mirror_ratio=float("inf"),
-                    average_triangularity=0.0,
-                    vacuum_well=-float("inf"),  # Negative is bad for MHD stability
-                    minimum_normalized_magnetic_gradient_scale_length=0.0,
-                    qi=None,
-                    flux_compression_in_regions_of_bad_curvature=None,
-                )
+                # Create dummy metrics with penalized values
+                # Use MockMetrics when constellaration is unavailable
+                if constellaration_forward is not None:
+                    dummy_metrics = constellaration_forward.ConstellarationMetrics(
+                        aspect_ratio=float("inf"),
+                        aspect_ratio_over_edge_rotational_transform=float("inf"),
+                        max_elongation=float("inf"),
+                        axis_rotational_transform_over_n_field_periods=0.0,
+                        edge_rotational_transform_over_n_field_periods=0.0,
+                        axis_magnetic_mirror_ratio=float("inf"),
+                        edge_magnetic_mirror_ratio=float("inf"),
+                        average_triangularity=0.0,
+                        vacuum_well=-float("inf"),
+                        minimum_normalized_magnetic_gradient_scale_length=0.0,
+                        qi=None,
+                        flux_compression_in_regions_of_bad_curvature=None,
+                    )
+                else:
+                    # Fallback to MockMetrics when constellaration unavailable
+                    from ai_scientist.backends.mock import MockMetrics
+
+                    dummy_metrics = MockMetrics(
+                        aspect_ratio=float("inf"),
+                        max_elongation=float("inf"),
+                        minimum_normalized_magnetic_gradient_scale_length=0.0,
+                        mirror_ratio=float("inf"),
+                        vmec_converged=False,
+                    )
 
                 # Determine penalty direction based on problem
                 # This duplicates logic from _penalized_result in tools/evaluation.py

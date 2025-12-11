@@ -228,8 +228,14 @@ def test_runner_resume_flow(temp_workspace):
         assert mock_run_cycle_2.called
 
 
-def test_runner_resume_integration(temp_workspace):
-    """Integration-style test: run cycle1 then resume for cycle2 using real DB writes."""
+@pytest.mark.integration
+@pytest.mark.slow
+def test_runner_resume_integration(temp_workspace, real_backend):
+    """Integration-style test: run cycle1 then resume for cycle2 using real DB writes.
+
+    This test requires the real constellaration physics backend.
+    It is skipped if constellaration is not installed.
+    """
     config, db_path, report_dir = temp_workspace
 
     mock_eval_func = MagicMock()

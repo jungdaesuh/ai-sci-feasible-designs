@@ -219,21 +219,27 @@ class SurrogateBundle(BaseSurrogate):
         self._single_class_fallback: int | None = (
             None  # Tracks degenerate training state
         )
+        # Explicit class encoding: 1 = feasible, 0 = infeasible
+        # Used for defensive single-class fallback logic
+        self._positive_class_label: int = 1
 
     def _with_timeout(self, func):
+        """Execute func with a timeout, ensuring non-blocking cleanup.
+
+        NOTE: We use shutdown(wait=False, cancel_futures=True) to prevent
+        deadlocks during test module reloading. This may leave orphaned threads
+        if the worker is truly stuck, but they will be cleaned up when the
+        process exits. This is an acceptable tradeoff for test suite stability.
+        See: https://github.com/python/cpython/issues/87423
+        """
         executor = ThreadPoolExecutor(max_workers=1)
         try:
             future = executor.submit(func)
-            result = future.result(timeout=self._timeout_seconds)
-            executor.shutdown(wait=True)
-            return result
-        except TimeoutError:
-            future.cancel()
-            executor.shutdown(wait=False)
-            raise
-        except:
-            executor.shutdown(wait=True)
-            raise
+            return future.result(timeout=self._timeout_seconds)
+        finally:
+            # Non-blocking shutdown: prevents deadlock if worker is stuck
+            # cancel_futures=True prevents queued tasks from starting (Python 3.9+)
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _vectorize(self, params: Mapping[str, Any]) -> np.ndarray:
         vector, schema = tools.structured_flatten(params, schema=self._schema)
@@ -420,7 +426,8 @@ class SurrogateBundle(BaseSurrogate):
             # Use tracked single-class fallback instead of runtime detection
             if self._single_class_fallback is not None:
                 # Degenerate classifier: return constant probability based on known class
-                if self._single_class_fallback == 1:
+                # Use explicit _positive_class_label for defensive coding
+                if self._single_class_fallback == self._positive_class_label:
                     prob = np.ones(scaled.shape[0])  # All "feasible"
                 else:
                     prob = np.zeros(scaled.shape[0])  # All "infeasible"
