@@ -488,6 +488,28 @@ class DiffusionDesignModel:
         X_np = np.vstack(vectors)
         X_latent = self.pca.transform(X_np)
 
+        # P1 FIX: Monitor reconstruction error to detect out-of-distribution elites
+        X_reconstructed = self.pca.inverse_transform(X_latent)
+        reconstruction_error = np.mean((X_np - X_reconstructed) ** 2, axis=1)
+        mean_error = float(np.mean(reconstruction_error))
+        max_error = float(np.max(reconstruction_error))
+        # Warn if error exceeds threshold (calibrated from training set variance)
+        OOD_THRESHOLD = 0.1  # Empirical threshold for out-of-distribution detection
+        if max_error > OOD_THRESHOLD:
+            _LOGGER.warning(
+                "[diffusion] Elite candidates may be outside PCA basis "
+                "(max reconstruction error: %.4f > %.4f threshold). "
+                "Consider re-fitting PCA on combined data.",
+                max_error,
+                OOD_THRESHOLD,
+            )
+        else:
+            _LOGGER.debug(
+                "[diffusion] PCA reconstruction: mean_error=%.6f, max_error=%.6f",
+                mean_error,
+                max_error,
+            )
+
         X = torch.tensor(X_latent, dtype=torch.float32).to(self._device)
         M = torch.tensor(np.vstack(metrics_list), dtype=torch.float32).to(self._device)
 
