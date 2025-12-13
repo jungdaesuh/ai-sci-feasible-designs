@@ -15,7 +15,15 @@ from ai_scientist.tools.hypervolume import (
     _hypervolume_minimization,
     _objective_vector,
 )
-from constellaration import forward_model
+
+# Guard import - constellaration may not be installed in mock/surrogate-only runs
+try:
+    from constellaration import forward_model
+
+    _CONSTELLARATION_AVAILABLE = True
+except ImportError:
+    forward_model = None  # type: ignore[assignment]
+    _CONSTELLARATION_AVAILABLE = False
 
 _DEFAULT_RELATIVE_TOLERANCE = 1e-2
 _DEFAULT_SCHEMA_VERSION = 1
@@ -265,6 +273,18 @@ def _settings_for_stage(
     stage: str, problem: str, *, skip_qi: bool = False
 ) -> centralized_fm.ForwardModelSettings:
     stage_lower = stage.lower()
+    fidelity = "high" if "high" in stage_lower or "p" in stage_lower else "low"
+
+    # If constellaration is not available, return settings with None.
+    # The mock backend handles this gracefully; real backend will fail
+    # appropriately at evaluation time if actually used.
+    if not _CONSTELLARATION_AVAILABLE or forward_model is None:
+        return centralized_fm.ForwardModelSettings(
+            constellaration_settings=None,
+            problem=problem,
+            stage=stage_lower,
+            fidelity=fidelity,
+        )
 
     # Determine Constellaration Settings
     if stage_lower == "promote":
@@ -292,7 +312,7 @@ def _settings_for_stage(
         constellaration_settings=c_settings,
         problem=problem,
         stage=stage_lower,
-        fidelity="high" if "high" in stage_lower or "p" in stage_lower else "low",
+        fidelity=fidelity,
     )
 
 
@@ -304,18 +324,18 @@ def _normalize_between_bounds(
     return float(np.clip(normalized, 0.0, 1.0))
 
 
-def _gradient_score(metrics: forward_model.ConstellarationMetrics) -> float:
+def _gradient_score(metrics: Any) -> float:
     gradient = float(metrics.minimum_normalized_magnetic_gradient_scale_length)
     aspect = float(metrics.aspect_ratio)
     return float(gradient / max(1.0, aspect))
 
 
-def _p2_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
+def _p2_feasibility(metrics: Any) -> float:
     margins = compute_constraint_margins(metrics, "p2")
     return _max_violation(margins)
 
 
-def _p3_feasibility(metrics: forward_model.ConstellarationMetrics) -> float:
+def _p3_feasibility(metrics: Any) -> float:
     margins = compute_constraint_margins(metrics, "p3")
     return _max_violation(margins)
 

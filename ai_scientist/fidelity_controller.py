@@ -232,7 +232,11 @@ class FidelityController:
                 "max_violation": result.feasibility,
                 "cache_hit": result.cache_hit,
                 "vmec_status": "ok" if not result.error_message else "exception",
-                "settings": result.settings.constellaration_settings.model_dump(),
+                "settings": (
+                    result.settings.constellaration_settings.model_dump()
+                    if result.settings.constellaration_settings is not None
+                    else {}
+                ),
             }
 
             # Add derived fields
