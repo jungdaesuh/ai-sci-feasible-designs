@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from ai_scientist import tools
-from ai_scientist.test_helpers import base_params, dummy_metrics
+from ai_scientist.test_helpers import base_params
 
 
 def test_make_boundary_from_params_constructs_surface() -> None:
@@ -11,31 +11,23 @@ def test_make_boundary_from_params_constructs_surface() -> None:
     np.testing.assert_allclose(boundary.r_cos[0, 4], 0.2, atol=1e-2)
 
 
-def test_evaluate_p1_caches_by_stage(monkeypatch) -> None:
-    metrics = dummy_metrics()
-    call_counter = {"count": 0}
-
-    def fake_forward(boundary, settings):
-        call_counter["count"] += 1
-        return metrics, None
-
-    monkeypatch.setattr("constellaration.forward_model.forward_model", fake_forward)
+def test_evaluate_p1_caches_by_stage(mock_backend) -> None:
     tools.clear_evaluation_cache()
     params = base_params()
 
     result = tools.evaluate_p1(params, stage="screen")
-    assert result["objective"] == pytest.approx(metrics.max_elongation)
+    assert result["objective"] == pytest.approx(float(result["metrics"]["max_elongation"]))
     assert "metrics" in result
-    assert call_counter["count"] == 1
+    assert mock_backend.call_count == 1
 
     cached = tools.evaluate_p1(params, stage="screen")
     assert cached["objective"] == result["objective"]
-    assert call_counter["count"] == 1
+    assert mock_backend.call_count == 1
     stats = tools.get_cache_stats("screen")
     assert stats["hits"] >= 1
 
     tools.evaluate_p1(params, stage="promote")
-    assert call_counter["count"] == 2
+    assert mock_backend.call_count == 2
     stats = tools.get_cache_stats("promote")
     # Stats are now global/aggregated across stages
     assert stats["misses"] == 2
@@ -43,23 +35,15 @@ def test_evaluate_p1_caches_by_stage(monkeypatch) -> None:
     assert tools.get_cache_stats("promote")["hits"] >= 1
 
 
-def test_evaluate_p1_can_bypass_cache(monkeypatch) -> None:
-    metrics = dummy_metrics()
-    call_counter = {"count": 0}
-
-    def fake_forward(boundary, settings):
-        call_counter["count"] += 1
-        return metrics, None
-
-    monkeypatch.setattr("constellaration.forward_model.forward_model", fake_forward)
+def test_evaluate_p1_can_bypass_cache(mock_backend) -> None:
     tools.clear_evaluation_cache()
     params = base_params()
 
     tools.evaluate_p1(params, stage="screen")
-    assert call_counter["count"] == 1
+    assert mock_backend.call_count == 1
 
     tools.evaluate_p1(params, stage="screen")
-    assert call_counter["count"] == 1
+    assert mock_backend.call_count == 1
 
     tools.evaluate_p1(params, stage="screen", use_cache=False)
-    assert call_counter["count"] == 2
+    assert mock_backend.call_count == 2

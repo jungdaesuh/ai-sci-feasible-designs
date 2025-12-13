@@ -166,6 +166,7 @@ class BaseSurrogate(ABC):
         *,
         minimize_objective: bool,
         exploration_ratio: float = 0.0,
+        problem: str | None = None,
     ) -> list[SurrogatePrediction]:
         """Rank candidates using the surrogate model."""
         pass
@@ -481,6 +482,7 @@ class SurrogateBundle(BaseSurrogate):
         *,
         minimize_objective: bool,
         exploration_ratio: float = 0.0,
+        problem: str | None = None,
     ) -> list[SurrogatePrediction]:
         if not candidates:
             return []

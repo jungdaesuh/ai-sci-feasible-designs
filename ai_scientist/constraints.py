@@ -31,14 +31,14 @@ P1_CONSTRAINT_NAMES: List[str] = [
 P2_CONSTRAINT_NAMES: List[str] = [
     "aspect_ratio",
     "edge_rotational_transform",
-    "qi_log10",  # Normalized: log10(qi) - threshold
+    "qi",  # Constraint uses log10(qi) - threshold (see forward_model.compute_constraint_margins)
     "edge_magnetic_mirror_ratio",
     "max_elongation",
 ]
 
 P3_CONSTRAINT_NAMES: List[str] = [
     "edge_rotational_transform",
-    "qi_log10",
+    "qi",
     "edge_magnetic_mirror_ratio",
     "flux_compression",
     "vacuum_well",
@@ -48,7 +48,7 @@ P3_CONSTRAINT_NAMES: List[str] = [
 P3_ALM_CONSTRAINT_NAMES: List[str] = [
     "aspect_ratio",
     "edge_rotational_transform",
-    "qi_log10",
+    "qi",
     "edge_magnetic_mirror_ratio",
     "flux_compression",
     "vacuum_well",
@@ -69,8 +69,8 @@ METRICS_KEY_MAP: Dict[str, str] = {
     "edge_rotational_transform": "edge_rotational_transform_over_n_field_periods",
     # Magnetic properties
     "edge_magnetic_mirror_ratio": "edge_magnetic_mirror_ratio",
-    # QI residual - stored as raw "qi" in metrics, but constraint is log10
-    "qi_log10": "qi",  # Constraint uses log10(qi), metric stores raw qi
+    # QI residual - stored as raw "qi" in metrics, but constraint is log10(qi) <= threshold
+    "qi": "qi",
     # MHD stability
     "vacuum_well": "vacuum_well",
     "flux_compression": "flux_compression_in_regions_of_bad_curvature",
@@ -175,7 +175,7 @@ def is_physics_constraint(constraint_name: str) -> bool:
     Physics constraints include QI, vacuum_well, flux_compression.
     Geometry constraints include aspect_ratio, elongation, triangularity, iota, mirror.
     """
-    return constraint_name in {"qi_log10", "vacuum_well", "flux_compression"}
+    return constraint_name in {"qi", "vacuum_well", "flux_compression"}
 
 
 def is_p3_only_constraint(constraint_name: str) -> bool:

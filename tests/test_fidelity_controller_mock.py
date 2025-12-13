@@ -79,6 +79,25 @@ class TestFidelityControllerMock(unittest.TestCase):
         self.patcher = patch.dict(sys.modules, self.mock_modules)
         self.patcher.start()
 
+        # Patch all mocked submodules on the ai_scientist package if it's already loaded.
+        self.pkg_patchers = []
+        if "ai_scientist" in sys.modules:
+            import ai_scientist
+            
+            # Patch each attribute
+            for name, mock_obj in [
+                ("tools", self.mock_tools),
+                ("forward_model", self.mock_fm),
+                ("adapter", self.mock_adapter),
+                ("memory", self.mock_memory),
+                ("experiment_runner", self.mock_runner),
+            ]:
+                # check if the attribute exists or if we should set it
+                # For safety, we use patch.object which handles cleanup
+                p = patch.object(ai_scientist, name, mock_obj, create=True)
+                p.start()
+                self.pkg_patchers.append(p)
+
         # Force re-import of module under test to pick up mocks
         if "ai_scientist.fidelity_controller" in sys.modules:
             del sys.modules["ai_scientist.fidelity_controller"]
@@ -92,6 +111,8 @@ class TestFidelityControllerMock(unittest.TestCase):
         self.budgets = MockBudget()
 
     def tearDown(self):
+        for p in getattr(self, "pkg_patchers", []):
+            p.stop()
         self.patcher.stop()
         if "ai_scientist.fidelity_controller" in sys.modules:
             del sys.modules["ai_scientist.fidelity_controller"]

@@ -105,11 +105,13 @@ def test_model_forward_shape():
     # Set nfp (last column) to valid positive integers
     x[:, -1] = torch.randint(1, 5, (batch_size,)).float()
 
-    obj, mhd, qi = model(x)
+    # B3 FIX: Model now returns 4 outputs (obj, mhd, qi, iota)
+    obj, mhd, qi, iota = model(x)
 
     assert obj.shape == (batch_size,)
     assert mhd.shape == (batch_size,)
     assert qi.shape == (batch_size,)
+    assert iota.shape == (batch_size,)
 
 
 class TestMultiConstraintFeasibility:

@@ -1,0 +1,1084 @@
+=== Source Code Consolidation ===
+
+
+================================================================================
+File: train_adapters.py
+================================================================================
+
+#!/usr/bin/env python3
+"""Preference-driven PEFT adapter trainer stub for AI Scientist (RPF loop).
+
+This script:
+1) loads preference data from the world-model SQLite DB + adaptation logs,
+2) builds lightweight SFT/DPO JSONL datasets per tool/stage,
+3) emits a versioned adapter bundle (metadata-only) to reports/adapters/,
+4) trims old bundles and appends queue.jsonl entries for observability.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sqlite3
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+from ai_scientist import adapter
+
+LOGGER = logging.getLogger(__name__)
+DEFAULT_REPORTS = Path("reports")
+
+
+def _ensure_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_preference_pairs(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                LOGGER.warning("Skipping malformed preference row in %s", path)
+    return rows
+
+
+def _load_statements(db_path: Path) -> list[Mapping[str, Any]]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT stage, status, text, tool_name, repro_cmd, seed, cycle "
+            "FROM statements"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _group_by_tool_stage(
+    entries: Iterable[Mapping[str, Any]],
+    fallback_tool: str | None,
+    fallback_stage: str | None,
+) -> dict[tuple[str, str], list[Mapping[str, Any]]]:
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        tool = str(entry.get("tool_name") or fallback_tool or "generic")
+        stage = str(entry.get("stage") or fallback_stage or "unknown")
+        grouped[(tool, stage)].append(entry)
+    return grouped
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> int:
+    _ensure_dir(path)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
+def _build_sft_rows(entries: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    for entry in entries:
+        prompt = entry.get("repro_cmd") or entry.get("reproduction_command") or ""
+        text = entry.get("text") or entry.get("quote") or entry.get("status") or ""
+        rows.append(
+            {
+                "prompt": str(prompt),
+                "response": str(text),
+                "stage": entry.get("stage"),
+                "status": entry.get("status"),
+                "problem": entry.get("problem"),
+            }
+        )
+    return rows
+
+
+def _build_dpo_pairs(entries: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    positives = [e for e in entries if str(e.get("status", "")).upper() == "SUPPORTED"]
+    negatives = [e for e in entries if str(e.get("status", "")).upper() == "REFUTED"]
+    if not positives or not negatives:
+        return []
+    pairs: list[Mapping[str, Any]] = []
+    limit = min(len(positives), len(negatives))
+    for idx in range(limit):
+        pos = positives[idx]
+        neg = negatives[idx]
+        prompt = pos.get("repro_cmd") or pos.get("reproduction_command") or ""
+        pairs.append(
+            {
+                "prompt": str(prompt),
+                "chosen": str(pos.get("text") or pos.get("quote") or ""),
+                "rejected": str(neg.get("text") or neg.get("quote") or ""),
+                "stage": pos.get("stage") or neg.get("stage"),
+            }
+        )
+    return pairs
+
+
+def _save_adapter_bundle(
+    tool: str,
+    stage: str,
+    *,
+    out_root: Path,
+    sft_path: Path | None,
+    dpo_path: Path | None,
+    sft_rows: int,
+    dpo_rows: int,
+    keep: int,
+) -> Path:
+    version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    normalized_stage = stage.lower().strip()
+    bundle_dir = out_root / tool / normalized_stage
+    adapter_path = bundle_dir / "adapter.safetensors"
+    versioned_path = bundle_dir / f"adapter_{version}.safetensors"
+    _ensure_dir(adapter_path)
+
+    metadata = {
+        "version": version,
+        "tool": tool,
+        "stage": normalized_stage,
+        "sft_examples": sft_rows,
+        "dpo_pairs": dpo_rows,
+        "sft_dataset": sft_path.as_posix() if sft_path else None,
+        "dpo_dataset": dpo_path.as_posix() if dpo_path else None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    versioned_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    adapter_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    metadata_path = bundle_dir / "metadata.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    versioned_meta = bundle_dir / f"metadata_{version}.json"
+    versioned_meta.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    candidates = sorted(
+        bundle_dir.glob("adapter_*.safetensors"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in candidates[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            LOGGER.debug("Unable to remove old adapter bundle %s", old)
+
+    meta_candidates = sorted(
+        bundle_dir.glob("metadata_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in meta_candidates[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            LOGGER.debug("Unable to remove old adapter metadata %s", old)
+
+    adapter.record_adapter_refresh(
+        tool,
+        stage,
+        backend="train_adapters.py",
+        status="trained",
+        adapter_path=adapter_path,
+        version=version,
+    )
+    return adapter_path
+
+
+def train_from_preferences(
+    *,
+    db_path: Path,
+    reports_dir: Path,
+    out_dir: Path,
+    tool_filter: str | None,
+    stage_filter: str | None,
+    keep: int,
+) -> list[Path]:
+    preference_pairs = _load_preference_pairs(
+        reports_dir / "adaptation" / "preference_pairs.jsonl"
+    )
+    statements = _load_statements(db_path)
+    combined = preference_pairs + statements
+    if not combined:
+        LOGGER.info("No preference data found at %s or %s", db_path, reports_dir)
+        return []
+
+    grouped = _group_by_tool_stage(combined, tool_filter, stage_filter)
+    saved: list[Path] = []
+    for (tool, stage), entries in sorted(grouped.items()):
+        if tool_filter and tool != tool_filter:
+            continue
+        if stage_filter and stage.lower().strip() != stage_filter.lower().strip():
+            continue
+        sft_rows = _build_sft_rows(entries)
+        dpo_pairs = _build_dpo_pairs(entries)
+
+        dataset_root = out_dir / "datasets" / tool / stage.lower().strip()
+        sft_path = dataset_root / "sft.jsonl"
+        dpo_path = dataset_root / "dpo.jsonl"
+        sft_count = _write_jsonl(sft_path, sft_rows)
+        dpo_count = _write_jsonl(dpo_path, dpo_pairs) if dpo_pairs else 0
+
+        bundle_path = _save_adapter_bundle(
+            tool,
+            stage,
+            out_root=out_dir,
+            sft_path=sft_path,
+            dpo_path=dpo_path if dpo_pairs else None,
+            sft_rows=sft_count,
+            dpo_rows=dpo_count,
+            keep=keep,
+        )
+        LOGGER.info(
+            "Trained adapter %s:%s (sft=%d dpo=%d) -> %s",
+            tool,
+            stage,
+            sft_count,
+            dpo_count,
+            bundle_path,
+        )
+        saved.append(bundle_path)
+    return saved
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train PEFT adapters from preference data."
+    )
+    parser.add_argument(
+        "--db", type=Path, default=DEFAULT_REPORTS / "ai_scientist.sqlite"
+    )
+    parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
+    parser.add_argument("--out", type=Path, default=DEFAULT_REPORTS / "adapters")
+    parser.add_argument(
+        "--tool", type=str, help="Optional tool filter (e.g., evaluate_p3)."
+    )
+    parser.add_argument(
+        "--stage", type=str, help="Optional stage filter (e.g., screen)."
+    )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=3,
+        help="How many historical adapters to keep per tool/stage.",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    saved = train_from_preferences(
+        db_path=args.db,
+        reports_dir=args.reports_dir,
+        out_dir=args.out,
+        tool_filter=args.tool,
+        stage_filter=args.stage,
+        keep=max(1, args.keep),
+    )
+    if not saved:
+        LOGGER.info("No adapters trained (empty preference data).")
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: train_offline.py
+================================================================================
+
+# ruff: noqa: E402
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+
+# Add current directory to path
+sys.path.append(os.getcwd())
+
+from ai_scientist.optim.data_loader import (
+    LogRobustScaler,
+    load_constellaration_dataset,
+    save_scaler,
+)
+from ai_scientist.optim.generative import DiffusionDesignModel
+from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+
+# Define Physics Columns to Scale
+PHYSICS_COLS = [
+    "qi",
+    "edge_magnetic_mirror_ratio",
+    "minimum_normalized_magnetic_gradient_scale_length",
+    "edge_rotational_transform_over_n_field_periods",  # iota
+]
+
+
+def clean_matrix(val):
+    """Convert numpy arrays (potentially object-arrays) to list of lists."""
+    if hasattr(val, "tolist"):
+        val = val.tolist()
+    # Now val is list
+    if isinstance(val, list):
+        return [x.tolist() if hasattr(x, "tolist") else x for x in val]
+    return val
+
+
+def save_seeds(seeds_df, filename):
+    """Save selected seeds to a JSON file in configs/seeds."""
+    output_path = Path("configs/seeds") / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    seeds_list = []
+    for _, row in seeds_df.iterrows():
+        cleaned = {}
+        # Extract boundary parameters
+        for col in row.index:
+            if col.startswith("boundary."):
+                key = col.replace("boundary.", "")
+                val = clean_matrix(row[col])
+
+                # Skip null/NaN values to avoid writing "null" in JSON
+                if val is None:
+                    continue
+                if isinstance(val, float) and np.isnan(val):
+                    continue
+
+                cleaned[key] = val
+            elif col in [
+                "vacuum_well",
+                "qi",
+                "aspect_ratio",
+            ]:  # Optional: Keep some metrics for reference
+                cleaned[f"meta_{col}"] = float(row[col])
+
+        # Ensure vital keys exist
+        if "r_cos" in cleaned and "z_sin" in cleaned:
+            # Fill defaults if missing
+            if "n_field_periods" not in cleaned:
+                cleaned["n_field_periods"] = int(row.get("boundary.n_field_periods", 1))
+            seeds_list.append(cleaned)
+
+    with open(output_path, "w") as f:
+        json.dump(seeds_list, f, indent=2)
+    print(f"Saved {len(seeds_list)} seeds to {output_path}")
+
+
+def select_best_seeds(df):
+    """Filter dataset for Best-of-Failure seeds for P1, P2, P3."""
+    print("4. Generating 'Best-of-Failure' Seeds...")
+
+    # Ensure columns exist (handling potential missing ones gracefully)
+    def has_cols(cols):
+        return all(c in df.columns for c in cols)
+
+    # P1: Geometric Optimization
+    # Target: A <= 4.0, delta <= -0.5, iota >= 0.3. Minimize Elongation.
+    # Relaxed filters to ensure candidates
+    if has_cols(
+        [
+            "aspect_ratio",
+            "average_triangularity",
+            "edge_rotational_transform_over_n_field_periods",
+            "max_elongation",
+        ]
+    ):
+        p1_mask = (
+            (df["aspect_ratio"] <= 4.5)
+            & (df["average_triangularity"] <= -0.4)
+            & (df["edge_rotational_transform_over_n_field_periods"] >= 0.25)
+        )
+        p1_candidates = df[p1_mask].sort_values("max_elongation").head(20)
+
+        if len(p1_candidates) > 0:
+            save_seeds(p1_candidates, "p1_seeds.json")
+        else:
+            print(
+                "No strict P1 candidates found. Using 'Best-of-Failure' (closest to geometry targets)."
+            )
+            # Fallback: Minimize distance to target A=4.0, delta=-0.5, iota=0.3
+            # Distance = |A - 4| + |delta - (-0.5)| + |iota - 0.3|
+
+            dist = (
+                (df["aspect_ratio"] - 4.0).abs()
+                + (df["average_triangularity"] - (-0.5)).abs()
+                + (df["edge_rotational_transform_over_n_field_periods"] - 0.3).abs()
+            )
+
+            # Take top 20 closest
+            p1_fallback = df.iloc[dist.argsort()].head(20)
+            save_seeds(p1_fallback, "p1_seeds.json")
+
+    # P2: Simple QI
+    # Constraints: A <= 10, iota >= 0.25, M <= 0.2, E <= 5. Minimize QI.
+    cols_p2 = [
+        "aspect_ratio",
+        "edge_rotational_transform_over_n_field_periods",
+        "edge_magnetic_mirror_ratio",
+        "max_elongation",
+        "qi",
+    ]
+    if has_cols(cols_p2):
+        p2_mask = (
+            (df["aspect_ratio"] <= 10.0)
+            & (df["edge_rotational_transform_over_n_field_periods"] >= 0.25)
+            & (df["edge_magnetic_mirror_ratio"] <= 0.2)
+            & (df["max_elongation"] <= 5.0)
+        )
+        p2_candidates = df[p2_mask].sort_values("qi").head(20)
+        if len(p2_candidates) > 0:
+            save_seeds(p2_candidates, "p2_seeds.json")
+        else:
+            print("No valid P2 candidates found. Skipping p2_seeds.json.")
+
+    # P3: MHD-Stable QI
+    # Constraints: W >= 0, C <= 0.9, QI <= 1e-3.5. Obj: Low A, High L_grad.
+    fc_col = "flux_compression_in_regions_of_bad_curvature"
+    grad_col = "minimum_normalized_magnetic_gradient_scale_length"
+
+    if has_cols(["vacuum_well", "qi", "aspect_ratio", grad_col]):
+        # Base physics filter
+        p3_mask = (df["vacuum_well"] >= 0) & (df["qi"] <= 10**-3.5)
+
+        if fc_col in df.columns:
+            p3_mask = p3_mask & (df[fc_col] <= 0.9)
+        else:
+            print(
+                f"Warning: {fc_col} not found. P3 seeds might violate flux constraint."
+            )
+
+        p3_valid = df[p3_mask]
+
+        if len(p3_valid) > 0:
+            # Pareto Approximation: Top compact + Top simple
+            p3_compact = p3_valid.sort_values("aspect_ratio").head(10)
+            p3_simple = p3_valid.sort_values(grad_col, ascending=False).head(10)
+            p3_candidates = (
+                pd.concat([p3_compact, p3_simple]).drop_duplicates().head(20)
+            )
+            save_seeds(p3_candidates, "p3_seeds.json")
+        else:
+            print(
+                "No strictly valid P3 seeds found. Using 'Best-of-Failure' (closest to well)."
+            )
+            # Fallback: best available well (even if slightly negative)
+            p3_fallback = df.sort_values("vacuum_well", ascending=False).head(20)
+            save_seeds(p3_fallback, "p3_seeds.json")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    parser = argparse.ArgumentParser(
+        description="Offline Data Pipeline for AI Scientist V2"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="checkpoints/v2_1",
+        help="Directory to save artifacts",
+    )
+    parser.add_argument("--epochs", type=int, default=20, help="Training epochs")
+    parser.add_argument(
+        "--only-seeds",
+        action="store_true",
+        help="Skip training and only generate seeds",
+    )
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir = Path("checkpoints")
+    checkpoints_dir.mkdir(exist_ok=True)
+
+    print("1. Loading and Cleaning Data...")
+    try:
+        df = load_constellaration_dataset(filter_geometry=True)
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
+
+    print(f"Loaded {len(df)} valid samples.")
+
+    if not args.only_seeds:
+        available_physics_cols = [c for c in PHYSICS_COLS if c in df.columns]
+        well_cols = [
+            c for c in df.columns if "well" in c.lower() or "magnetic_well" in c.lower()
+        ]
+        available_physics_cols.extend(well_cols)
+        available_physics_cols = list(set(available_physics_cols))
+
+        print(f"Physics columns selected for scaling: {available_physics_cols}")
+
+        if available_physics_cols:
+            # Filter out rows with NaNs in these specific physics columns
+            initial_count = len(df)
+            df_clean = df.dropna(subset=available_physics_cols)
+
+            if len(df_clean) < initial_count:
+                print(
+                    f"Dropped {initial_count - len(df_clean)} rows with missing physics values for scaling."
+                )
+
+            print("2. Fitting LogRobustScaler...")
+            scaler = LogRobustScaler()
+            X_physics = df_clean[available_physics_cols].values
+            scaler.fit(X_physics)
+
+            scaler_path = output_dir / "scaler.pkl"
+            save_scaler(scaler, str(scaler_path))
+            print(f"Scaler saved to {scaler_path}")
+
+            cols_path = output_dir / "physics_cols.txt"
+            with open(cols_path, "w") as f:
+                for col in available_physics_cols:
+                    f.write(f"{col}\n")
+
+        print("3. Training Physics Surrogate...")
+
+        metrics_list = []
+        target_values = []
+
+        if "boundary.r_cos" not in df.columns:
+            print(
+                "Error: boundary.r_cos not found in dataframe. Cannot train surrogate."
+            )
+            return
+
+        target_col = "minimum_normalized_magnetic_gradient_scale_length"
+        if target_col not in df.columns:
+            print(f"Warning: {target_col} not found. Using aspect_ratio.")
+            target_col = "aspect_ratio"
+
+        print(f"Training target: {target_col}")
+
+        df_train = df.dropna(subset=[target_col, "boundary.r_cos", "boundary.z_sin"])
+
+        print("Preparing training data...")
+        skipped_count = 0
+
+        for _, row in df_train.iterrows():
+            try:
+                r_cos = clean_matrix(row["boundary.r_cos"])
+                z_sin = clean_matrix(row["boundary.z_sin"])
+
+                # Ensure they are valid rectangular matrices for numpy
+                np.asarray(r_cos, dtype=float)
+                np.asarray(z_sin, dtype=float)
+
+                params = {
+                    "r_cos": r_cos,
+                    "z_sin": z_sin,
+                    "n_field_periods": row.get("boundary.n_field_periods", 1),
+                    "nfp": row.get("boundary.n_field_periods", 1),
+                }
+
+                metric_payload = {
+                    "candidate_params": params,
+                    "metrics": {
+                        "vacuum_well": row.get("vacuum_well", -1.0),
+                        "qi": row.get("qi", 1.0),
+                        target_col: row[target_col],
+                    },
+                }
+                metrics_list.append(metric_payload)
+                target_values.append(float(row[target_col]))
+            except (ValueError, TypeError):
+                skipped_count += 1
+                continue
+
+        print(
+            f"Training on {len(metrics_list)} samples (Skipped {skipped_count} invalid/jagged)."
+        )
+
+        if not metrics_list:
+            print("No valid samples found for training.")
+            return
+
+        device = "cpu"
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        print(f"Using device: {device}")
+
+        surrogate = NeuralOperatorSurrogate(
+            epochs=args.epochs,
+            batch_size=64,
+            learning_rate=1e-3,
+            n_ensembles=3,
+            device=device,
+        )
+
+        surrogate.fit(metrics_list, target_values, minimize_objective=False)
+
+        model_path = checkpoints_dir / "surrogate_physics_v2.pt"
+        torch.save(surrogate, model_path)
+        print(f"Surrogate model saved to {model_path}")
+
+        print("4. Training Diffusion Design Model...")
+        # Prepare candidates for diffusion (needs 'params' key)
+        diffusion_candidates = []
+        for _, row in df_train.iterrows():
+            try:
+                r_cos = clean_matrix(row["boundary.r_cos"])
+                z_sin = clean_matrix(row["boundary.z_sin"])
+                params = {
+                    "r_cos": r_cos,
+                    "z_sin": z_sin,
+                    "n_field_periods": row.get("boundary.n_field_periods", 1),
+                }
+                # Metrics for conditioning
+                metrics = {
+                    "aspect_ratio": row.get("aspect_ratio", 0.0),
+                    "minimum_normalized_magnetic_gradient_scale_length": row.get(
+                        "minimum_normalized_magnetic_gradient_scale_length", 0.0
+                    ),
+                    "max_elongation": row.get("max_elongation", 0.0),
+                    "edge_rotational_transform_over_n_field_periods": row.get(
+                        "edge_rotational_transform_over_n_field_periods", 0.0
+                    ),
+                }
+                diffusion_candidates.append({"params": params, "metrics": metrics})
+            except Exception:
+                continue
+
+        if diffusion_candidates:
+            diffusion_model = DiffusionDesignModel(
+                epochs=args.epochs, batch_size=32, learning_rate=1e-4, device=device
+            )
+            diffusion_model.fit(diffusion_candidates)
+
+            diff_path = checkpoints_dir / "diffusion_v2.pt"
+            # DiffusionDesignModel exposes state_dict() that includes schema, normalizers, and weights
+            if diffusion_model._trained:
+                checkpoint = diffusion_model.state_dict()
+                torch.save(checkpoint, diff_path)
+                print(f"Diffusion model saved to {diff_path}")
+            else:
+                print("Diffusion model training did not complete; skipping checkpoint.")
+        else:
+            print("No valid candidates for diffusion training.")
+    else:
+        print("Skipping training (--only-seeds provided).")
+
+    # 4. Generate Best-of-Failure Seeds
+    select_best_seeds(df)
+
+    print("Pipeline complete.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: update_adapters.py
+================================================================================
+
+#!/usr/bin/env python3
+"""Build LoRA bundle shims from preference logs so ``adapter.with_peft`` has data to consume."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from ai_scientist import adapter
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _load_preference_pairs(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        _LOGGER.info("Preference log %s does not exist, nothing to process.", path)
+        return []
+    entries: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                _LOGGER.warning("Skipping malformed preference entry: %s", exc)
+    return entries
+
+
+def _group_by_tool_stage(
+    entries: Iterable[dict[str, Any]],
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        tool = entry.get("tool_name", "unknown")
+        stage = entry.get("stage", "unknown")
+        groups[(tool, stage)].append(entry)
+    return groups
+
+
+def _normalize_stage(stage: str) -> str:
+    return stage.lower().strip()
+
+
+def _write_dataset(entries: list[dict[str, Any]], path: Path) -> int:
+    _ensure_dir(path.parent)
+    with path.open("w", encoding="utf-8") as handle:
+        for entry in entries:
+            payload = {
+                "tool_input_hash": entry.get("tool_input_hash"),
+                "stage": entry.get("stage"),
+                "status": entry.get("status"),
+                "problem": entry.get("problem"),
+                "seed": entry.get("seed"),
+                "reproduction_command": entry.get("reproduction_command"),
+                "metrics": entry.get("metrics"),
+            }
+            handle.write(json.dumps(payload, default=str) + "\n")
+    return len(entries)
+
+
+def _build_adapter_payload(
+    tool: str,
+    stage: str,
+    dataset_path: Path,
+    entries: list[dict[str, Any]],
+    sample_limit: int,
+) -> dict[str, Any]:
+    statuses = sorted({entry.get("status") for entry in entries if entry.get("status")})
+    sample_commands = [
+        entry.get("reproduction_command")
+        for entry in entries
+        if entry.get("reproduction_command")
+    ][:sample_limit]
+    return {
+        "tool": tool,
+        "stage": stage,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "preference_pair_count": len(entries),
+        "dataset_path": dataset_path.as_posix(),
+        "statuses": statuses,
+        "sample_commands": sample_commands,
+    }
+
+
+def _write_adapter_bundle(path: Path, payload: dict[str, Any]) -> None:
+    _ensure_dir(path.parent)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Convert AI Scientist preference logs into adapter metadata bundles."
+    )
+    parser.add_argument(
+        "--reports-dir",
+        type=Path,
+        default=Path("reports"),
+        help="Root directory containing adaptation/ and adapters/ artifacts.",
+    )
+    parser.add_argument(
+        "--tool",
+        type=str,
+        help="Optional tool name filter (e.g., evaluate_p3).",
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        help="Optional stage filter (e.g., screen, p3).",
+    )
+    parser.add_argument(
+        "--sample-commands",
+        type=int,
+        default=3,
+        help="How many reproduction commands to include in the adapter metadata.",
+    )
+    parser.add_argument(
+        "--no-queue",
+        action="store_true",
+        help="Do not append adapter refresh entries to queue.jsonl.",
+    )
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    preference_path = args.reports_dir / "adaptation" / "preference_pairs.jsonl"
+    entries = _load_preference_pairs(preference_path)
+    if not entries:
+        _LOGGER.info("No preference entries found, exiting.")
+        return
+
+    grouped = _group_by_tool_stage(entries)
+    if not grouped:
+        _LOGGER.info("No grouped entries after filters, nothing to update.")
+        return
+
+    for (tool, stage), group in sorted(grouped.items()):
+        if args.tool and tool != args.tool:
+            continue
+        if args.stage and _normalize_stage(stage) != _normalize_stage(args.stage):
+            continue
+
+        normalized_stage = _normalize_stage(stage)
+        dataset_path = (
+            args.reports_dir
+            / "adapters"
+            / "datasets"
+            / tool
+            / normalized_stage
+            / "preference_dataset.jsonl"
+        )
+        count = _write_dataset(group, dataset_path)
+        adapter_payload = _build_adapter_payload(
+            tool=tool,
+            stage=stage,
+            dataset_path=dataset_path,
+            entries=group,
+            sample_limit=args.sample_commands,
+        )
+        adapter_path = (
+            args.reports_dir
+            / "adapters"
+            / tool
+            / normalized_stage
+            / "adapter.safetensors"
+        )
+        _write_adapter_bundle(adapter_path, adapter_payload)
+
+        if not args.no_queue:
+            adapter.record_adapter_refresh(
+                tool,
+                stage,
+                backend="update_adapters.py",
+                adapter_path=adapter_path,
+            )
+
+        _LOGGER.info(
+            "Updated adapter %s:%s (entries=%d, dataset=%s)",
+            tool,
+            stage,
+            count,
+            dataset_path,
+        )
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: inspect_data.py
+================================================================================
+
+import os
+import sys
+
+import numpy as np
+
+from ai_scientist.optim.data_loader import load_constellaration_dataset
+
+sys.path.append(os.getcwd())
+
+
+def main():
+    print("Loading data...")
+    try:
+        df = load_constellaration_dataset(filter_geometry=True)
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+
+    if len(df) > 0 and "boundary.r_cos" in df.columns:
+        val = df.iloc[0]["boundary.r_cos"]
+        print(f"Type of boundary.r_cos: {type(val)}")
+        print(f"Value sample: {str(val)[:100]}")
+
+        try:
+            arr = np.asarray(val, dtype=float)
+            print(f"Converted to numpy array shape: {arr.shape}")
+        except Exception as e:
+            print(f"Numpy conversion failed: {e}")
+            if isinstance(val, list):
+                print(f"Length of outer list: {len(val)}")
+                if len(val) > 0:
+                    print(f"Type of first element: {type(val[0])}")
+                    if isinstance(val[0], list):
+                        print(f"Lengths of inner lists: {[len(x) for x in val]}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+File: daemon.py
+================================================================================
+
+"""Supervisory wrapper for ai_scientist.runner (see docs/AI_SCIENTIST_UNIFIED_ROADMAP.md, Section 6).
+
+Responsibilities:
+- Force OMP_NUM_THREADS=1 for worker stability.
+- Enforce a wall-clock guard for the overall run.
+- Auto-select a checkpoint to resume from (latest cycle_*.json in reporting_dir) unless overridden.
+
+This is intentionally thin: it shells out to `python -m ai_scientist.runner` with the supplied
+arguments to avoid duplicating runner logic.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Iterable, List
+
+
+def _latest_checkpoint(report_dir: Path) -> Path | None:
+    candidates = sorted(report_dir.glob("cycle_*.json"))
+    return candidates[-1] if candidates else None
+
+
+def _build_cmd(args: argparse.Namespace, resume_path: Path | None) -> List[str]:
+    cmd = [sys.executable, "-m", "ai_scientist.runner"]
+    if args.config:
+        cmd.extend(["--config", str(args.config)])
+    if args.problem:
+        cmd.extend(["--problem", args.problem])
+    if args.cycles is not None:
+        cmd.extend(["--cycles", str(args.cycles)])
+    if args.memory_db:
+        cmd.extend(["--memory-db", str(args.memory_db)])
+    if args.eval_budget is not None:
+        cmd.extend(["--eval-budget", str(args.eval_budget)])
+    if args.workers is not None:
+        cmd.extend(["--workers", str(args.workers)])
+    if args.pool_type:
+        cmd.extend(["--pool-type", args.pool_type])
+    if args.run_preset:
+        cmd.extend(["--run-preset", args.run_preset])
+    if args.planner:
+        cmd.extend(["--planner", args.planner])
+    if resume_path:
+        cmd.extend(["--resume-from", str(resume_path)])
+    return cmd
+
+
+def _run_once(cmd: Iterable[str]) -> int:
+    proc = subprocess.run(list(cmd), check=False)
+    return proc.returncode
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Daemon wrapper for ai_scientist.runner"
+    )
+    parser.add_argument("--config", type=Path, help="Experiment config path.")
+    parser.add_argument("--problem", choices=["p1", "p2", "p3"], help="Problem to run.")
+    parser.add_argument("--cycles", type=int, help="Total cycles to run.")
+    parser.add_argument("--memory-db", type=Path, help="World-model SQLite path.")
+    parser.add_argument("--eval-budget", type=int, help="Screening budget override.")
+    parser.add_argument("--workers", type=int, help="Worker override.")
+    parser.add_argument(
+        "--pool-type", choices=["thread", "process"], help="Executor type."
+    )
+    parser.add_argument("--run-preset", type=str, help="Run preset name.")
+    parser.add_argument(
+        "--planner", choices=["deterministic", "agent"], default="deterministic"
+    )
+    parser.add_argument(
+        "--reporting-dir",
+        type=Path,
+        default=Path("reports"),
+        help="Reporting directory to look for checkpoints.",
+    )
+    parser.add_argument("--resume-from", type=Path, help="Explicit checkpoint path.")
+    parser.add_argument(
+        "--wall-clock-minutes",
+        type=float,
+        default=0.0,
+        help="Wall-clock guard for the daemon (0 disables).",
+    )
+    parser.add_argument(
+        "--auto-resume",
+        action="store_true",
+        default=True,
+        help="Auto-pick latest checkpoint when --resume-from not provided.",
+    )
+    args = parser.parse_args()
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+    start = time.monotonic()
+    resume_path = args.resume_from
+    if resume_path is None and args.auto_resume:
+        resume_path = _latest_checkpoint(args.reporting_dir)
+
+    cmd = _build_cmd(args, resume_path)
+    rc = _run_once(cmd)
+
+    if rc != 0:
+        latest = _latest_checkpoint(args.reporting_dir)
+        if latest and latest != resume_path:
+            print(
+                f"[daemon] runner failed (rc={rc}); retrying with checkpoint {latest}"
+            )
+            cmd = _build_cmd(args, latest)
+            rc = _run_once(cmd)
+
+    if rc != 0:
+        sys.exit(rc)
+
+    if args.wall_clock_minutes > 0:
+        elapsed_min = (time.monotonic() - start) / 60.0
+        if elapsed_min > args.wall_clock_minutes:
+            print(
+                f"[daemon] wall-clock limit reached ({elapsed_min:.2f} min > {args.wall_clock_minutes} min)"
+            )
+
+
+if __name__ == "__main__":
+    main()
+

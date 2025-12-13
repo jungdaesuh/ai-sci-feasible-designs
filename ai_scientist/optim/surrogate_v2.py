@@ -90,11 +90,14 @@ class StellaratorNeuralOp(nn.Module):
         self.head_objective = nn.Linear(hidden_dim, 1)
         self.head_mhd = nn.Linear(hidden_dim, 1)
         self.head_qi = nn.Linear(hidden_dim, 1)
+        # B3 FIX: Add iota prediction head for rotational transform constraint
+        self.head_iota = nn.Linear(hidden_dim, 1)
 
     def forward(
         self,
         x: Float[torch.Tensor, "batch input_dim"],  # pyright: ignore[reportUndefinedVariable]
     ) -> tuple[
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
@@ -165,8 +168,10 @@ class StellaratorNeuralOp(nn.Module):
         pred_obj = self.head_objective(base).squeeze(-1)
         pred_mhd = self.head_mhd(base).squeeze(-1)
         pred_qi = self.head_qi(base).squeeze(-1)
+        # B3 FIX: Predict iota for rotational transform constraint
+        pred_iota = self.head_iota(base).squeeze(-1)
 
-        return pred_obj, pred_mhd, pred_qi
+        return pred_obj, pred_mhd, pred_qi, pred_iota
 
 
 class NeuralOperatorSurrogate(BaseSurrogate):
@@ -336,14 +341,22 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_obj = torch.tensor(target_values, dtype=torch.float32).to(self._device)
 
         # Auxiliary targets
-        y_mhd_list, y_qi_list = [], []
+        # B3 FIX: Added iota (edge_rotational_transform) to auxiliary regressors
+        y_mhd_list, y_qi_list, y_iota_list = [], [], []
         for metrics in metrics_list:
             m_payload = metrics.get("metrics", metrics)
             y_mhd_list.append(float(m_payload.get("vacuum_well", -1.0)))
             y_qi_list.append(float(m_payload.get("qi", 1.0)))
+            y_iota_list.append(
+                float(
+                    m_payload.get("edge_rotational_transform_over_n_field_periods", 0.3)
+                )
+            )
 
         y_mhd = torch.tensor(y_mhd_list, dtype=torch.float32).to(self._device)
         y_qi = torch.tensor(y_qi_list, dtype=torch.float32).to(self._device)
+        # B3 FIX: Add iota tensor
+        y_iota = torch.tensor(y_iota_list, dtype=torch.float32).to(self._device)
 
         # Normalize targets for balanced multi-task learning
         # This ensures each loss term contributes proportionally regardless of scale
@@ -354,6 +367,9 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._y_mhd_std = y_mhd.std().clamp(min=1e-6)
         self._y_qi_mean = y_qi.mean()
         self._y_qi_std = y_qi.std().clamp(min=1e-6)
+        # B3 FIX: Add iota normalization stats
+        self._y_iota_mean = y_iota.mean()
+        self._y_iota_std = y_iota.std().clamp(min=1e-6)
 
         # Apply log transform to QI before normalization (QI spans many orders of magnitude)
         y_qi_log = torch.log10(y_qi.clamp(min=1e-12))
@@ -363,8 +379,10 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_obj_norm = (y_obj - self._y_obj_mean) / self._y_obj_std
         y_mhd_norm = (y_mhd - self._y_mhd_mean) / self._y_mhd_std
         y_qi_norm = (y_qi_log - self._y_qi_log_mean) / self._y_qi_log_std
+        # B3 FIX: Add iota normalization
+        y_iota_norm = (y_iota - self._y_iota_mean) / self._y_iota_std
 
-        dataset = TensorDataset(X, y_obj_norm, y_mhd_norm, y_qi_norm)
+        dataset = TensorDataset(X, y_obj_norm, y_mhd_norm, y_qi_norm, y_iota_norm)
         # Use a larger batch size for efficiency if possible, but keep it stochastic
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
@@ -409,16 +427,18 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             # For now, we use the full dataset with shuffling, which is standard for Deep Ensembles.
 
             for epoch in range(self._epochs):
-                for xb, yb_obj, yb_mhd, yb_qi in loader:
+                for xb, yb_obj, yb_mhd, yb_qi, yb_iota in loader:
                     optimizer.zero_grad()
-                    pred_obj, pred_mhd, pred_qi = model(xb)
+                    pred_obj, pred_mhd, pred_qi, pred_iota = model(xb)
 
                     # With normalized targets, all losses are on same scale
                     # Equal weighting is now appropriate
+                    # B3 FIX: Added iota loss term
                     loss = (
                         criterion(pred_obj, yb_obj)
                         + criterion(pred_mhd, yb_mhd)
                         + criterion(pred_qi, yb_qi)
+                        + criterion(pred_iota, yb_iota)
                     )
 
                     loss.backward()
@@ -449,11 +469,13 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
+        Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable]
     ]:
         """Differentiable prediction for optimization loop (Mean + Std).
 
         Returns:
-            (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std)
+            (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std, iota_mean, iota_std)
         """
         if not self._models:
             raise RuntimeError("NeuralOperatorSurrogate not initialized/trained")
@@ -462,18 +484,21 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             x = x.to(self._device)
 
         # Collect predictions from all models
-        preds_obj, preds_mhd, preds_qi = [], [], []
+        # B3 FIX: Added iota collection
+        preds_obj, preds_mhd, preds_qi, preds_iota = [], [], [], []
 
         for model in self._models:
-            o, m, q = model(x)
+            o, m, q, iota = model(x)
             preds_obj.append(o)
             preds_mhd.append(m)
             preds_qi.append(q)
+            preds_iota.append(iota)
 
         # Stack (Ensemble, Batch)
         stack_obj = torch.stack(preds_obj)
         stack_mhd = torch.stack(preds_mhd)
         stack_qi = torch.stack(preds_qi)
+        stack_iota = torch.stack(preds_iota)
 
         # Compute Mean and Std in normalized space
         obj_mean_norm = torch.mean(stack_obj, dim=0)
@@ -482,6 +507,8 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         mhd_std_norm = torch.std(stack_mhd, dim=0)
         qi_mean_norm = torch.mean(stack_qi, dim=0)
         qi_std_norm = torch.std(stack_qi, dim=0)
+        iota_mean_norm = torch.mean(stack_iota, dim=0)
+        iota_std_norm = torch.std(stack_iota, dim=0)
 
         # Denormalize predictions to original scale
         # obj and mhd: linear denormalization
@@ -498,13 +525,26 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             qi_mean = torch.pow(10.0, qi_log_mean)
             # For std, use delta method: std(10^x) ≈ 10^x * ln(10) * std(x)
             qi_std = qi_mean * 2.302585 * qi_log_std
+            # B3 FIX: Denormalize iota
+            iota_mean = iota_mean_norm * self._y_iota_std + self._y_iota_mean
+            iota_std = iota_std_norm * self._y_iota_std
         else:
             # Fallback if not trained (shouldn't happen in normal use)
             obj_mean, obj_std = obj_mean_norm, obj_std_norm
             mhd_mean, mhd_std = mhd_mean_norm, mhd_std_norm
             qi_mean, qi_std = qi_mean_norm, qi_std_norm
+            iota_mean, iota_std = iota_mean_norm, iota_std_norm
 
-        return (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std)
+        return (
+            obj_mean,
+            obj_std,
+            mhd_mean,
+            mhd_std,
+            qi_mean,
+            qi_std,
+            iota_mean,
+            iota_std,
+        )
 
     def _compute_soft_feasibility(
         self,
@@ -512,18 +552,20 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         mhd_val: float,
         qi_val: float,
         elongation_val: float,
+        iota_val: float = 0.3,  # B3 FIX: Added iota parameter
         problem: str = "p3",
     ) -> float:
         """Compute soft feasibility probability from surrogate predictions (B7 fix).
 
         This method checks ALL relevant constraints for the given problem,
-        not just vacuum_well. Missing predictions (iota, mirror_ratio, etc.)
+        not just vacuum_well. Missing predictions (mirror_ratio, flux_compression)
         are assumed feasible with a small penalty.
 
         Args:
             mhd_val: Predicted vacuum_well value.
             qi_val: Predicted raw QI residual (not log10).
             elongation_val: Predicted max elongation.
+            iota_val: Predicted edge_rotational_transform_over_n_field_periods.
             problem: Problem identifier ("p1", "p2", "p3").
 
         Returns:
@@ -565,11 +607,15 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             violations += soft_violation(elongation_val, elong_bound, is_upper=True)
             total_checks += 1.0
 
-        # 4. Constraints we don't have predictions for (iota, mirror_ratio, flux_compression)
+        # B3 FIX: Check iota constraint (we now have predictions for this)
+        if "edge_rotational_transform_lower" in bounds:
+            iota_bound = bounds.get("edge_rotational_transform_lower", 0.25)
+            violations += soft_violation(iota_val, iota_bound, is_upper=False)
+            total_checks += 1.0
+
+        # 4. Constraints we still don't have predictions for (mirror_ratio, flux_compression)
         # Add a small uncertainty penalty for these unknown constraints
         missing_constraints = 0
-        if "edge_rotational_transform_lower" in bounds:
-            missing_constraints += 1
         if "edge_magnetic_mirror_ratio_upper" in bounds:
             missing_constraints += 1
         if "flux_compression_upper" in bounds:
@@ -639,20 +685,23 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         X = torch.tensor(np.vstack(vectors), dtype=torch.float32).to(self._device)
 
         # Evaluation
-        preds_obj, preds_mhd, preds_qi = [], [], []
+        # B3 FIX: Added iota collection
+        preds_obj, preds_mhd, preds_qi, preds_iota = [], [], [], []
 
         for model in self._models:
             model.eval()
             with torch.no_grad():
-                o, m, q = model(X)
+                o, m, q, iota = model(X)
                 preds_obj.append(o)
                 preds_mhd.append(m)
                 preds_qi.append(q)
+                preds_iota.append(iota)
 
         # Convert to numpy (Ensemble, Batch)
         obj_stack = torch.stack(preds_obj).cpu().numpy()
         mhd_stack = torch.stack(preds_mhd).cpu().numpy()
         qi_stack = torch.stack(preds_qi).cpu().numpy()
+        iota_stack = torch.stack(preds_iota).cpu().numpy()
 
         # Statistics
         obj_mean_norm = np.mean(obj_stack, axis=0)
@@ -660,6 +709,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
         mhd_mean_norm = np.mean(mhd_stack, axis=0)
         qi_mean_norm = np.mean(qi_stack, axis=0)
+        iota_mean_norm = np.mean(iota_stack, axis=0)
 
         # Denormalize to original units so feasibility thresholds are meaningful.
         # This mirrors `predict_torch` but operates on numpy arrays.
@@ -670,6 +720,9 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             y_mhd_std = float(self._y_mhd_std.detach().cpu().item())
             y_qi_log_mean = float(self._y_qi_log_mean.detach().cpu().item())
             y_qi_log_std = float(self._y_qi_log_std.detach().cpu().item())
+            # B3 FIX: Add iota denormalization stats
+            y_iota_mean = float(self._y_iota_mean.detach().cpu().item())
+            y_iota_std = float(self._y_iota_std.detach().cpu().item())
 
             obj_mean = obj_mean_norm * y_obj_std + y_obj_mean
             obj_std = obj_std_norm * y_obj_std
@@ -678,10 +731,14 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
             qi_log_mean = qi_mean_norm * y_qi_log_std + y_qi_log_mean
             qi_mean = np.power(10.0, qi_log_mean)
+
+            # B3 FIX: Denormalize iota
+            iota_mean = iota_mean_norm * y_iota_std + y_iota_mean
         else:
             obj_mean, obj_std = obj_mean_norm, obj_std_norm
             mhd_mean = mhd_mean_norm
             qi_mean = qi_mean_norm
+            iota_mean = iota_mean_norm
 
         # Analytically compute elongation using isoperimetric method (B5 fix).
         # The isoperimetric approach matches the benchmark's ellipse-fitting
@@ -710,12 +767,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             predictions: list[SurrogatePrediction] = []
         for i, candidate in enumerate(candidates):
             # B7 FIX: Use multi-constraint feasibility check instead of just mhd >= 0
-            # This checks vacuum_well, qi, elongation (for P2), and adds uncertainty
-            # penalties for constraints we can't predict (iota, mirror_ratio, etc.)
+            # B3 FIX: Now includes iota constraint check
             prob_feasible = self._compute_soft_feasibility(
                 mhd_val=float(mhd_mean[i]),
                 qi_val=float(qi_mean[i]),
                 elongation_val=float(elongations[i]),
+                iota_val=float(iota_mean[i]),
                 problem=problem,
             )
 

@@ -248,6 +248,10 @@ class EvaluationResult(pydantic.BaseModel):
 def _quantize_float(value: float, *, precision: float = _CANONICAL_PRECISION) -> float:
     if precision <= 0.0:
         return float(value)
+    # Hashing must be total: allow NaN/inf to flow through without crashing.
+    # This can happen for invalid candidates during optimization.
+    if not math.isfinite(value):
+        return float(value)
     return float(round(value / precision) * precision)
 
 
@@ -363,12 +367,21 @@ def compute_constraint_margins(
         stage: Fidelity stage. Low-fidelity stages skip expensive constraints.
                Valid values: "screen", "low", "default" (low fidelity)
                             "promote", "high", "p2", "p3" (high fidelity)
+               Note: "promote" is intended to run high-fidelity VMEC but may
+               skip Boozer/QI (see tools.evaluation._settings_for_stage).
     """
     metrics_map = (
         metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
     )
     problem_key = problem.lower()
-    is_low_fidelity = stage.lower() in ("screen", "low", "default", "promote")
+    stage_key = stage.lower()
+
+    # Stage gating:
+    # - "screen"/"low"/"default": fast screening → only geometric constraints.
+    # - "promote": high-fidelity VMEC but often configured to skip QI/Boozer.
+    # - "p2"/"p3"/"high": full physics constraints.
+    include_vmec_constraints = stage_key not in ("screen", "low", "default")
+    include_qi_constraint = stage_key not in ("screen", "low", "default", "promote")
 
     def _log10_margin(target: float) -> float:
         denom = abs(target) if abs(target) > 0.0 else 1.0
@@ -414,8 +427,8 @@ def compute_constraint_margins(
             "max_elongation": _upper_bound_margin(elong, 5.0),
         }
         # Physics constraints (only at high fidelity)
-        if not is_low_fidelity:
-            margins["qi_log10"] = _log10_margin(-4.0)
+        if include_qi_constraint:
+            margins["qi"] = _log10_margin(-4.0)
     else:  # Default to P3 logic
         iota = float(
             metrics_map.get(
@@ -428,8 +441,8 @@ def compute_constraint_margins(
             "edge_rotational_transform": _lower_bound_margin(iota, 0.25),
             "edge_magnetic_mirror_ratio": _upper_bound_margin(mirror, 0.25),
         }
-        # Physics constraints (only at high fidelity)
-        if not is_low_fidelity:
+        # Physics constraints (only when VMEC metrics are expected to be present)
+        if include_vmec_constraints:
             well = metrics_map.get("vacuum_well")
             well_value = float(well) if well is not None else float("nan")
             # Normalize like constellaration.problems.MHDStableQIStellarator:
@@ -440,7 +453,8 @@ def compute_constraint_margins(
             flux = float(flux_value) if flux_value is not None else float("nan")
             margins["flux_compression"] = _upper_bound_margin(flux, 0.9)
 
-            margins["qi_log10"] = _log10_margin(-3.5)
+        if include_qi_constraint:
+            margins["qi"] = _log10_margin(-3.5)
 
     return margins
 
@@ -475,7 +489,33 @@ def compute_objective(
     elif problem_key.startswith("p2"):
         return float(metrics.minimum_normalized_magnetic_gradient_scale_length)
     else:  # P3
+        # B1 NOTE: P3 is intrinsically multi-objective (minimize aspect_ratio AND
+        # maximize gradient_scale_length). This returns only the primary objective
+        # for backward compatibility. For Pareto analysis, use compute_p3_objectives().
         return float(metrics.aspect_ratio)
+
+
+def compute_p3_objectives(
+    metrics: Any,
+) -> tuple[float, float]:
+    """Compute both P3 objectives for multi-objective Pareto analysis (B1 fix).
+
+    P3 is a multi-objective problem:
+    - Minimize aspect_ratio (compactness)
+    - Maximize gradient_scale_length (buildability)
+
+    Args:
+        metrics: Metrics object from physics evaluation.
+
+    Returns:
+        (aspect_ratio, gradient_scale_length) tuple for Pareto front analysis.
+        First objective should be minimized, second should be maximized.
+    """
+    aspect = float(getattr(metrics, "aspect_ratio", 10.0))
+    gradient = float(
+        getattr(metrics, "minimum_normalized_magnetic_gradient_scale_length", 0.0)
+    )
+    return (aspect, gradient)
 
 
 def max_violation(margins: Mapping[str, float]) -> float:

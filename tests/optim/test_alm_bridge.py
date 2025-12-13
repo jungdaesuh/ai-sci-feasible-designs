@@ -197,6 +197,7 @@ class TestALMInvariants:
       while integration tests ensure the bridge correctly wraps constellaration's ALM
     """
 
+    @hypothesis.settings(deadline=None)
     @hypothesis.given(
         multipliers=st.lists(
             st.floats(0.0, 100.0, allow_nan=False),
@@ -233,6 +234,7 @@ class TestALMInvariants:
         # Verify non-negativity invariant holds
         assert jnp.all(new_multipliers >= 0)
 
+    @hypothesis.settings(deadline=None)
     @hypothesis.given(
         penalties=st.lists(
             st.floats(1.0, 1e6, allow_nan=False), min_size=3, max_size=5

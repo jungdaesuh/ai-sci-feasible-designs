@@ -151,7 +151,13 @@ def _reconstruct_params(flat_vector: np.ndarray, metadata: dict) -> dict[str, An
 
 
 def _compute_index_mapping(
-    boundary_template: Any, max_poloidal: int, max_toroidal: int, device: str
+    boundary_template: Any,
+    max_poloidal: int,
+    max_toroidal: int,
+    device: str,
+    *,
+    dense_mpol: int | None = None,
+    dense_ntor: int | None = None,
 ) -> Tuple[torch.Tensor, int]:
     """Compute the index mapping from compact (masked) to dense (surrogate) vector.
 
@@ -171,9 +177,21 @@ def _compute_index_mapping(
                        vector where each compact element should be placed.
         dense_size: Size of the dense vector.
     """
-    grid_h = max_poloidal + 1
-    grid_w = 2 * max_toroidal + 1
-    half_dense = grid_h * grid_w
+    source_grid_h = max_poloidal + 1
+    source_grid_w = 2 * max_toroidal + 1
+
+    target_mpol = max_poloidal if dense_mpol is None else int(dense_mpol)
+    target_ntor = max_toroidal if dense_ntor is None else int(dense_ntor)
+    if target_mpol < max_poloidal or target_ntor < max_toroidal:
+        raise ValueError(
+            "Dense schema must be >= compact schema. "
+            f"Got dense_mpol={target_mpol}, dense_ntor={target_ntor} "
+            f"for compact max_poloidal={max_poloidal}, max_toroidal={max_toroidal}."
+        )
+
+    dense_grid_h = target_mpol + 1
+    dense_grid_w = 2 * target_ntor + 1
+    half_dense = dense_grid_h * dense_grid_w
     dense_size = 2 * half_dense  # r_cos + z_sin
 
     # Build the mask the same way constellaration does (stellarator symmetric):
@@ -182,7 +200,7 @@ def _compute_index_mapping(
     # (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
     # So for m=0: n >= 1 is kept
     # For m>0: all n are kept
-    poloidal = np.arange(grid_h)[:, None]  # (mpol+1, 1)
+    poloidal = np.arange(source_grid_h)[:, None]  # (mpol+1, 1)
     toroidal = np.arange(-max_toroidal, max_toroidal + 1)[None, :]  # (1, 2*ntor+1)
 
     mask_array = (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
@@ -195,15 +213,17 @@ def _compute_index_mapping(
 
     # r_cos portion (first half of dense vector)
     # structured_flatten ordering: for m in 0..mpol, for n in -ntor..ntor:
-    #   index = m * grid_w + (n + ntor)
+    #   index = m * dense_grid_w + (n + dense_ntor)
     for m, n_idx in masked_indices:
-        dense_idx = m * grid_w + n_idx
+        n = int(n_idx) - max_toroidal
+        dense_idx = int(m) * dense_grid_w + (n + target_ntor)
         compact_to_dense.append(int(dense_idx))
 
     # z_sin portion (second half of dense vector, offset by half_dense)
     # Same mask applies to z_sin
     for m, n_idx in masked_indices:
-        dense_idx = half_dense + m * grid_w + n_idx
+        n = int(n_idx) - max_toroidal
+        dense_idx = half_dense + int(m) * dense_grid_w + (n + target_ntor)
         compact_to_dense.append(int(dense_idx))
 
     return torch.tensor(compact_to_dense, dtype=torch.long, device=device), dense_size
@@ -238,12 +258,28 @@ def gradient_descent_on_inputs(
     max_poloidal = max(1, template.n_poloidal_modes - 1)
     max_toroidal = max(1, (template.n_toroidal_modes - 1) // 2)
 
-    # Precompute mapping
+    if surrogate._schema is None:
+        raise RuntimeError(
+            "Surrogate schema is missing; cannot build dense input vector."
+        )
+    schema = surrogate._schema
+    # Tests sometimes inject a MagicMock schema with only (mpol, ntor). Normalize to the
+    # real FlattenSchema so structured_flatten has deterministic rounding metadata.
+    if not isinstance(schema, tools.FlattenSchema):
+        schema = tools.FlattenSchema(mpol=int(schema.mpol), ntor=int(schema.ntor))
+
+    # Precompute mapping (compact mask -> dense surrogate schema)
     dense_indices, dense_size = _compute_index_mapping(
-        template, max_poloidal, max_toroidal, device
+        template,
+        max_poloidal,
+        max_toroidal,
+        device,
+        dense_mpol=schema.mpol,
+        dense_ntor=schema.ntor,
     )
 
     weights = cfg.constraint_weights
+    problem = getattr(cfg, "problem", "p3")
 
     for candidate in candidates:
         params = candidate["params"]
@@ -263,7 +299,16 @@ def gradient_descent_on_inputs(
             optimizer.zero_grad()
 
             # Map Compact -> Dense
-            x_dense = torch.zeros(dense_size, device=device, dtype=x_torch.dtype)
+            base_params = {
+                "r_cos": np.asarray(metadata["r_cos_full"]).tolist(),
+                "z_sin": np.asarray(metadata["z_sin_full"]).tolist(),
+                "n_field_periods": int(n_field_periods),
+                "is_stellarator_symmetric": bool(
+                    metadata.get("is_stellarator_symmetric", True)
+                ),
+            }
+            base_vec, _ = tools.structured_flatten(base_params, schema=schema)
+            x_dense = torch.tensor(base_vec, device=device, dtype=x_torch.dtype)
             x_dense[dense_indices] = x_torch
 
             # Append n_field_periods
@@ -272,6 +317,7 @@ def gradient_descent_on_inputs(
             x_input = torch.cat([x_dense, nfp_tensor], dim=0)
 
             # Predict
+            # B3 FIX: predict_torch now returns 8 values including iota
             (
                 pred_obj,
                 std_obj,
@@ -279,11 +325,13 @@ def gradient_descent_on_inputs(
                 std_mhd,
                 pred_qi,
                 std_qi,
+                _pred_iota,  # Not used in optimization loop
+                _std_iota,  # Not used in optimization loop
             ) = surrogate.predict_torch(x_input.unsqueeze(0))
 
             # Compute Elongation directly (Exact, so std=0)
-            mpol = surrogate._schema.mpol
-            ntor = surrogate._schema.ntor
+            mpol = schema.mpol
+            ntor = schema.ntor
             grid_h = mpol + 1
             grid_w = 2 * ntor + 1
             half_size = grid_h * grid_w
@@ -292,7 +340,8 @@ def gradient_descent_on_inputs(
             r_cos = x_spectral[:, :half_size].view(1, grid_h, grid_w)
             z_sin = x_spectral[:, half_size:].view(1, grid_h, grid_w)
 
-            pred_elo = geometry.elongation(r_cos, z_sin, x_input[-1])
+            # B5 FIX: Use elongation_isoperimetric for physics-correct calculation
+            pred_elo = geometry.elongation_isoperimetric(r_cos, z_sin, x_input[-1])
             std_elo = torch.zeros_like(pred_elo)
 
             # Loss Formulation (Risk-Averse: Penalize Uncertainty)
@@ -300,7 +349,7 @@ def gradient_descent_on_inputs(
             # - P1: MINIMIZE elongation -> UCB (mean + beta*std)
             # - P2/P3: MAXIMIZE objective -> LCB, then negate for minimization
             beta = 0.1
-            if _is_maximization_problem(cfg.problem):
+            if _is_maximization_problem(problem):
                 # Maximize: use LCB (pessimistic for maximization), then negate
                 loss_obj = -(pred_obj.squeeze() - beta * std_obj.squeeze())
             else:
@@ -437,6 +486,7 @@ def optimize_alm_inner_loop(
         x_input = torch.cat([x_dense, nfp_tensor], dim=0)
 
         # Predict
+        # B3 FIX: predict_torch now returns 8 values including iota
         (
             pred_obj,
             std_obj,
@@ -444,6 +494,8 @@ def optimize_alm_inner_loop(
             std_mhd,
             pred_qi,
             std_qi,
+            _pred_iota,  # Not used in ALM loop
+            _std_iota,  # Not used in ALM loop
         ) = surrogate.predict_torch(x_input.unsqueeze(0))
 
         # Compute Elongation directly
@@ -455,7 +507,8 @@ def optimize_alm_inner_loop(
         r_cos = x_spectral[:, :half_size].view(1, grid_h, grid_w)
         z_sin = x_spectral[:, half_size:].view(1, grid_h, grid_w)
 
-        pred_elo = geometry.elongation(r_cos, z_sin, x_input[-1])
+        # B5 FIX: Use elongation_isoperimetric for physics-correct calculation
+        pred_elo = geometry.elongation_isoperimetric(r_cos, z_sin, x_input[-1])
         std_elo = torch.zeros_like(pred_elo)
 
         obj = pred_obj.squeeze() + beta * std_obj.squeeze()

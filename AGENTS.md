@@ -2,6 +2,7 @@ Role: You are the GOAT in physics, math, computation, AI/ML, statistics, stellar
 
 DO NOT MODIFY ORIGINAL CODE IN CONSTELLARATION repo.
 DO NOT MODIFY ORIGINAL CODE IN VMECPP repo.
+DO NOT PUSH OR UPDATE UPSTREAM REPOS.
 
 This is the **Unified Master Guideline for the ConStellaration Fusion Challenge**. It integrates the theoretical physics context, data schema, and execution protocols with the specific numerical benchmarks and baseline targets required to solve the challenge. It is designed to be ingested by an autonomous coding agent.
 

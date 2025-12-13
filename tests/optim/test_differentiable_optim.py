@@ -28,13 +28,14 @@ class TestDifferentiableOptim(unittest.TestCase):
         self.surrogate._schema = self.schema
 
         # Create a simple dummy model
+        # B3 FIX: Now returns 4 values: obj, mhd, qi, iota
         class DummyModel(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.mpol = mpol
                 self.ntor = ntor
                 # Just some learnable params to allow gradients
-                self.layer = nn.Linear(1, 3)
+                self.layer = nn.Linear(1, 4)  # Now 4 outputs
 
             def forward(self, x):
                 # x is (Batch, DenseSize)
@@ -42,8 +43,8 @@ class TestDifferentiableOptim(unittest.TestCase):
                 # Collapse x to 1 dim to feed linear
                 val = x.mean(dim=1, keepdim=True)
                 out = self.layer(val)
-                # return obj, mhd, qi
-                return out[:, 0], out[:, 1], out[:, 2]
+                # return obj, mhd, qi, iota (B3 fix)
+                return out[:, 0], out[:, 1], out[:, 2], out[:, 3]
 
         self.surrogate._models = [DummyModel(), DummyModel()]
 

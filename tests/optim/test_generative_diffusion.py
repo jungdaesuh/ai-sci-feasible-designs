@@ -31,6 +31,7 @@ def test_diffusion_model_training_and_sampling():
         epochs=2,
         batch_size=2,
         timesteps=10,  # Reduce timesteps for test speed
+        pca_components=4,  # Small value for test data
         device="cpu",
     )
 
@@ -107,6 +108,7 @@ def test_diffusion_fine_tune_on_elites():
         epochs=2,
         batch_size=2,
         timesteps=10,
+        pca_components=4,  # Small value for test data
         device="cpu",
     )
 
