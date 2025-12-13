@@ -388,6 +388,17 @@ def _compute_derivatives(
     """
     Compute surface derivatives R_theta, R_zeta, Z_theta, Z_zeta, etc.
 
+    Memory Optimization:
+        Uses trigonometric separability to avoid building a full (B, M, N, T, Z) angle tensor.
+        This reduces peak memory from O(B*M*N*T*Z) to O(B*M*Z) + O(M*T) + O(B*N*Z).
+
+        Key identities:
+            cos(mθ - nNζ) = cos(mθ)cos(nNζ) + sin(mθ)sin(nNζ)
+            sin(mθ - nNζ) = sin(mθ)cos(nNζ) - cos(mθ)sin(nNζ)
+
+        Derivatives introduce scaling factors (m for θ-derivatives, nNfp for ζ-derivatives)
+        which are absorbed into the two-stage contraction.
+
     If n_field_periods is a Tensor (batched), we evaluate over the FULL torus (0 to 2pi)
     to preserve the correct winding and dependence on N_fp.
     If n_field_periods is an int (scalar), we evaluate over ONE field period (0 to 2pi/Nfp)
@@ -408,88 +419,178 @@ def _compute_derivatives(
     device = r_cos.device
 
     # Handle Nfp
-    if isinstance(n_field_periods, torch.Tensor):
-        nfp = n_field_periods.view(batch_size, 1, 1)
-        # Batched N_fp: Evaluate over FULL TORUS [0, 2pi] to capture winding explicitly.
-        # zeta_grid corresponds to physical toroidal angle zeta.
-        zeta = torch.linspace(0, 2 * torch.pi, n_zeta + 1, device=device)[:-1]
-        zeta_grid = zeta.view(1, 1, -1)  # (1, 1, Z)
+    is_tensor_nfp = isinstance(n_field_periods, torch.Tensor)
+    if is_tensor_nfp:
+        nfp = n_field_periods.view(batch_size, 1)  # (B, 1)
+        # Batched N_fp: Evaluate over FULL TORUS [0, 2pi]
+        zeta = torch.linspace(0, 2 * torch.pi, n_zeta + 1, device=device)[:-1]  # (Z,)
     else:
-        nfp = float(n_field_periods)
-        # Fixed N_fp: Evaluate over ONE FIELD PERIOD [0, 2pi/nfp].
-        zeta = torch.linspace(0, 2 * torch.pi / nfp, n_zeta + 1, device=device)[:-1]
-        zeta_grid = zeta.view(1, 1, -1)  # (1, 1, Z)
+        nfp_scalar = float(n_field_periods)
+        nfp = nfp_scalar
+        # Fixed N_fp: Evaluate over ONE FIELD PERIOD [0, 2pi/nfp]
+        zeta = torch.linspace(0, 2 * torch.pi / nfp_scalar, n_zeta + 1, device=device)[
+            :-1
+        ]  # (Z,)
 
-    theta = torch.linspace(0, 2 * torch.pi, n_theta + 1, device=device)[:-1]
-    theta_grid = theta.view(1, n_theta, 1)  # (1, T, 1)
+    theta = torch.linspace(0, 2 * torch.pi, n_theta + 1, device=device)[:-1]  # (T,)
 
-    # Vectorized derivative computation (replaces nested loops for ~10-50x speedup)
     # Precompute mode indices
-    m_idx = torch.arange(mpol + 1, dtype=r_cos.dtype, device=device)
-    n_idx_arr = torch.arange(2 * ntor + 1, dtype=r_cos.dtype, device=device)
+    m_idx = torch.arange(mpol + 1, dtype=r_cos.dtype, device=device)  # (M,)
+    n_idx_arr = torch.arange(2 * ntor + 1, dtype=r_cos.dtype, device=device)  # (N,)
     n_vals = n_idx_arr - ntor  # Maps 0..2*ntor to -ntor..ntor
 
-    # Build angle grid
-    # m*theta term: shape (1, mpol+1, 1, n_theta, 1)
-    m_theta = m_idx.view(1, -1, 1, 1, 1) * theta_grid.view(1, 1, 1, n_theta, 1)
+    # =========================================================================
+    # Memory-optimized derivative computation using trig separability
+    # =========================================================================
+    # Stage 1: Precompute θ-dependent terms (shared across batch)
+    # cos(mθ), sin(mθ): shape (M, T)
+    m_theta_angles = m_idx[:, None] * theta[None, :]  # (M, T)
+    cos_m = torch.cos(m_theta_angles)  # (M, T)
+    sin_m = torch.sin(m_theta_angles)  # (M, T)
 
-    # n*Nfp*zeta term depends on whether nfp is tensor or scalar
-    is_tensor_nfp = isinstance(nfp, torch.Tensor)
+    # m-weighted versions for derivatives
+    m_cos_m = m_idx[:, None] * cos_m  # (M, T)
+    m_sin_m = m_idx[:, None] * sin_m  # (M, T)
+    m2_cos_m = (m_idx[:, None] ** 2) * cos_m  # (M, T)
+    m2_sin_m = (m_idx[:, None] ** 2) * sin_m  # (M, T)
+
+    # Stage 2: Precompute ζ-dependent terms
     if is_tensor_nfp:
-        # nfp: (B, 1, 1) -> (B, 1, 1, 1, 1)
-        # n_vals: (2*ntor+1,) -> (1, 1, 2*ntor+1, 1, 1)
-        # zeta_grid: (1, 1, Z) -> (1, 1, 1, 1, Z)
-        nfp_expanded = nfp.view(batch_size, 1, 1, 1, 1)
-        n_zeta_term = (
-            n_vals.view(1, 1, -1, 1, 1) * nfp_expanded * zeta_grid.view(1, 1, 1, 1, -1)
-        )
-        # factor_z: -n*nfp, shape (B, 1, 2*ntor+1, 1, 1)
-        factor_z = -n_vals.view(1, 1, -1, 1, 1) * nfp_expanded
+        # Variable Nfp: n*Nfp depends on batch
+        # n_vals: (N,), nfp: (B, 1), zeta: (Z,)
+        # n_nfp: (B, N) = n_vals[None, :] * nfp
+        n_nfp = n_vals[None, :] * nfp  # (B, N)
+        n_nfp_zeta = n_nfp[:, :, None] * zeta[None, None, :]  # (B, N, Z)
+
+        cos_nz = torch.cos(n_nfp_zeta)  # (B, N, Z)
+        sin_nz = torch.sin(n_nfp_zeta)  # (B, N, Z)
+
+        # n*nfp-weighted versions for ζ-derivatives
+        # Note: factor_z in original code is -n*nfp, so we use n_nfp directly
+        n_nfp_expanded = n_nfp[:, :, None]  # (B, N, 1)
+        n_nfp_cos_nz = n_nfp_expanded * cos_nz  # (B, N, Z)
+        n_nfp_sin_nz = n_nfp_expanded * sin_nz  # (B, N, Z)
+        n_nfp2_cos_nz = (n_nfp_expanded**2) * cos_nz  # (B, N, Z)
+        n_nfp2_sin_nz = (n_nfp_expanded**2) * sin_nz  # (B, N, Z)
+
+        # Stage 3: Contract over n for r_cos coefficients -> (B, M, Z)
+        # Basic: A_rc = sum_n r_cos[m,n] * cos(nNζ), B_rc = sum_n r_cos[m,n] * sin(nNζ)
+        A_rc = torch.einsum("bmn,bnz->bmz", r_cos, cos_nz)
+        B_rc = torch.einsum("bmn,bnz->bmz", r_cos, sin_nz)
+        # n-weighted: for ζ-derivatives
+        nA_rc = torch.einsum("bmn,bnz->bmz", r_cos, n_nfp_cos_nz)
+        nB_rc = torch.einsum("bmn,bnz->bmz", r_cos, n_nfp_sin_nz)
+        # n²-weighted: for ζζ-derivatives
+        n2A_rc = torch.einsum("bmn,bnz->bmz", r_cos, n_nfp2_cos_nz)
+        n2B_rc = torch.einsum("bmn,bnz->bmz", r_cos, n_nfp2_sin_nz)
+
+        # Same for z_sin coefficients
+        A_zs = torch.einsum("bmn,bnz->bmz", z_sin, cos_nz)
+        B_zs = torch.einsum("bmn,bnz->bmz", z_sin, sin_nz)
+        nA_zs = torch.einsum("bmn,bnz->bmz", z_sin, n_nfp_cos_nz)
+        nB_zs = torch.einsum("bmn,bnz->bmz", z_sin, n_nfp_sin_nz)
+        n2A_zs = torch.einsum("bmn,bnz->bmz", z_sin, n_nfp2_cos_nz)
+        n2B_zs = torch.einsum("bmn,bnz->bmz", z_sin, n_nfp2_sin_nz)
+
     else:
-        n_zeta_term = n_vals.view(1, 1, -1, 1, 1) * nfp * zeta_grid.view(1, 1, 1, 1, -1)
-        factor_z = -n_vals.view(1, 1, -1, 1, 1) * nfp
+        # Fixed Nfp: n*Nfp shared across batch
+        n_nfp = n_vals * nfp_scalar  # (N,)
+        n_nfp_zeta = n_nfp[:, None] * zeta[None, :]  # (N, Z)
 
-    # angles: (B, mpol+1, 2*ntor+1, n_theta, n_zeta)
-    angles = m_theta - n_zeta_term
+        cos_nz = torch.cos(n_nfp_zeta)  # (N, Z)
+        sin_nz = torch.sin(n_nfp_zeta)  # (N, Z)
 
-    c = torch.cos(angles)  # (B, M, N, T, Z)
-    s = torch.sin(angles)
+        # n*nfp-weighted versions
+        n_nfp_expanded = n_nfp[:, None]  # (N, 1)
+        n_nfp_cos_nz = n_nfp_expanded * cos_nz  # (N, Z)
+        n_nfp_sin_nz = n_nfp_expanded * sin_nz  # (N, Z)
+        n_nfp2_cos_nz = (n_nfp_expanded**2) * cos_nz  # (N, Z)
+        n_nfp2_sin_nz = (n_nfp_expanded**2) * sin_nz  # (N, Z)
 
-    # m values for derivative scaling: (1, mpol+1, 1, 1, 1)
-    m_scale = m_idx.view(1, -1, 1, 1, 1)
+        # Contract over n -> (B, M, Z)
+        A_rc = torch.einsum("bmn,nz->bmz", r_cos, cos_nz)
+        B_rc = torch.einsum("bmn,nz->bmz", r_cos, sin_nz)
+        nA_rc = torch.einsum("bmn,nz->bmz", r_cos, n_nfp_cos_nz)
+        nB_rc = torch.einsum("bmn,nz->bmz", r_cos, n_nfp_sin_nz)
+        n2A_rc = torch.einsum("bmn,nz->bmz", r_cos, n_nfp2_cos_nz)
+        n2B_rc = torch.einsum("bmn,nz->bmz", r_cos, n_nfp2_sin_nz)
 
-    # Coefficients: r_cos (B, M, N) -> (B, M, N, 1, 1)
-    rc = r_cos.unsqueeze(-1).unsqueeze(-1)  # (B, M, N, 1, 1)
-    zs = z_sin.unsqueeze(-1).unsqueeze(-1)  # (B, M, N, 1, 1)
+        A_zs = torch.einsum("bmn,nz->bmz", z_sin, cos_nz)
+        B_zs = torch.einsum("bmn,nz->bmz", z_sin, sin_nz)
+        nA_zs = torch.einsum("bmn,nz->bmz", z_sin, n_nfp_cos_nz)
+        nB_zs = torch.einsum("bmn,nz->bmz", z_sin, n_nfp_sin_nz)
+        n2A_zs = torch.einsum("bmn,nz->bmz", z_sin, n_nfp2_cos_nz)
+        n2B_zs = torch.einsum("bmn,nz->bmz", z_sin, n_nfp2_sin_nz)
 
-    # Compute all quantities via einsum or direct summation
-    # R = sum(rc * c), Z = sum(zs * s)
-    R = (rc * c).sum(dim=(1, 2))  # (B, T, Z)
-    Z = (zs * s).sum(dim=(1, 2))
+    # =========================================================================
+    # Stage 4: Contract over m to get final (B, T, Z) outputs
+    # =========================================================================
+    # Using trig identities:
+    #   cos(mθ - nNζ) = cos(mθ)cos(nNζ) + sin(mθ)sin(nNζ)
+    #   sin(mθ - nNζ) = sin(mθ)cos(nNζ) - cos(mθ)sin(nNζ)
 
-    # 1st derivatives
-    # R_t = sum(-rc * m * s), R_z = sum(-rc * factor_z * s)
-    R_t = (-rc * m_scale * s).sum(dim=(1, 2))
-    R_z = (-rc * factor_z * s).sum(dim=(1, 2))
+    # R = sum r_cos * cos(α) = cos(mθ)*A_rc + sin(mθ)*B_rc
+    R = torch.einsum("mt,bmz->btz", cos_m, A_rc) + torch.einsum(
+        "mt,bmz->btz", sin_m, B_rc
+    )
 
-    # Z_t = sum(zs * m * c), Z_z = sum(zs * factor_z * c)
-    Z_t = (zs * m_scale * c).sum(dim=(1, 2))
-    Z_z = (zs * factor_z * c).sum(dim=(1, 2))
+    # Z = sum z_sin * sin(α) = sin(mθ)*A_zs - cos(mθ)*B_zs
+    Z = torch.einsum("mt,bmz->btz", sin_m, A_zs) - torch.einsum(
+        "mt,bmz->btz", cos_m, B_zs
+    )
 
-    # 2nd derivatives
-    # R_tt = sum(-rc * m^2 * c), R_zz = sum(-rc * factor_z^2 * c), R_tz = sum(-rc * m * factor_z * c)
-    m_sq = m_scale**2
-    factor_z_sq = factor_z**2
-    m_factor_z = m_scale * factor_z
+    # R_t = sum r_cos * (-m) * sin(α) = (-m*sin(mθ))*A_rc + (m*cos(mθ))*B_rc
+    R_t = torch.einsum("mt,bmz->btz", -m_sin_m, A_rc) + torch.einsum(
+        "mt,bmz->btz", m_cos_m, B_rc
+    )
 
-    R_tt = (-rc * m_sq * c).sum(dim=(1, 2))
-    R_zz = (-rc * factor_z_sq * c).sum(dim=(1, 2))
-    R_tz = (-rc * m_factor_z * c).sum(dim=(1, 2))
+    # R_z = sum r_cos * (nNfp) * sin(α) = sin(mθ)*nA_rc - cos(mθ)*nB_rc
+    R_z = torch.einsum("mt,bmz->btz", sin_m, nA_rc) - torch.einsum(
+        "mt,bmz->btz", cos_m, nB_rc
+    )
 
-    # Z_tt = sum(-zs * m^2 * s), Z_zz = sum(-zs * factor_z^2 * s), Z_tz = sum(-zs * m * factor_z * s)
-    Z_tt = (-zs * m_sq * s).sum(dim=(1, 2))
-    Z_zz = (-zs * factor_z_sq * s).sum(dim=(1, 2))
-    Z_tz = (-zs * m_factor_z * s).sum(dim=(1, 2))
+    # Z_t = sum z_sin * m * cos(α) = (m*cos(mθ))*A_zs + (m*sin(mθ))*B_zs
+    Z_t = torch.einsum("mt,bmz->btz", m_cos_m, A_zs) + torch.einsum(
+        "mt,bmz->btz", m_sin_m, B_zs
+    )
+
+    # Z_z = sum z_sin * (-nNfp) * cos(α) = -cos(mθ)*nA_zs - sin(mθ)*nB_zs
+    Z_z = -torch.einsum("mt,bmz->btz", cos_m, nA_zs) - torch.einsum(
+        "mt,bmz->btz", sin_m, nB_zs
+    )
+
+    # R_tt = sum r_cos * (-m²) * cos(α) = (-m²*cos(mθ))*A_rc + (-m²*sin(mθ))*B_rc
+    R_tt = torch.einsum("mt,bmz->btz", -m2_cos_m, A_rc) + torch.einsum(
+        "mt,bmz->btz", -m2_sin_m, B_rc
+    )
+
+    # R_zz = sum r_cos * (-(nNfp)²) * cos(α) = -cos(mθ)*n2A_rc - sin(mθ)*n2B_rc
+    R_zz = -torch.einsum("mt,bmz->btz", cos_m, n2A_rc) - torch.einsum(
+        "mt,bmz->btz", sin_m, n2B_rc
+    )
+
+    # R_tz = sum r_cos * m*(nNfp) * cos(α) = (m*cos(mθ))*nA_rc + (m*sin(mθ))*nB_rc
+    R_tz = torch.einsum("mt,bmz->btz", m_cos_m, nA_rc) + torch.einsum(
+        "mt,bmz->btz", m_sin_m, nB_rc
+    )
+
+    # Z_tt = sum z_sin * (-m²) * sin(α) = (-m²*sin(mθ))*A_zs + (m²*cos(mθ))*B_zs
+    Z_tt = torch.einsum("mt,bmz->btz", -m2_sin_m, A_zs) + torch.einsum(
+        "mt,bmz->btz", m2_cos_m, B_zs
+    )
+
+    # Z_zz = sum z_sin * (-(nNfp)²) * sin(α) = -sin(mθ)*n2A_zs + cos(mθ)*n2B_zs
+    Z_zz = -torch.einsum("mt,bmz->btz", sin_m, n2A_zs) + torch.einsum(
+        "mt,bmz->btz", cos_m, n2B_zs
+    )
+
+    # Z_tz = sum z_sin * m*(nNfp) * sin(α) = (m*sin(mθ))*nA_zs - (m*cos(mθ))*nB_zs
+    Z_tz = torch.einsum("mt,bmz->btz", m_sin_m, nA_zs) - torch.einsum(
+        "mt,bmz->btz", m_cos_m, nB_zs
+    )
+
+    # Return nfp in original format for compatibility
+    nfp_return = n_field_periods.view(batch_size, 1, 1) if is_tensor_nfp else nfp_scalar
 
     return {
         "R": R,
@@ -504,7 +605,7 @@ def _compute_derivatives(
         "Z_tt": Z_tt,
         "Z_zz": Z_zz,
         "Z_tz": Z_tz,
-        "nfp": nfp,
+        "nfp": nfp_return,
     }
 
 

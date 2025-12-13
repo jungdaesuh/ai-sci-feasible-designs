@@ -683,6 +683,16 @@ def forward_model(
     return result
 
 
+def evaluate_boundary(
+    boundary: Mapping[str, Any],
+    settings: ForwardModelSettings,
+    *,
+    use_cache: bool = True,
+) -> EvaluationResult:
+    """Compatibility alias for integration tests and legacy call sites."""
+    return forward_model(boundary, settings, use_cache=use_cache)
+
+
 def forward_model_batch(
     boundaries: List[Mapping[str, Any]],
     settings: ForwardModelSettings,
