@@ -34,6 +34,17 @@ except ValueError:
 MAX_ELONGATION = 5.0
 
 
+def _is_maximization_problem(problem: str) -> bool:
+    """Return True if the problem objective should be maximized.
+
+    P1: Minimize elongation -> False
+    P2: Maximize L∇B (gradient scale length) -> True
+    P3: Maximize HV (hypervolume) -> True
+    """
+    problem_lower = problem.lower()
+    return problem_lower.startswith("p2") or problem_lower.startswith("p3")
+
+
 def _compute_index_mapping(
     boundary_template: Any, max_poloidal: int, max_toroidal: int, device: str
 ) -> Tuple[torch.Tensor, int]:
@@ -86,10 +97,12 @@ def _compute_index_mapping(
     dense_size = dense_vector.size
 
     # Collect pairs (compact_id, dense_idx)
+    # Use explicit integer comparison for robustness (IDs are integers 1..N stored as floats)
     pairs = []
     for i, val in enumerate(dense_vector):
-        if val > 0.5:
-            compact_id = int(round(val)) - 1
+        int_val = int(round(val))
+        if int_val >= 1:  # Valid IDs are 1, 2, 3, ...
+            compact_id = int_val - 1
             pairs.append((compact_id, i))
 
     # Sort by compact_id so that dense_indices[k] corresponds to compact_vector[k]
@@ -205,8 +218,16 @@ def gradient_descent_on_inputs(
             std_elo = torch.zeros_like(pred_elo)
 
             # Loss Formulation (Risk-Averse: Penalize Uncertainty)
+            # Direction depends on problem:
+            # - P1: MINIMIZE elongation -> UCB (mean + beta*std)
+            # - P2/P3: MAXIMIZE objective -> LCB, then negate for minimization
             beta = 0.1
-            loss_obj = pred_obj.squeeze() + beta * std_obj.squeeze()
+            if _is_maximization_problem(cfg.problem):
+                # Maximize: use LCB (pessimistic for maximization), then negate
+                loss_obj = -(pred_obj.squeeze() - beta * std_obj.squeeze())
+            else:
+                # Minimize: use UCB (pessimistic for minimization)
+                loss_obj = pred_obj.squeeze() + beta * std_obj.squeeze()
 
             # Constraints (Penalty Method) with Pessimistic Bounds
             # MHD: Good if > 0. Pessimistic: mean - beta*std
@@ -382,12 +403,13 @@ def optimize_alm_inner_loop(
         s_elo = std_elo.squeeze()
 
         # Objective term (pessimistic for both directions)
-        if problem.lower().startswith("p2"):
-            # P2: MAXIMIZE gradient -> minimize -gradient
+        # Use _is_maximization_problem to handle P2 AND P3 correctly
+        if _is_maximization_problem(problem):
+            # P2/P3: MAXIMIZE objective -> minimize -objective
             # LCB: mean - beta*std (pessimistic for maximization)
             obj_term = -(pred_obj.squeeze() - beta * std_obj.squeeze())
         else:
-            # P1/P3: MINIMIZE objective
+            # P1: MINIMIZE objective
             # Pessimistic: mean + beta*std
             obj_term = obj
 
