@@ -921,6 +921,7 @@ class Coordinator:
                 seeds,
                 minimize_objective=minimize_objective,
                 exploration_ratio=self.cfg.proposal_mix.exploration_ratio,
+                problem=problem,
             )
 
             # Convert back to seed dicts with metadata

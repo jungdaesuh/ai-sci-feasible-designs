@@ -1246,7 +1246,9 @@ class CycleExecutor:
                 dummy_candidate = {"candidate_params": params}
                 p_key = (self.config.problem or "").lower()
                 predicted_list = surrogate_model.rank_candidates(
-                    [dummy_candidate], minimize_objective=p_key.startswith("p1")
+                    [dummy_candidate],
+                    minimize_objective=p_key.startswith("p1"),
+                    problem=p_key or "p3",
                 )
                 predicted = predicted_list[0]
 
@@ -2031,6 +2033,7 @@ def _surrogate_rank_screen_candidates(
         pool_entries,
         minimize_objective=minimize_objective,
         exploration_ratio=cfg.proposal_mix.exploration_ratio,
+        problem=problem,
     )
 
     restoration_active = len(history) > 10 and recent_feasibility < 0.05

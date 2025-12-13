@@ -239,8 +239,8 @@ class GeometerWorker(Worker):
             if torch.min(norm_n) < 1e-4:
                 return False
 
-            # 2. Check Elongation
-            elo = geometry.elongation(r_cos, z_sin, nfp, n_theta=32, n_zeta=32)
+            # 2. Check Elongation (B7 FIX: use isoperimetric method for benchmark alignment)
+            elo = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
             if elo.item() > 10.0:
                 return False
 
@@ -602,12 +602,14 @@ class RLRefinementWorker(Worker):
             )
 
             # Initialize Env
+            problem = (self.cfg.problem or "p3").lower()
             env = StellaratorEnv(
                 surrogate=self.surrogate,
                 initial_params=params,
                 target_metrics=target_metrics,
                 max_steps=self.steps_per_candidate,
                 device=self.surrogate._device,
+                problem=problem,
             )
 
             # Initialize PPO
