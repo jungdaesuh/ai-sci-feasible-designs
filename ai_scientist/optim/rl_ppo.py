@@ -17,7 +17,9 @@ from torch.distributions.normal import Normal
 _LOGGER = logging.getLogger(__name__)
 
 
-def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Module:
+def layer_init(
+    layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0
+) -> nn.Module:
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
@@ -50,17 +52,25 @@ class Agent(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
+        # Clamp logstd to prevent exp underflow (-20 → ~2e-9) and explosion (+2 → ~7.4)
+        action_logstd = torch.clamp(action_logstd, min=-20.0, max=2.0)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
-        
+
         if action is None:
             action = probs.sample()
-            
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+
+        return (
+            action,
+            probs.log_prob(action).sum(1),
+            probs.entropy().sum(1),
+            self.critic(x),
+        )
 
 
 class PPOBuffer:
     """Simple replay buffer for PPO."""
+
     def __init__(self, obs_dim, act_dim, size, device="cpu"):
         self.obs = torch.zeros((size, obs_dim), dtype=torch.float32).to(device)
         self.actions = torch.zeros((size, act_dim), dtype=torch.float32).to(device)
@@ -71,10 +81,10 @@ class PPOBuffer:
         self.ptr = 0
         self.size = size
         self.device = device
-        
+
     def add(self, obs, action, logprob, reward, done, value):
         if self.ptr >= self.size:
-            return # Overflow protection
+            return  # Overflow protection
         self.obs[self.ptr] = torch.tensor(obs).to(self.device)
         self.actions[self.ptr] = action
         self.logprobs[self.ptr] = logprob
@@ -82,23 +92,24 @@ class PPOBuffer:
         self.dones[self.ptr] = done
         self.values[self.ptr] = value
         self.ptr += 1
-        
+
     def get(self):
         return (
-            self.obs[:self.ptr],
-            self.actions[:self.ptr],
-            self.logprobs[:self.ptr],
-            self.rewards[:self.ptr],
-            self.dones[:self.ptr],
-            self.values[:self.ptr]
+            self.obs[: self.ptr],
+            self.actions[: self.ptr],
+            self.logprobs[: self.ptr],
+            self.rewards[: self.ptr],
+            self.dones[: self.ptr],
+            self.values[: self.ptr],
         )
-    
+
     def reset(self):
         self.ptr = 0
 
 
 class PPOEngine:
     """Trainer for the PPO Agent."""
+
     def __init__(
         self,
         input_dim: int,
@@ -110,12 +121,12 @@ class PPOEngine:
         ent_coef: float = 0.0,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
-        target_kl: float = None,
-        device: str = "cpu"
+        target_kl: float | None = None,
+        device: str = "cpu",
     ):
         self.agent = Agent(input_dim, action_dim).to(device)
         self.optimizer = optim.Adam(self.agent.parameters(), lr=lr, eps=1e-5)
-        
+
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_coef = clip_coef
@@ -124,10 +135,12 @@ class PPOEngine:
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
         self.device = device
-        
-    def train_step(self, buffer: PPOBuffer, next_value: torch.Tensor, next_done: torch.Tensor):
+
+    def train_step(
+        self, buffer: PPOBuffer, next_value: torch.Tensor, next_done: torch.Tensor
+    ):
         obs, actions, logprobs, rewards, dones, values = buffer.get()
-        
+
         # Bootstrap value if not done
         with torch.no_grad():
             advantages = torch.zeros_like(rewards).to(self.device)
@@ -139,12 +152,16 @@ class PPOEngine:
                 else:
                     nextnonterminal = 1.0 - dones[t].float()
                     nextvalues = values[t + 1]
-                
-                delta = rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
-            
+
+                delta = (
+                    rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
+                )
+                advantages[t] = lastgaelam = (
+                    delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
+                )
+
             returns = advantages + values
-            
+
         # Optimize Policy and Value
         # Flatten batch (we only have one batch here effectively)
         b_obs = obs
@@ -152,24 +169,30 @@ class PPOEngine:
         b_actions = actions
         b_advantages = advantages
         b_returns = returns
-        
+
         # Minibatch updates could be done here, but for simplicity we do full batch update
         # since batch size is small (e.g. 50-100 steps per refinement cycle).
-        
-        new_action, new_logprob, entropy, new_value = self.agent.get_action_and_value(b_obs, b_actions)
+
+        new_action, new_logprob, entropy, new_value = self.agent.get_action_and_value(
+            b_obs, b_actions
+        )
         logratio = new_logprob - b_logprobs
         ratio = logratio.exp()
-        
+
         with torch.no_grad():
             # calculate approx_kl http://joschu.net/blog/kl-approx.html
             approx_kl = ((ratio - 1) - logratio).mean()
 
         mb_advantages = b_advantages
-        mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+        mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+            mb_advantages.std() + 1e-8
+        )
 
         # Policy loss
         pg_loss1 = -mb_advantages * ratio
-        pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
+        pg_loss2 = -mb_advantages * torch.clamp(
+            ratio, 1 - self.clip_coef, 1 + self.clip_coef
+        )
         pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
         # Value loss
@@ -183,5 +206,5 @@ class PPOEngine:
         loss.backward()
         nn.utils.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
         self.optimizer.step()
-        
+
         return loss.item(), approx_kl.item()

@@ -337,8 +337,8 @@ class SurrogateBundle(BaseSurrogate):
             scaler = StandardScaler()
             scaled_class = scaler.fit_transform(features)
             clf = RandomForestClassifier(
-                n_estimators=12,
-                max_depth=6,
+                n_estimators=100,
+                max_depth=12,
                 random_state=0,
                 n_jobs=1,
             )
@@ -362,7 +362,7 @@ class SurrogateBundle(BaseSurrogate):
 
             # Train primary objective regressor (on feasible data only if enough samples)
             primary_reg = RandomForestRegressor(
-                n_estimators=12, max_depth=6, random_state=0, n_jobs=1
+                n_estimators=100, max_depth=12, random_state=0, n_jobs=1
             )
             if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
                 primary_reg.fit(
@@ -387,7 +387,7 @@ class SurrogateBundle(BaseSurrogate):
 
             for name, targets in aux_target_arrays.items():
                 reg = RandomForestRegressor(
-                    n_estimators=12, max_depth=6, random_state=0, n_jobs=1
+                    n_estimators=100, max_depth=12, random_state=0, n_jobs=1
                 )
                 # Train on all data to capture the landscape including bad regions
                 reg.fit(scaled_class, targets)

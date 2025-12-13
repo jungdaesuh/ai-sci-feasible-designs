@@ -32,18 +32,33 @@ except ValueError:
 
 MAX_ELONGATION = 5.0
 
+# Fourier decay regularization: penalize high-frequency coefficients
+LAMBDA_FOURIER_DECAY = 0.01
 
-def _is_maximization_problem(problem: str) -> bool:
-    """Return True if the problem's PHYSICS objective should be maximized.
+# Early stopping parameters
+EARLY_STOPPING_PATIENCE = 10
+EARLY_STOPPING_MIN_IMPROVEMENT = 1e-4
 
-    Based on forward_model.compute_objective():
-        P1: max_elongation -> minimize
-        P2: gradient_scale_length -> MAXIMIZE
-        P3: aspect_ratio -> minimize
 
-    Note: CycleExecutor may train surrogates on HV for P3, but the physics
-    objective direction should match the benchmark definition.
+def _is_maximization_problem(problem: str, target: str = "objective") -> bool:
+    """Return True if the target should be maximized.
+
+    Args:
+        problem: Problem identifier (p1, p2, p3).
+        target: The surrogate training target ("objective" or "hv").
+
+    Direction logic:
+        - HV (hypervolume) is ALWAYS maximized regardless of problem.
+        - Physics objectives vary by problem:
+            P1: max_elongation -> minimize
+            P2: gradient_scale_length -> MAXIMIZE
+            P3: aspect_ratio -> minimize
     """
+    # HV is always maximized (Pareto hypervolume metric)
+    if target.lower() == "hv":
+        return True
+
+    # Physics objective direction
     problem_lower = (problem or "").lower()
     return problem_lower.startswith("p2")
 
@@ -178,7 +193,6 @@ def _compute_index_mapping(
         dense_size: Size of the dense vector.
     """
     source_grid_h = max_poloidal + 1
-    source_grid_w = 2 * max_toroidal + 1
 
     target_mpol = max_poloidal if dense_mpol is None else int(dense_mpol)
     target_ntor = max_toroidal if dense_ntor is None else int(dense_ntor)
@@ -292,10 +306,12 @@ def gradient_descent_on_inputs(
             flat_np, dtype=torch.float32, device=device, requires_grad=True
         )
 
-        # 4. Optimization Loop
+        # 4. Optimization Loop with early stopping
         optimizer = torch.optim.Adam([x_torch], lr=lr)
+        best_loss = float("inf")
+        patience_counter = 0
 
-        for _ in range(steps):
+        for step in range(steps):
             optimizer.zero_grad()
 
             # Map Compact -> Dense
@@ -345,11 +361,14 @@ def gradient_descent_on_inputs(
             std_elo = torch.zeros_like(pred_elo)
 
             # Loss Formulation (Risk-Averse: Penalize Uncertainty)
-            # Direction depends on problem:
+            # Direction depends on problem and target:
             # - P1: MINIMIZE elongation -> UCB (mean + beta*std)
-            # - P2/P3: MAXIMIZE objective -> LCB, then negate for minimization
+            # - P2: MAXIMIZE gradient -> LCB, then negate
+            # - P3 with HV target: MAXIMIZE HV -> LCB, then negate
             beta = 0.1
-            if _is_maximization_problem(problem):
+            # Determine target for P3 (uses HV in CycleExecutor)
+            target = "hv" if problem.lower().startswith("p3") else "objective"
+            if _is_maximization_problem(problem, target):
                 # Maximize: use LCB (pessimistic for maximization), then negate
                 loss_obj = -(pred_obj.squeeze() - beta * std_obj.squeeze())
             else:
@@ -380,10 +399,28 @@ def gradient_descent_on_inputs(
                 + weights.elongation * viol_elo
             )
 
-            loss = loss_obj + loss_penalty
+            # Fourier decay regularization (L2 penalty weighted by mode order)
+            m_idx = torch.arange(grid_h, device=device, dtype=x_torch.dtype)
+            n_idx = torch.arange(-ntor, ntor + 1, device=device, dtype=x_torch.dtype)
+            mode_weight = torch.sqrt(m_idx[:, None] ** 2 + n_idx[None, :] ** 2)
+            fourier_penalty = LAMBDA_FOURIER_DECAY * torch.sum(
+                mode_weight * (r_cos.squeeze() ** 2 + z_sin.squeeze() ** 2)
+            )
+
+            loss = loss_obj + loss_penalty + fourier_penalty
 
             loss.backward()
             optimizer.step()
+
+            # Early stopping check
+            current_loss = loss.item()
+            if current_loss < best_loss - EARLY_STOPPING_MIN_IMPROVEMENT:
+                best_loss = current_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= EARLY_STOPPING_PATIENCE:
+                    break  # Converged
 
         # 5. Reconstruction using local helper (mock-safe)
         x_final_np = x_torch.detach().cpu().numpy()
@@ -522,9 +559,10 @@ def optimize_alm_inner_loop(
         s_elo = std_elo.squeeze()
 
         # Objective term (pessimistic for both directions)
-        # Use _is_maximization_problem to handle P2 AND P3 correctly
-        if _is_maximization_problem(problem):
-            # P2/P3: MAXIMIZE objective -> minimize -objective
+        # Determine target for P3 (uses HV in CycleExecutor)
+        target = "hv" if problem.lower().startswith("p3") else "objective"
+        if _is_maximization_problem(problem, target):
+            # P2/P3: MAXIMIZE target -> minimize -objective
             # LCB: mean - beta*std (pessimistic for maximization)
             obj_term = -(pred_obj.squeeze() - beta * std_obj.squeeze())
         else:
@@ -561,7 +599,15 @@ def optimize_alm_inner_loop(
             )
         )
 
-        loss = obj_term + torch.sum(augmented_term)
+        # Fourier decay regularization (L2 penalty weighted by mode order)
+        m_idx = torch.arange(grid_h, device=device, dtype=x_torch.dtype)
+        n_idx = torch.arange(-ntor, ntor + 1, device=device, dtype=x_torch.dtype)
+        mode_weight = torch.sqrt(m_idx[:, None] ** 2 + n_idx[None, :] ** 2)
+        fourier_penalty = LAMBDA_FOURIER_DECAY * torch.sum(
+            mode_weight * (r_cos.squeeze() ** 2 + z_sin.squeeze() ** 2)
+        )
+
+        loss = obj_term + torch.sum(augmented_term) + fourier_penalty
 
         loss.backward()
         optimizer.step()

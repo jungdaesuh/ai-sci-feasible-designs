@@ -69,8 +69,8 @@ def load_constellaration_dataset(
 
                 return True
             except (KeyError, TypeError):
-                # If there's any issue accessing fields, conservatively keep the example
-                return True
+                # If there's any issue accessing fields, reject the example to avoid corrupted data
+                return False
 
         ds = ds.filter(p2_filter)
 
