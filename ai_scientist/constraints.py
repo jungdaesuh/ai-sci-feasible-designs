@@ -104,6 +104,32 @@ CONSTRAINT_BOUNDS: Dict[str, Dict[str, float]] = {
 
 
 # =============================================================================
+# PHYSICS CONSTANTS (used in differentiable optimization)
+# =============================================================================
+# These constants are used in gradient-based optimization (differentiable.py)
+# and should be kept consistent with CONSTRAINT_BOUNDS above.
+
+# Maximum elongation bound (P2 constraint)
+MAX_ELONGATION: float = 5.0
+
+# Small epsilon for numerical stability in log computation
+QI_EPS: float = 1e-12
+
+# Log10(QI) thresholds by problem (constraint: log10(qi) <= threshold)
+LOG10_QI_THRESHOLDS: Dict[str, float] = {
+    "p2": -4.0,  # Stricter threshold for P2
+    "p3": -3.5,  # Default threshold for P3
+}
+
+# Fourier decay regularization weight
+LAMBDA_FOURIER_DECAY: float = 0.01
+
+# Early stopping parameters for gradient descent
+EARLY_STOPPING_PATIENCE: int = 10
+EARLY_STOPPING_MIN_IMPROVEMENT: float = 1e-4
+
+
+# =============================================================================
 # API FUNCTIONS
 # =============================================================================
 
@@ -185,3 +211,18 @@ def is_p3_only_constraint(constraint_name: str) -> bool:
     part of P2 constraints but ARE part of P3.
     """
     return constraint_name in {"vacuum_well", "flux_compression"}
+
+
+def get_log10_qi_threshold(problem: str) -> float:
+    """Get the log10(qi) threshold for the given problem.
+
+    Args:
+        problem: Problem identifier ("p1", "p2", "p3").
+
+    Returns:
+        The log10(qi) upper bound threshold.
+    """
+    key = (problem or "p3").lower()
+    if key.startswith("p2"):
+        return LOG10_QI_THRESHOLDS["p2"]
+    return LOG10_QI_THRESHOLDS["p3"]

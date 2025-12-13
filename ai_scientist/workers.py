@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -21,6 +22,63 @@ from ai_scientist.optim.samplers import (
     RotatingEllipseSampler,
 )
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+
+
+# =============================================================================
+# WORKER CONTEXT DATACLASSES (Issue #18: Typed contexts)
+# =============================================================================
+
+
+@dataclass
+class OptimizationContext:
+    """Context for OptimizationWorker."""
+
+    initial_guesses: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ExplorationContext:
+    """Context for ExplorationWorker."""
+
+    n_samples: int = 10
+    cycle: int = 0
+    vae_ratio: float = 0.4
+    target_metrics: Optional[Dict[str, float]] = None
+
+
+@dataclass
+class GeometerContext:
+    """Context for GeometerWorker."""
+
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class PreRelaxContext:
+    """Context for PreRelaxWorker."""
+
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    schema: Optional[tools.FlattenSchema] = None
+    use_batched: Optional[bool] = None  # Auto-decide if None
+
+
+@dataclass
+class RLRefinementContext:
+    """Context for RLRefinementWorker."""
+
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    target_metrics: Optional[Dict[str, float]] = None
+
+
+# Type alias for backward compatibility
+WorkerContext = Union[
+    OptimizationContext,
+    ExplorationContext,
+    GeometerContext,
+    PreRelaxContext,
+    RLRefinementContext,
+    Dict[str, Any],
+]
 
 
 class Worker(ABC):

@@ -927,9 +927,10 @@ class Coordinator:
             # Convert back to seed dicts with metadata
             sorted_seeds = []
             for i, pred in enumerate(ranked_preds):
-                # Cast to Dict to allow mutation (pyright sees Mapping)
-                # Cast to Dict to allow mutation (pyright sees Mapping)
-                seed_data = dict(pred.metadata)  # type: ignore
+                # Handle Optional metadata - create empty dict if None
+                seed_data: Dict[str, Any] = (
+                    dict(pred.metadata) if pred.metadata is not None else {}
+                )
 
                 # Inject surrogate stats into seed for telemetry
                 seed_data["surrogate_score"] = pred.expected_value

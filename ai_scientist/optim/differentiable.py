@@ -14,6 +14,14 @@ from constellaration.geometry import surface_rz_fourier as surface_module
 
 from ai_scientist import config as ai_config
 from ai_scientist import tools
+from ai_scientist.constraints import (
+    EARLY_STOPPING_MIN_IMPROVEMENT,
+    EARLY_STOPPING_PATIENCE,
+    LAMBDA_FOURIER_DECAY,
+    MAX_ELONGATION,
+    QI_EPS,
+    get_log10_qi_threshold,
+)
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.utils import pytree
@@ -29,15 +37,6 @@ try:
 except ValueError:
     # Already registered
     pass
-
-MAX_ELONGATION = 5.0
-
-# Fourier decay regularization: penalize high-frequency coefficients
-LAMBDA_FOURIER_DECAY = 0.01
-
-# Early stopping parameters
-EARLY_STOPPING_PATIENCE = 10
-EARLY_STOPPING_MIN_IMPROVEMENT = 1e-4
 
 
 def _is_maximization_problem(problem: str, target: str = "objective") -> bool:
@@ -390,14 +389,15 @@ def gradient_descent_on_inputs(
             # MHD: Good if > 0. Pessimistic: mean - beta*std
             viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
 
-            # QI constraint: log10(qi) <= -3.5 (P3 default threshold)
+            # QI constraint: log10(qi) <= threshold (problem-dependent)
             # Surrogate predicts raw QI, so we convert to log10 for comparison
             qi_raw = pred_qi.squeeze()
             qi_positive = qi_raw.abs() + QI_EPS
             log10_qi = torch.log10(qi_positive)
             s_qi = std_qi.squeeze()
             s_log10_qi = s_qi / (qi_positive * 2.302585)  # Uncertainty propagation
-            viol_qi = torch.relu((log10_qi + beta * s_log10_qi) - LOG10_QI_THRESHOLD_P3)
+            log10_qi_threshold = get_log10_qi_threshold(problem)
+            viol_qi = torch.relu((log10_qi + beta * s_log10_qi) - log10_qi_threshold)
 
             # Elongation: Good if < MAX_ELONGATION
             viol_elo = torch.relu(
@@ -450,21 +450,9 @@ def gradient_descent_on_inputs(
     return optimized_candidates
 
 
-# Problem-dependent QI thresholds
-# The physics constraints are defined in LOG space: log10(qi) <= threshold
-# We use LOG10 thresholds here and compare log10(qi) to threshold.
-# This is more numerically stable than comparing raw QI values, especially
-# since QI spans many orders of magnitude (1e-6 to 1e-1).
-LOG10_QI_THRESHOLD_P2 = -4.0  # Constraint: log10(qi) <= -4.0
-LOG10_QI_THRESHOLD_P3 = -3.5  # Constraint: log10(qi) <= -3.5
-QI_EPS = 1e-12  # Small epsilon for numerical stability in log computation
-
-
-def _get_log10_qi_threshold(problem: str) -> float:
-    """Get the log10(qi) threshold for the given problem."""
-    if problem.lower().startswith("p2"):
-        return LOG10_QI_THRESHOLD_P2
-    return LOG10_QI_THRESHOLD_P3
+# NOTE: Physics constants (QI_EPS, LOG10_QI_THRESHOLDS, MAX_ELONGATION, etc.)
+# are imported from ai_scientist.constraints (SSOT for optimization constants).
+# Use get_log10_qi_threshold(problem) to get problem-specific QI thresholds.
 
 
 def optimize_alm_inner_loop(
@@ -515,7 +503,7 @@ def optimize_alm_inner_loop(
 
     optimizer = torch.optim.Adam([x_torch], lr=lr)
 
-    log10_qi_threshold = _get_log10_qi_threshold(problem)
+    log10_qi_threshold = get_log10_qi_threshold(problem)
     beta = 0.1  # Uncertainty penalty factor
 
     for _ in range(steps):
