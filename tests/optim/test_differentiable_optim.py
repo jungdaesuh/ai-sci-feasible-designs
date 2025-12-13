@@ -28,14 +28,14 @@ class TestDifferentiableOptim(unittest.TestCase):
         self.surrogate._schema = self.schema
 
         # Create a simple dummy model
-        # B3 FIX: Now returns 4 values: obj, mhd, qi, iota
+        # Issue #1 FIX: Now returns 6 values: obj, mhd, qi, iota, mirror_ratio, flux_compression
         class DummyModel(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.mpol = mpol
                 self.ntor = ntor
                 # Just some learnable params to allow gradients
-                self.layer = nn.Linear(1, 4)  # Now 4 outputs
+                self.layer = nn.Linear(1, 6)  # Now 6 outputs
 
             def forward(self, x):
                 # x is (Batch, DenseSize)
@@ -43,10 +43,27 @@ class TestDifferentiableOptim(unittest.TestCase):
                 # Collapse x to 1 dim to feed linear
                 val = x.mean(dim=1, keepdim=True)
                 out = self.layer(val)
-                # return obj, mhd, qi, iota (B3 fix)
-                return out[:, 0], out[:, 1], out[:, 2], out[:, 3]
+                # return obj, mhd, qi, iota, mirror_ratio, flux_compression (Issue #1 fix)
+                return out[:, 0], out[:, 1], out[:, 2], out[:, 3], out[:, 4], out[:, 5]
 
         self.surrogate._models = [DummyModel(), DummyModel()]
+
+        # Mock normalization stats (required for predict_torch denormalization)
+        import torch
+
+        self.surrogate._y_obj_mean = torch.tensor(0.0)
+        self.surrogate._y_obj_std = torch.tensor(1.0)
+        self.surrogate._y_mhd_mean = torch.tensor(0.0)
+        self.surrogate._y_mhd_std = torch.tensor(1.0)
+        self.surrogate._y_qi_log_mean = torch.tensor(-4.0)
+        self.surrogate._y_qi_log_std = torch.tensor(1.0)
+        self.surrogate._y_iota_mean = torch.tensor(0.3)
+        self.surrogate._y_iota_std = torch.tensor(0.1)
+        # Issue #1 fix: add mirror_ratio and flux_compression stats
+        self.surrogate._y_mirror_ratio_mean = torch.tensor(0.15)
+        self.surrogate._y_mirror_ratio_std = torch.tensor(0.1)
+        self.surrogate._y_flux_compression_mean = torch.tensor(0.5)
+        self.surrogate._y_flux_compression_std = torch.tensor(0.2)
 
         # Mock Config
         self.cfg = MagicMock(spec=ai_config.ExperimentConfig)

@@ -335,8 +335,13 @@ def gradient_descent_on_inputs(
             flat_np, dtype=torch.float32, device=device, requires_grad=True
         )
 
-        # 4. Optimization Loop with early stopping
+        # 4. Optimization Loop with early stopping and LR scheduling (Issue #3 fix)
         optimizer = torch.optim.Adam([x_torch], lr=lr)
+        # Cosine annealing scheduler: lr decreases smoothly from initial to ~0 over steps
+        # This improves convergence by allowing aggressive early exploration then fine-tuning
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=steps, eta_min=lr * 0.01
+        )
         best_loss = float("inf")
         best_x_torch = x_torch.detach().clone()  # Capture initial state as best
         patience_counter = 0
@@ -363,7 +368,7 @@ def gradient_descent_on_inputs(
             x_input = torch.cat([x_dense, nfp_tensor], dim=0)
 
             # Predict
-            # B3 FIX: predict_torch now returns 8 values including iota
+            # Issue #1 FIX: predict_torch now returns 12 values (6 metrics × mean/std)
             (
                 pred_obj,
                 std_obj,
@@ -373,6 +378,10 @@ def gradient_descent_on_inputs(
                 std_qi,
                 _pred_iota,  # Not used in optimization loop
                 _std_iota,  # Not used in optimization loop
+                _pred_mirror,  # P3 constraint - not used in GD loop
+                _std_mirror,
+                _pred_flux,  # P3 constraint - not used in GD loop
+                _std_flux,
             ) = surrogate.predict_torch(x_input.unsqueeze(0))
 
             # Compute Elongation directly (Exact, so std=0)
@@ -458,6 +467,7 @@ def gradient_descent_on_inputs(
 
             loss.backward()
             optimizer.step()
+            scheduler.step()  # Issue #3 fix: update LR each step
 
             # Early stopping check: track best parameters seen
             current_loss = loss.item()
@@ -539,6 +549,10 @@ def optimize_alm_inner_loop(
     )
 
     optimizer = torch.optim.Adam([x_torch], lr=lr)
+    # Cosine annealing scheduler for better convergence (Issue #3 fix)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=steps, eta_min=lr * 0.01
+    )
 
     log10_qi_threshold = get_log10_qi_threshold(problem)
     beta = 0.1  # Uncertainty penalty factor
@@ -560,7 +574,7 @@ def optimize_alm_inner_loop(
         x_input = torch.cat([x_dense, nfp_tensor], dim=0)
 
         # Predict
-        # B3 FIX: predict_torch now returns 8 values including iota
+        # Issue #1 FIX: predict_torch now returns 12 values (6 metrics × mean/std)
         (
             pred_obj,
             std_obj,
@@ -570,6 +584,10 @@ def optimize_alm_inner_loop(
             std_qi,
             _pred_iota,  # Not used in ALM loop
             _std_iota,  # Not used in ALM loop
+            _pred_mirror,  # P3 constraint - not used in ALM loop
+            _std_mirror,
+            _pred_flux,  # P3 constraint - not used in ALM loop
+            _std_flux,
         ) = surrogate.predict_torch(x_input.unsqueeze(0))
 
         # Compute Elongation directly
@@ -656,5 +674,6 @@ def optimize_alm_inner_loop(
 
         loss.backward()
         optimizer.step()
+        scheduler.step()  # Issue #3 fix: update LR each step
 
     return x_torch.detach().cpu().numpy()
