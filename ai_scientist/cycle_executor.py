@@ -319,6 +319,9 @@ class CycleExecutor:
         )
 
         if generative_model:
+            # P3 is multi-objective: surrogate predicts hypervolume contribution for
+            # ranking, not the single physics objective (aspect_ratio). This is
+            # intentional—see forward_model.compute_objective() docstring.
             gen_history = self.world_model.surrogate_training_data(
                 target="hv" if self.config.problem == "p3" else "objective",
                 problem=self.config.problem,
@@ -1214,6 +1217,9 @@ class CycleExecutor:
         ) = None
         if optimizer_mode == "sa-alm" or self.config.optimizer_backend == "sa-alm":
             problem = (self.config.problem or "").lower()
+            # P3 is multi-objective: surrogate predicts hypervolume contribution for
+            # ranking, not the single physics objective (aspect_ratio). This is
+            # intentional—see forward_model.compute_objective() docstring.
             target_column = "hv" if problem == "p3" else "objective"
             history = self.world_model.surrogate_training_data(
                 target=target_column, problem=self.config.problem
@@ -1982,6 +1988,9 @@ def _surrogate_rank_screen_candidates(
         return candidates
 
     problem = (cfg.problem or "").lower()
+    # P3 is multi-objective: surrogate predicts hypervolume contribution for
+    # ranking, not the single physics objective (aspect_ratio). This is
+    # intentional—see forward_model.compute_objective() docstring.
     target_column = "hv" if problem == "p3" else "objective"
     minimize_objective = problem == "p1"
 

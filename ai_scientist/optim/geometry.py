@@ -62,15 +62,9 @@ def fourier_to_real_space(
 
     if is_torch:
         mpol_plus_1, two_ntor_plus_1 = r_cos.shape
-        xp = torch
-        cos = torch.cos
-        sin = torch.sin
         pi = torch.pi
     else:
         mpol_plus_1, two_ntor_plus_1 = r_cos.shape
-        xp = np
-        cos = np.cos
-        sin = np.sin
         pi = np.pi
 
     mpol = mpol_plus_1 - 1

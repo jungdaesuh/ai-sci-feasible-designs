@@ -43,7 +43,60 @@ logger = logging.getLogger(__name__)
 
 # --- Caching & Constants ---
 
-_EVALUATION_CACHE: Dict[str, "EvaluationResult"] = {}
+# LRU Cache with configurable max size (fixes unbounded memory growth)
+_CACHE_MAX_SIZE_DEFAULT = 10000
+
+
+def _get_cache_max_size() -> int:
+    """Get cache max size from environment or default."""
+    return int(
+        os.environ.get("AI_SCIENTIST_CACHE_MAX_SIZE", str(_CACHE_MAX_SIZE_DEFAULT))
+    )
+
+
+class _LRUCache:
+    """Thread-safe LRU cache with max size eviction policy.
+
+    Uses collections.OrderedDict for zero external dependencies.
+    Move-to-end on access provides LRU semantics.
+    """
+
+    def __init__(self, maxsize: int = _CACHE_MAX_SIZE_DEFAULT):
+        from collections import OrderedDict
+
+        self._cache: "OrderedDict[str, EvaluationResult]" = OrderedDict()
+        self._maxsize = maxsize
+
+    def get(self, key: str) -> "EvaluationResult | None":
+        if key in self._cache:
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def set(self, key: str, value: "EvaluationResult") -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = value
+        # Evict oldest entries if over capacity
+        while len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    @property
+    def maxsize(self) -> int:
+        return self._maxsize
+
+
+_EVALUATION_CACHE: _LRUCache = _LRUCache(_get_cache_max_size())
 _CACHE_STATS: Dict[str, int] = defaultdict(int)
 _CANONICAL_PRECISION = 1e-8
 _DEFAULT_ROUNDING = 1e-6
@@ -569,13 +622,12 @@ def forward_model(
     settings_hash = hashlib.sha256(settings_json.encode("utf-8")).hexdigest()
     cache_key = f"{d_hash}:{settings_hash}"
 
-    if use_cache and cache_key in _EVALUATION_CACHE:
-        _CACHE_STATS["hits"] += 1
-        result = _EVALUATION_CACHE[cache_key]
-        # Update evaluation time to reflect retrieval? No, keep original.
-        # Return a copy? Pydantic models are mutable by default but we should treat as immutable.
-        # We return a new instance with cache_hit=True
-        return result.model_copy(update={"cache_hit": True})
+    if use_cache:
+        cached_result = _EVALUATION_CACHE.get(cache_key)
+        if cached_result is not None:
+            _CACHE_STATS["hits"] += 1
+            # Return a copy with cache_hit=True
+            return cached_result.model_copy(update={"cache_hit": True})
 
     _CACHE_STATS["misses"] += 1
 
@@ -584,9 +636,9 @@ def forward_model(
     backend = get_backend()
     result = backend.evaluate(boundary, settings)
 
-    # 4. Update Cache
+    # 4. Update Cache (LRU eviction handled automatically)
     if use_cache:
-        _EVALUATION_CACHE[cache_key] = result
+        _EVALUATION_CACHE.set(cache_key, result)
 
     return result
 
