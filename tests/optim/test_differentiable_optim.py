@@ -144,6 +144,28 @@ class TestDifferentiableOptim(unittest.TestCase):
             np.allclose(x_new, x_initial), "ALM inner loop should update params"
         )
 
+    def test_p3_uses_maximization_direction(self):
+        """P3 with HV target should maximize (not minimize)."""
+        # P1: minimize (physics objective = elongation)
+        self.assertFalse(differentiable._is_maximization_problem("p1"))
+        self.assertFalse(
+            differentiable._is_maximization_problem("p1", target="objective")
+        )
+
+        # P2: maximize (physics objective = gradient)
+        self.assertTrue(differentiable._is_maximization_problem("p2"))
+        self.assertTrue(
+            differentiable._is_maximization_problem("p2", target="objective")
+        )
+
+        # P3 with physics objective: minimize (aspect_ratio)
+        self.assertFalse(
+            differentiable._is_maximization_problem("p3", target="objective")
+        )
+
+        # P3 with HV target: MAXIMIZE (key fix!)
+        self.assertTrue(differentiable._is_maximization_problem("p3", target="hv"))
+
 
 if __name__ == "__main__":
     unittest.main()
