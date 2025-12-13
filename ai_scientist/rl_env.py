@@ -119,7 +119,8 @@ class StellaratorEnv(gym.Env):
         try:
             with torch.no_grad():
                 # Predict (Mean + Std)
-                # Returns: (obj_m, obj_s, mhd_m, mhd_s, qi_m, qi_s, iota_m, iota_s)
+                # Returns: (obj_m, obj_s, mhd_m, mhd_s, qi_m, qi_s, iota_m, iota_s,
+                #           mirror_m, mirror_s, flux_m, flux_s)
                 (
                     obj_m,
                     _,
@@ -129,6 +130,10 @@ class StellaratorEnv(gym.Env):
                     _,
                     iota_m,
                     _,
+                    _,  # mirror_mean (unused)
+                    _,  # mirror_std (unused)
+                    _,  # flux_mean (unused)
+                    _,  # flux_std (unused)
                 ) = self.surrogate.predict_torch(x_tensor)
 
                 # Move to CPU scalars
@@ -172,7 +177,7 @@ class StellaratorEnv(gym.Env):
         # P1 constraints: average_triangularity <= -0.5, edge_rotational_transform >= 0.3
         if self.problem.startswith("p1"):
             # 3a. Triangularity constraint: average_triangularity <= -0.5
-            # Computed geometrically from Fourier coefficients
+            # Computed geometrically from Fourier coefficients using dedicated function
             try:
                 mpol = self.schema.mpol
                 ntor = self.schema.ntor
@@ -190,19 +195,15 @@ class StellaratorEnv(gym.Env):
                     self.params.get("n_field_periods") or self.params.get("nfp", 1)
                 )
 
-                # Triangularity approximation from Fourier coefficients:
-                # For stellarator symmetric surfaces, triangularity relates to the
-                # (m=2, n=0) mode amplitude relative to the minor radius.
-                # Simplified: delta ~ Z_{20} / r_minor (sign convention varies)
-                # Since we don't have a dedicated geometry function, use surrogate iota
-                # and add an approximation based on aspect ratio deformation
-                # TODO: Add geometry.triangularity() function for exact computation
-
-                # For now, penalize high aspect ratio as a proxy (P1 wants AR <= 4)
-                ar_limit_p1 = self.target_metrics.get("aspect_ratio", 4.0)
-                computed_ar = float(geometry.aspect_ratio(r_cos, z_sin, nfp_val).item())
-                ar_violation = max(0.0, computed_ar - ar_limit_p1)
-                cost += 5.0 * ar_violation  # Strong AR penalty for P1
+                # Compute triangularity using dedicated geometry function
+                computed_tri = float(
+                    geometry.average_triangularity(r_cos, z_sin, nfp_val).item()
+                )
+                tri_limit = self.target_metrics.get("average_triangularity", -0.5)
+                # P1 constraint: average_triangularity <= -0.5
+                # Violation when computed_tri > tri_limit
+                tri_violation = max(0.0, computed_tri - tri_limit)
+                cost += 5.0 * tri_violation  # Strong triangularity penalty
 
             except Exception:
                 pass  # Skip if geometry computation fails

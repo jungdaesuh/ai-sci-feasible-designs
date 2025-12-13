@@ -34,7 +34,14 @@ class Problem(ABC):
 
     @abstractmethod
     def get_objective(self, metrics: Dict[str, Any]) -> float:
-        """Extract objective value from metrics."""
+        """Extract primary objective value from metrics.
+
+        Returns a single scalar representing the primary optimization objective.
+        For multi-objective problems (e.g., P3), this returns only the primary
+        objective for compatibility with single-objective optimizers. Use
+        problem-specific methods (e.g., forward_model.compute_p3_objectives())
+        for full multi-objective Pareto analysis.
+        """
         ...
 
     # Template methods
@@ -213,13 +220,20 @@ class P3Problem(Problem):
         return violations
 
     def get_objective(self, metrics: Dict[str, Any]) -> float:
-        # P3 is multi-objective, but for single-value context (like simple tracking)
-        # we might return the primary objective or a scalarization.
-        # However, Coordinator uses ALM which handles constraints.
-        # The 'objective' in ALM state is usually the Lagrangian.
-        # For simple tracking, let's return the gradient scale length (negated)
-        # as it's the primary physics performance metric besides aspect ratio.
-        return -metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+        """Return primary objective (aspect_ratio) for single-objective optimization.
+
+        P3 is inherently multi-objective (minimize aspect_ratio AND maximize
+        L_grad_B for Pareto trade-off). This method returns only aspect_ratio
+        for compatibility with single-objective optimizers and benchmark scoring.
+
+        For full multi-objective optimization, use:
+            - forward_model.compute_p3_objectives() -> (aspect_ratio, -L_grad_B)
+            - NSGA-II or similar Pareto-based algorithms
+
+        Returns:
+            aspect_ratio: Lower is better (more compact reactor).
+        """
+        return metrics.get("aspect_ratio", float("inf"))
 
 
 def get_problem(name: str) -> Problem:

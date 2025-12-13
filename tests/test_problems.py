@@ -168,6 +168,7 @@ class TestP3Problem:
         # flux_compression_in_regions_of_bad_curvature <= 0.9
         # vacuum_well >= 0.0
         metrics = {
+            "aspect_ratio": 8.0,  # P3 objective: minimize aspect_ratio
             "edge_rotational_transform_over_n_field_periods": 0.3,
             "qi": 1e-4,
             "edge_magnetic_mirror_ratio": 0.2,
@@ -176,7 +177,7 @@ class TestP3Problem:
             "minimum_normalized_magnetic_gradient_scale_length": 2.0,
         }
         assert p.is_feasible(metrics)
-        assert p.get_objective(metrics) == -2.0
+        assert p.get_objective(metrics) == 8.0  # Returns aspect_ratio
 
         # Infeasible case (vacuum well)
         metrics_bad = metrics.copy()

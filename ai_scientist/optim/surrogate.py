@@ -419,7 +419,8 @@ class SurrogateBundle(BaseSurrogate):
     def _predict_batch(
         self, feature_matrix: np.ndarray
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        assert self._classifier is not None
+        # Classifier can be None if single-class fallback is active
+        assert self._classifier is not None or self._single_class_fallback is not None
         assert self._regressors
         assert self._scaler is not None
 

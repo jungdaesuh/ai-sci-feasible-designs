@@ -963,6 +963,123 @@ def surface_area(
         return area_per_period * nfp
 
 
+def average_triangularity(
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    n_field_periods: int | Float[torch.Tensor, "batch"],
+    n_theta: int = 64,
+) -> Float[torch.Tensor, "batch"]:
+    """Compute average triangularity at stellarator symmetry planes.
+
+    Triangularity measures the horizontal displacement of the Z extrema from
+    the geometric center. Negative triangularity (δ < 0) indicates that Zmax/Zmin
+    occur at R > R₀, creating an "upside-down D" shape desirable for confinement.
+
+    Definition (per constellaration.mhd.geometry_utils):
+        δ_top = (R₀ - R_{Zmax}) / minor_radius
+        δ_bottom = (R₀ - R_{Zmin}) / minor_radius
+        δ = (δ_top + δ_bottom) / 2
+
+    This is computed at φ=0 and φ=π/nfp (stellarator symmetry planes), then averaged.
+
+    For stellarator symmetric configurations, δ_top = δ_bottom at each symmetry plane,
+    so we only need to find R at Zmax.
+
+    Args:
+        r_cos, z_sin: Fourier coefficients (Batch, mpol+1, 2*ntor+1).
+        n_field_periods: Number of field periods.
+        n_theta: Poloidal grid resolution.
+
+    Returns:
+        Tensor of shape (Batch,) with average triangularity.
+    """
+    batch_size, mpol_plus_1, two_ntor_plus_1 = r_cos.shape
+    mpol = mpol_plus_1 - 1
+    ntor = (two_ntor_plus_1 - 1) // 2
+    device = r_cos.device
+
+    # Handle Nfp
+    is_tensor_nfp = isinstance(n_field_periods, torch.Tensor)
+    if is_tensor_nfp:
+        nfp_val = n_field_periods.view(batch_size)
+    else:
+        nfp_val = torch.full((batch_size,), float(n_field_periods), device=device)
+
+    # Evaluate at the two stellarator symmetry planes: φ=0 and φ=π/nfp
+    # Shape: (2,) for zeta values
+    zeta_planes = torch.stack(
+        [torch.zeros(batch_size, device=device), torch.pi / nfp_val], dim=0
+    )  # (2, B)
+
+    # Poloidal angle grid
+    theta = torch.linspace(0, 2 * torch.pi, n_theta + 1, device=device)[:-1]  # (T,)
+
+    # Mode indices
+    m_idx = torch.arange(mpol + 1, dtype=r_cos.dtype, device=device)  # (M,)
+    n_idx_arr = torch.arange(2 * ntor + 1, dtype=r_cos.dtype, device=device)  # (N,)
+    n_vals = n_idx_arr - ntor  # Maps 0..2*ntor to -ntor..ntor
+
+    # Precompute theta-dependent terms: cos(mθ), sin(mθ) for all m
+    m_theta = m_idx[:, None] * theta[None, :]  # (M, T)
+    cos_m_theta = torch.cos(m_theta)  # (M, T)
+    sin_m_theta = torch.sin(m_theta)  # (M, T)
+
+    # For each symmetry plane (φ=0 and φ=π/nfp):
+    # R(θ, φ) = Σ_{m,n} r_cos[m,n] * cos(mθ - n*Nfp*φ)
+    # Z(θ, φ) = Σ_{m,n} z_sin[m,n] * sin(mθ - n*Nfp*φ)
+
+    triangularities = []
+
+    for plane_idx in range(2):  # φ=0 and φ=π/nfp
+        zeta = zeta_planes[plane_idx]  # (B,)
+
+        # Compute n*Nfp*φ for each mode n
+        # n_vals: (N,), nfp_val: (B,), zeta: (B,)
+        n_nfp_zeta = n_vals[None, :] * nfp_val[:, None] * zeta[:, None]  # (B, N)
+        cos_n_zeta = torch.cos(n_nfp_zeta)  # (B, N)
+        sin_n_zeta = torch.sin(n_nfp_zeta)  # (B, N)
+
+        # Two-stage contraction for R and Z
+        # Stage 1: Contract over n -> (B, M)
+        A_rc = torch.einsum("bmn,bn->bm", r_cos, cos_n_zeta)  # (B, M)
+        B_rc = torch.einsum("bmn,bn->bm", r_cos, sin_n_zeta)  # (B, M)
+        A_zs = torch.einsum("bmn,bn->bm", z_sin, cos_n_zeta)  # (B, M)
+        B_zs = torch.einsum("bmn,bn->bm", z_sin, sin_n_zeta)  # (B, M)
+
+        # Stage 2: Contract over m -> (B, T)
+        # R = cos(mθ)*A_rc + sin(mθ)*B_rc
+        R = torch.einsum("mt,bm->bt", cos_m_theta, A_rc) + torch.einsum(
+            "mt,bm->bt", sin_m_theta, B_rc
+        )  # (B, T)
+        # Z = sin(mθ)*A_zs - cos(mθ)*B_zs
+        Z = torch.einsum("mt,bm->bt", sin_m_theta, A_zs) - torch.einsum(
+            "mt,bm->bt", cos_m_theta, B_zs
+        )  # (B, T)
+
+        # Compute triangularity at this plane
+        # R₀ = mean(R) (approximate magnetic axis)
+        R0 = torch.mean(R, dim=1)  # (B,)
+
+        # Minor radius = (R_max - R_min) / 2
+        R_max = torch.max(R, dim=1)[0]  # (B,)
+        R_min = torch.min(R, dim=1)[0]  # (B,)
+        minor_radius = (R_max - R_min) / 2  # (B,)
+
+        # Find R at Z_max (using soft argmax for differentiability)
+        # Temperature parameter controls sharpness
+        temperature = 100.0
+        Z_weights = torch.softmax(temperature * Z, dim=1)  # (B, T)
+        R_at_Zmax = torch.sum(Z_weights * R, dim=1)  # (B,)
+
+        # Triangularity: δ = (R₀ - R_{Zmax}) / minor_radius
+        # For stellarator symmetric surfaces, δ_top = δ_bottom
+        tri_at_plane = (R0 - R_at_Zmax) / (minor_radius + 1e-8)  # (B,)
+        triangularities.append(tri_at_plane)
+
+    # Average over the two symmetry planes
+    return (triangularities[0] + triangularities[1]) / 2
+
+
 def check_self_intersection(
     r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
     z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
