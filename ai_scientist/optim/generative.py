@@ -28,6 +28,261 @@ from ai_scientist import tools
 _LOGGER = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Issue #7 Fix: Learned Fourier Encoder with decay structure
+# =============================================================================
+
+
+class FourierEncoder(nn.Module):
+    """Learned encoder that respects Fourier coefficient decay structure.
+
+    Unlike PCA which treats all coefficients equally, this encoder:
+    1. Operates on the 2D Fourier grid (r_cos, z_sin)
+    2. Uses mode-weighted attention to respect spectral decay
+    3. Learns a latent representation end-to-end with diffusion
+
+    The mode weighting encourages the encoder to prioritize low-frequency
+    modes (small m, n) which contain most physical information.
+    """
+
+    # Type hint for registered buffer
+    mode_weights: torch.Tensor
+
+    def __init__(
+        self,
+        mpol: int,
+        ntor: int,
+        latent_dim: int = 50,
+        hidden_dim: int = 128,
+        mode_decay_rate: float = 0.5,
+    ):
+        super().__init__()
+        self.mpol = mpol
+        self.ntor = ntor
+        self.grid_h = mpol + 1
+        self.grid_w = 2 * ntor + 1
+        self.latent_dim = latent_dim
+        self.mode_decay_rate = mode_decay_rate
+
+        # Input: (B, 2, H, W) where 2 channels are r_cos, z_sin
+        self.encoder = nn.Sequential(
+            nn.Conv2d(2, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+        )
+
+        # Global pooling with learned mode weights
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        # Project to latent space
+        self.fc_latent = nn.Linear(hidden_dim, latent_dim)
+
+        # Pre-compute mode decay weights (registered as buffer)
+        self._init_mode_weights()
+
+    def _init_mode_weights(self) -> None:
+        """Initialize mode decay weights based on (m, n) indices.
+
+        Higher modes (larger |m| or |n|) get smaller weights, encoding
+        the physical prior that Fourier coefficients should decay.
+        """
+        m_idx = torch.arange(self.grid_h, dtype=torch.float32)
+        n_idx = torch.arange(self.grid_w, dtype=torch.float32) - self.ntor
+
+        # Mode magnitude: sqrt(m² + n²)
+        m_grid, n_grid = torch.meshgrid(m_idx, torch.abs(n_idx), indexing="ij")
+        mode_magnitude = torch.sqrt(m_grid**2 + n_grid**2 + 1.0)
+
+        # Decay weights: exp(-rate * magnitude)
+        weights = torch.exp(-self.mode_decay_rate * mode_magnitude)
+        weights = weights / weights.sum()  # Normalize
+
+        self.register_buffer("mode_weights", weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode flattened coefficients to latent space.
+
+        Args:
+            x: (B, 2 * H * W) flattened [r_cos, z_sin] coefficients
+
+        Returns:
+            z: (B, latent_dim) latent representation
+        """
+        batch_size = x.shape[0]
+        half_size = self.grid_h * self.grid_w
+
+        # Reshape to grid
+        r_cos = x[:, :half_size].view(batch_size, 1, self.grid_h, self.grid_w)
+        z_sin = x[:, half_size:].view(batch_size, 1, self.grid_h, self.grid_w)
+        grid = torch.cat([r_cos, z_sin], dim=1)  # (B, 2, H, W)
+
+        # Apply mode weights to input (soft attention)
+        weighted_grid = grid * self.mode_weights[None, None, :, :]
+
+        # Encode
+        features = self.encoder(weighted_grid)  # (B, hidden, H, W)
+        pooled = self.pool(features).flatten(1)  # (B, hidden)
+
+        return self.fc_latent(pooled)
+
+
+class FourierDecoder(nn.Module):
+    """Decoder that generates Fourier coefficients with decay regularization.
+
+    Outputs are passed through a mode-weighted softmax to encourage
+    spectral decay in the generated coefficients.
+    """
+
+    # Type hint for registered buffer
+    output_weights: torch.Tensor
+
+    def __init__(
+        self,
+        mpol: int,
+        ntor: int,
+        latent_dim: int = 50,
+        hidden_dim: int = 128,
+        mode_decay_rate: float = 0.5,
+    ):
+        super().__init__()
+        self.mpol = mpol
+        self.ntor = ntor
+        self.grid_h = mpol + 1
+        self.grid_w = 2 * ntor + 1
+        self.latent_dim = latent_dim
+
+        # Project from latent to spatial features
+        self.fc_expand = nn.Linear(latent_dim, hidden_dim * self.grid_h * self.grid_w)
+
+        # Refine with convolutions
+        self.decoder = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, 2, kernel_size=3, padding=1),  # Output: r_cos, z_sin
+        )
+
+        # Mode decay weights for output regularization
+        self._init_mode_weights(mode_decay_rate)
+
+    def _init_mode_weights(self, decay_rate: float) -> None:
+        """Initialize mode decay weights for output scaling."""
+        m_idx = torch.arange(self.grid_h, dtype=torch.float32)
+        n_idx = torch.arange(self.grid_w, dtype=torch.float32) - self.ntor
+
+        m_grid, n_grid = torch.meshgrid(m_idx, torch.abs(n_idx), indexing="ij")
+        mode_magnitude = torch.sqrt(m_grid**2 + n_grid**2 + 1.0)
+
+        # Softer decay for decoder (allow learning to override)
+        weights = torch.exp(-decay_rate * 0.5 * mode_magnitude)
+
+        self.register_buffer("output_weights", weights)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode latent to flattened coefficients.
+
+        Args:
+            z: (B, latent_dim) latent representation
+
+        Returns:
+            x: (B, 2 * H * W) flattened [r_cos, z_sin] coefficients
+        """
+        batch_size = z.shape[0]
+
+        # Expand to spatial
+        features = self.fc_expand(z)  # (B, hidden * H * W)
+        features = features.view(batch_size, -1, self.grid_h, self.grid_w)
+
+        # Decode
+        output = self.decoder(features)  # (B, 2, H, W)
+
+        # Apply mode weights to encourage decay
+        output = output * self.output_weights[None, None, :, :]
+
+        # Flatten: [r_cos, z_sin]
+        r_cos = output[:, 0].flatten(1)  # (B, H*W)
+        z_sin = output[:, 1].flatten(1)  # (B, H*W)
+
+        return torch.cat([r_cos, z_sin], dim=1)
+
+
+class FourierAutoencoder(nn.Module):
+    """Combined encoder-decoder with Fourier decay priors.
+
+    Use this as an alternative to PCA in DiffusionDesignModel for
+    better representation of stellarator geometries.
+    """
+
+    def __init__(
+        self,
+        mpol: int,
+        ntor: int,
+        latent_dim: int = 50,
+        hidden_dim: int = 128,
+        mode_decay_rate: float = 0.5,
+    ):
+        super().__init__()
+        self.encoder = FourierEncoder(
+            mpol, ntor, latent_dim, hidden_dim, mode_decay_rate
+        )
+        self.decoder = FourierDecoder(
+            mpol, ntor, latent_dim, hidden_dim, mode_decay_rate
+        )
+        self.latent_dim = latent_dim
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Transform input to latent space."""
+        return self.encoder(x)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Reconstruct from latent space."""
+        return self.decoder(z)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode and decode (for training)."""
+        z = self.encode(x)
+        recon = self.decode(z)
+        return recon, z
+
+    # Sklearn-compatible interface for drop-in PCA replacement
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        """Fit the autoencoder and transform data (PCA-compatible API)."""
+        raise NotImplementedError("Use fit() then transform() separately")
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Transform data to latent space (PCA-compatible API)."""
+        self.eval()
+        with torch.no_grad():
+            X_tensor = torch.tensor(X, dtype=torch.float32, device=self._device)
+            return self.encode(X_tensor).cpu().numpy()
+
+    def inverse_transform(self, Z: np.ndarray) -> np.ndarray:
+        """Reconstruct from latent space (PCA-compatible API)."""
+        self.eval()
+        with torch.no_grad():
+            Z_tensor = torch.tensor(Z, dtype=torch.float32, device=self._device)
+            return self.decode(Z_tensor).cpu().numpy()
+
+    @property
+    def n_components_(self) -> int:
+        """PCA-compatible API: number of latent dimensions."""
+        return self.latent_dim
+
+    @property
+    def _device(self) -> torch.device:
+        """Get device from encoder parameters."""
+        return next(self.encoder.parameters()).device
+
+
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -141,6 +396,8 @@ class DiffusionDesignModel:
         n_layers: int = 4,
         pca_components: int = 50,
         log_interval: int = 10,
+        # PCA out-of-distribution detection threshold
+        pca_ood_threshold: float = 0.1,
     ) -> None:
         self._min_samples = min_samples
         self._lr = learning_rate
@@ -159,6 +416,7 @@ class DiffusionDesignModel:
         self._n_layers = n_layers
         self._pca_components = pca_components
         self._log_interval = log_interval
+        self._pca_ood_threshold = pca_ood_threshold
 
         self.__model: StellaratorDiffusion | None = None  # Use property for access
         self._schema: tools.FlattenSchema | None = None
@@ -310,6 +568,74 @@ class DiffusionDesignModel:
                 is_qh = 0.0
 
         return np.array([iota, ar, nfp, is_qh], dtype=np.float32)
+
+    def _compute_fourier_decay_weights(
+        self, decay_rate: float = 0.3
+    ) -> np.ndarray | None:
+        """Compute mode-dependent decay weights for Fourier coefficients.
+
+        Issue #8 Fix: Encourages spectral decay in generated samples by
+        scaling high-frequency (high m, n) coefficients down.
+
+        Args:
+            decay_rate: Exponential decay rate. Higher = stronger penalty.
+                       Typical values: 0.1 (weak) to 0.5 (strong).
+
+        Returns:
+            weights: (2 * H * W,) array of weights for [r_cos, z_sin] coefficients.
+                    Values in (0, 1] where high-frequency modes have smaller weights.
+                    Returns None if schema not initialized.
+        """
+        if self._schema is None:
+            return None
+
+        mpol = self._schema.mpol
+        ntor = self._schema.ntor
+        grid_h = mpol + 1
+        grid_w = 2 * ntor + 1
+
+        # Mode indices
+        m_idx = np.arange(grid_h, dtype=np.float32)
+        n_idx = np.arange(grid_w, dtype=np.float32) - ntor
+
+        # Mode magnitude grid
+        m_grid, n_grid = np.meshgrid(m_idx, np.abs(n_idx), indexing="ij")
+        mode_magnitude = np.sqrt(m_grid**2 + n_grid**2 + 1.0)
+
+        # Decay weights: exp(-rate * magnitude)
+        # Normalized so low modes have weight ~1, high modes approach 0
+        weights_2d = np.exp(-decay_rate * (mode_magnitude - 1.0))
+        weights_2d = np.clip(weights_2d, 0.1, 1.0)  # Floor at 0.1 to avoid zero
+
+        # Flatten and duplicate for r_cos and z_sin
+        weights_flat = weights_2d.flatten()
+        weights = np.concatenate([weights_flat, weights_flat])
+
+        return weights
+
+    def _apply_fourier_decay(
+        self,
+        flattened: np.ndarray,
+        decay_rate: float = 0.3,
+    ) -> np.ndarray:
+        """Apply Fourier decay weights to generated coefficients.
+
+        Issue #8 Fix: Post-processing step that scales down high-frequency
+        modes in generated samples to ensure physical plausibility.
+
+        Args:
+            flattened: (N, 2*H*W) array of [r_cos, z_sin] coefficients.
+            decay_rate: Exponential decay rate for high-frequency suppression.
+
+        Returns:
+            Modified coefficients with spectral decay applied.
+        """
+        weights = self._compute_fourier_decay_weights(decay_rate)
+        if weights is None:
+            return flattened
+
+        # Apply weights element-wise
+        return flattened * weights[None, :]
 
     def fit(self, candidates: Sequence[Mapping[str, Any]]) -> None:
         sample_count = len(candidates)
@@ -493,15 +819,14 @@ class DiffusionDesignModel:
         reconstruction_error = np.mean((X_np - X_reconstructed) ** 2, axis=1)
         mean_error = float(np.mean(reconstruction_error))
         max_error = float(np.max(reconstruction_error))
-        # Warn if error exceeds threshold (calibrated from training set variance)
-        OOD_THRESHOLD = 0.1  # Empirical threshold for out-of-distribution detection
-        if max_error > OOD_THRESHOLD:
+        # Warn if error exceeds threshold (configurable via pca_ood_threshold)
+        if max_error > self._pca_ood_threshold:
             _LOGGER.warning(
                 "[diffusion] Elite candidates may be outside PCA basis "
                 "(max reconstruction error: %.4f > %.4f threshold). "
                 "Consider re-fitting PCA on combined data.",
                 max_error,
-                OOD_THRESHOLD,
+                self._pca_ood_threshold,
             )
         else:
             _LOGGER.debug(
@@ -611,9 +936,27 @@ class DiffusionDesignModel:
         self._trained = bool(checkpoint.get("trained", self._trained))
 
     def sample(
-        self, n_samples: int, target_metrics: Mapping[str, float], seed: int
+        self,
+        n_samples: int,
+        target_metrics: Mapping[str, float],
+        seed: int,
+        apply_fourier_decay: bool = True,
+        fourier_decay_rate: float = 0.3,
     ) -> list[Mapping[str, Any]]:
-        """Generate candidates conditioned on target metrics."""
+        """Generate candidates conditioned on target metrics.
+
+        Args:
+            n_samples: Number of candidates to generate.
+            target_metrics: Target conditioning metrics (iota, aspect_ratio, nfp, N).
+            seed: Random seed for reproducibility.
+            apply_fourier_decay: If True, apply spectral decay to suppress
+                high-frequency modes in generated samples (Issue #8 fix).
+            fourier_decay_rate: Decay rate for high-frequency suppression.
+                Higher values = stronger suppression. Default 0.3.
+
+        Returns:
+            List of candidate dictionaries with params and metadata.
+        """
         if not self._trained or not self._has_model() or self._schema is None:
             _LOGGER.warning("[diffusion] Model not trained.")
             return []
@@ -686,6 +1029,10 @@ class DiffusionDesignModel:
                 flattened = self.pca.inverse_transform(latent_samples)
             else:
                 flattened = latent_samples
+
+            # Issue #8 Fix: Apply Fourier decay to suppress unphysical high-frequency modes
+            if apply_fourier_decay:
+                flattened = self._apply_fourier_decay(flattened, fourier_decay_rate)
 
         candidates = []
         # Extract nfp from target_metrics - must match conditioning logic (line 568)

@@ -76,6 +76,10 @@ class StellaratorNeuralOp(nn.Module):
         self.geo_n_zeta = 64
         self.geo_dim = 128
 
+        # Cache theta grids and trig terms to avoid regenerating every forward pass
+        # These are registered as buffers so they move with the model to correct device
+        self._init_cached_grids()
+
         self.geo_encoder = equivariance.PointNetEncoder(
             embedding_dim=self.geo_dim, align_input=True
         )
@@ -101,6 +105,107 @@ class StellaratorNeuralOp(nn.Module):
         # P3 constraint heads: mirror_ratio and flux_compression (Issue #1 fix)
         self.head_mirror_ratio = nn.Linear(hidden_dim, 1)
         self.head_flux_compression = nn.Linear(hidden_dim, 1)
+
+    def _init_cached_grids(self) -> None:
+        """Pre-compute and cache theta grids and trig terms.
+
+        These values are constant across forward passes:
+        - theta: poloidal angle grid [0, 2π)
+        - zeta: toroidal angle grid [0, 2π) (for variable nfp)
+        - m_idx, n_vals: mode indices
+        - cos_m_theta, sin_m_theta: trig terms for theta
+        """
+        pi = torch.pi
+        n_theta = self.geo_n_theta
+        n_zeta = self.geo_n_zeta
+
+        # Poloidal angle grid (shared across all nfp values)
+        theta = torch.linspace(0, 2 * pi, n_theta + 1)[:-1]  # (T,)
+
+        # Toroidal angle grid (full torus for variable nfp)
+        zeta = torch.linspace(0, 2 * pi, n_zeta + 1)[:-1]  # (Z,)
+
+        # Mode indices
+        m_idx = torch.arange(self.mpol + 1, dtype=torch.float32)  # (M,)
+        n_idx_arr = torch.arange(2 * self.ntor + 1, dtype=torch.float32)  # (N,)
+        n_vals = n_idx_arr - self.ntor  # Maps 0..2*ntor to -ntor..ntor
+
+        # Precompute theta-dependent trig terms (shared across batch)
+        m_theta = m_idx[:, None] * theta[None, :]  # (M, T)
+        cos_m_theta = torch.cos(m_theta)  # (M, T)
+        sin_m_theta = torch.sin(m_theta)  # (M, T)
+
+        # Register as buffers (non-trainable, move with model)
+        self.register_buffer("_cached_theta", theta)
+        self.register_buffer("_cached_zeta", zeta)
+        self.register_buffer("_cached_m_idx", m_idx)
+        self.register_buffer("_cached_n_vals", n_vals)
+        self.register_buffer("_cached_cos_m_theta", cos_m_theta)
+        self.register_buffer("_cached_sin_m_theta", sin_m_theta)
+
+    def _generate_point_cloud(
+        self,
+        r_cos: torch.Tensor,
+        z_sin: torch.Tensor,
+        nfp_batch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Generate 3D point cloud using cached grids (Issue #6 fix).
+
+        This avoids regenerating theta/zeta grids and trig terms every forward pass.
+        Uses the same algorithm as geometry.batch_fourier_to_real_space() but with
+        pre-computed cached values.
+
+        Args:
+            r_cos: (B, M, N) Fourier coefficients for R
+            z_sin: (B, M, N) Fourier coefficients for Z
+            nfp_batch: (B,) Number of field periods per sample
+
+        Returns:
+            points: (B, 3, T*Z) Point cloud in Cartesian coordinates
+        """
+        batch_size = r_cos.shape[0]
+
+        # Use cached values (already on correct device via register_buffer)
+        zeta = self._cached_zeta  # (Z,)
+        n_vals = self._cached_n_vals  # (N,)
+        cos_m_theta = self._cached_cos_m_theta  # (M, T)
+        sin_m_theta = self._cached_sin_m_theta  # (M, T)
+
+        # Variable Nfp: n*Nfp*zeta depends on batch
+        nfp_tensor = nfp_batch.view(batch_size, 1)  # (B, 1)
+        n_nfp_zeta = (
+            n_vals[None, :, None] * nfp_tensor[:, :, None] * zeta[None, None, :]
+        )  # (B, N, Z)
+        cos_n_zeta = torch.cos(n_nfp_zeta)  # (B, N, Z)
+        sin_n_zeta = torch.sin(n_nfp_zeta)  # (B, N, Z)
+
+        # Stage 1: Contract over n -> (B, M, Z)
+        A_rc = torch.einsum("bmn,bnz->bmz", r_cos, cos_n_zeta)
+        B_rc = torch.einsum("bmn,bnz->bmz", r_cos, sin_n_zeta)
+        A_zs = torch.einsum("bmn,bnz->bmz", z_sin, cos_n_zeta)
+        B_zs = torch.einsum("bmn,bnz->bmz", z_sin, sin_n_zeta)
+
+        # Stage 2: Contract over m -> (B, T, Z)
+        R = torch.einsum("mt,bmz->btz", cos_m_theta, A_rc) + torch.einsum(
+            "mt,bmz->btz", sin_m_theta, B_rc
+        )
+        Z = torch.einsum("mt,bmz->btz", sin_m_theta, A_zs) - torch.einsum(
+            "mt,bmz->btz", cos_m_theta, B_zs
+        )
+
+        # Phi grid (broadcast zeta to match R shape)
+        Phi = zeta[None, None, :].expand(batch_size, self.geo_n_theta, -1)
+
+        # Convert to Cartesian
+        X = R * torch.cos(Phi)
+        Y = R * torch.sin(Phi)
+
+        # Stack to (B, 3, N_points)
+        X_flat = X.reshape(batch_size, -1)
+        Y_flat = Y.reshape(batch_size, -1)
+        Z_flat = Z.reshape(batch_size, -1)
+
+        return torch.stack([X_flat, Y_flat, Z_flat], dim=1)
 
     def forward(
         self,
@@ -143,27 +248,9 @@ class StellaratorNeuralOp(nn.Module):
         r_cos_in = r_cos_grid.squeeze(1)
         z_sin_in = z_sin_grid.squeeze(1)
 
-        # Generate Point Cloud (Differentiable)
-        # Pass nfp_batch (Tensor) -> n_zeta becomes total points over 2pi
-        R, Z, Phi = geometry.batch_fourier_to_real_space(
-            r_cos_in,
-            z_sin_in,
-            n_field_periods=nfp_batch,
-            n_theta=self.geo_n_theta,
-            n_zeta=self.geo_n_zeta,
-        )
-
-        X, Y, Z_cart = geometry.to_cartesian(R, Z, Phi)
-
-        # Stack to (Batch, 3, N_points)
-        # R, Z, Phi are (Batch, T, ZetaTotal)
-        # Flatten spatial dims
-        # Use reshape (not view) because upstream ops can yield non-contiguous tensors.
-        X_flat = X.reshape(batch_size, -1)
-        Y_flat = Y.reshape(batch_size, -1)
-        Z_flat = Z_cart.reshape(batch_size, -1)
-
-        points = torch.stack([X_flat, Y_flat, Z_flat], dim=1)  # (B, 3, N)
+        # Generate Point Cloud using cached grids (Issue #6 fix)
+        # This avoids regenerating theta/zeta grids every forward pass
+        points = self._generate_point_cloud(r_cos_in, z_sin_in, nfp_batch)  # (B, 3, N)
 
         # Augmentation: Random Rotation during training to enforce SE(3) invariance
         if self.training:
