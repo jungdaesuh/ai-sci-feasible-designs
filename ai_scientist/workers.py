@@ -121,6 +121,9 @@ class OptimizationWorker(Worker):
                     initial_guesses,
                     self.surrogate,
                     self.cfg,
+                    target="hv"
+                    if (self.cfg.problem or "").lower().startswith("p3")
+                    else "objective",
                 )
                 return {"candidates": optimized_candidates, "status": "optimized"}
             except Exception as exc:

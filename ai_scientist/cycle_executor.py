@@ -1379,6 +1379,9 @@ class CycleExecutor:
                     n_field_periods_val=initial_params_map.get("n_field_periods", 1),
                     problem=self.config.problem,
                     steps=budget_per_step,
+                    target="hv"
+                    if (self.config.problem or "").lower().startswith("p3")
+                    else "objective",
                 )
                 x_new = jnp.array(x_new_np)
 

@@ -166,6 +166,15 @@ class TestDifferentiableOptim(unittest.TestCase):
         # P3 with HV target: MAXIMIZE (key fix!)
         self.assertTrue(differentiable._is_maximization_problem("p3", target="hv"))
 
+    def test_explicit_target_overrides_inference(self):
+        """Explicit target parameter should work regardless of problem name."""
+        # For P1, if target="hv" is passed, should maximize
+        self.assertTrue(differentiable._is_maximization_problem("p1", target="hv"))
+        # For P3, if target="objective" is passed, should minimize
+        self.assertFalse(
+            differentiable._is_maximization_problem("p3", target="objective")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
