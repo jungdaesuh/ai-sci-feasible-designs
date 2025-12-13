@@ -35,14 +35,18 @@ MAX_ELONGATION = 5.0
 
 
 def _is_maximization_problem(problem: str) -> bool:
-    """Return True if the problem objective should be maximized.
+    """Return True if the problem's PHYSICS objective should be maximized.
 
-    P1: Minimize elongation -> False
-    P2: Maximize L∇B (gradient scale length) -> True
-    P3: Maximize HV (hypervolume) -> True
+    Based on forward_model.compute_objective():
+        P1: max_elongation -> minimize
+        P2: gradient_scale_length -> MAXIMIZE
+        P3: aspect_ratio -> minimize
+
+    Note: CycleExecutor may train surrogates on HV for P3, but the physics
+    objective direction should match the benchmark definition.
     """
-    problem_lower = problem.lower()
-    return problem_lower.startswith("p2") or problem_lower.startswith("p3")
+    problem_lower = (problem or "").lower()
+    return problem_lower.startswith("p2")
 
 
 def _compute_index_mapping(
