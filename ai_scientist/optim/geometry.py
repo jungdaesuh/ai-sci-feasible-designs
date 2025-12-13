@@ -452,20 +452,32 @@ def elongation(
     var_Z = torch.mean(Zc**2, dim=1)
     cov_RZ = torch.mean(Rc * Zc, dim=1)
 
-    # Eigenvalues
+    # Eigenvalues of 2x2 covariance matrix
     tr = var_R + var_Z
     det = var_R * var_Z - cov_RZ**2
 
-    # Numerical stability for sqrt
-    gap = torch.clamp(tr**2 - 4 * det, min=1e-8)
+    # Numerical stability: prevent sqrt of negative values from floating-point error
+    # (det can exceed tr²/4 slightly due to numerical noise)
+    gap = torch.clamp(tr**2 - 4 * det, min=0.0)
     sqrt_gap = torch.sqrt(gap)
 
     l1 = (tr + sqrt_gap) / 2
     l2 = (tr - sqrt_gap) / 2
-    l2 = torch.clamp(l2, min=1e-8)
+
+    # Detect degenerate cross-sections (point-like, near-zero variance in both axes)
+    # These should return elongation = 1.0 (isotropic/circular assumption)
+    MIN_TRACE = 1e-6
+    is_degenerate = tr < MIN_TRACE
+
+    # Safe ratio: clamp both eigenvalues to prevent 0/0 or inf scenarios
+    l1_safe = torch.clamp(l1, min=1e-8)
+    l2_safe = torch.clamp(l2, min=1e-8)
 
     # Elongation per slice
-    elo_slice = torch.sqrt(l1 / l2)
+    elo_slice = torch.sqrt(l1_safe / l2_safe)
+
+    # Override degenerate cases with 1.0 (circular cross-section)
+    elo_slice = torch.where(is_degenerate, torch.ones_like(elo_slice), elo_slice)
 
     # Max over zeta
     return torch.max(elo_slice, dim=1)[0]

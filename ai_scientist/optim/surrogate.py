@@ -347,13 +347,15 @@ class SurrogateBundle(BaseSurrogate):
             if len(unique_classes) < 2:
                 logging.warning(
                     f"[surrogate] Single-class training data (class={unique_classes[0]}) "
-                    "- classifier cannot discriminate between feasible/infeasible"
+                    "- skipping classifier training, using constant fallback"
                 )
                 self._single_class_fallback = int(unique_classes[0])
+                # Skip training entirely - the fallback path handles prediction
+                # This saves ~100ms of wasted computation on a useless model
+                clf = None
             else:
                 self._single_class_fallback = None
-
-            clf.fit(scaled_class, feasibility_labels)
+                clf.fit(scaled_class, feasibility_labels)
 
             regressors = {}
 

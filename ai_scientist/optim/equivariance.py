@@ -129,8 +129,14 @@ def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
     Returns:
         Rotation matrices as tensor of shape (..., 3, 3).
     """
+    # Explicitly normalize to eliminate numerical drift from floating-point operations.
+    # Without this, quaternions may have norm slightly != 1 (e.g., 0.999998 or 1.000002),
+    # causing small but compounding errors in the rotation matrix.
+    quaternions = quaternions / quaternions.norm(dim=-1, keepdim=True)
+
     r, i, j, k = torch.unbind(quaternions, -1)
-    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+    # For unit quaternions, |q|² = 1, so 2/|q|² = 2.0
+    two_s = 2.0
 
     o = torch.stack(
         (
