@@ -125,7 +125,9 @@ class StellaratorEnv(gym.Env):
 
         # 1. QI in log scale (consistent with benchmark constraints)
         QI_CLAMP_FLOOR = 1e-10
-        qi_clamped = max(QI_CLAMP_FLOOR, qi_val)
+        # QI residual is non-negative by definition; guard against surrogate sign flips.
+        qi_positive = abs(qi_val)
+        qi_clamped = max(QI_CLAMP_FLOOR, qi_positive)
         log_qi = np.log10(qi_clamped)
         qi_target = self.target_metrics.get("log10_qi_threshold", -4.0)
 

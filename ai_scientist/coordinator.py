@@ -887,10 +887,15 @@ class Coordinator:
             f"[Coordinator] Ranking {len(seeds)} seeds with Neural Operator Surrogate..."
         )
         try:
+            problem = (self.cfg.problem or "p3").lower()
+            # Surrogate targets in this coordinator:
+            # - P1: objective (max_elongation) → minimize
+            # - P2/P3: score/HV proxies → maximize
+            minimize_objective = problem.startswith("p1")
             # Rank candidates (higher score is better)
             ranked_preds = self.surrogate.rank_candidates(
                 seeds,
-                minimize_objective=True,
+                minimize_objective=minimize_objective,
                 exploration_ratio=self.cfg.proposal_mix.exploration_ratio,
             )
 

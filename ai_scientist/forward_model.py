@@ -349,6 +349,10 @@ def compute_constraint_margins(
 
     Positive margin indicates violation.
 
+    Important: these margins are **normalized** to match the benchmark-style
+    feasibility tolerance used across the codebase (typically `1e-2`), mirroring
+    the normalization in `constellaration.problems.*._normalized_constraint_violations`.
+
     Args:
         metrics: Metrics object or dict
         problem: Problem type (p1, p2, p3)
@@ -363,67 +367,74 @@ def compute_constraint_margins(
     is_low_fidelity = stage.lower() in ("screen", "low", "default", "promote")
 
     def _log10_margin(target: float) -> float:
-        return _log10_or_large(metrics_map.get("qi")) - target
+        denom = abs(target) if abs(target) > 0.0 else 1.0
+        return (_log10_or_large(metrics_map.get("qi")) - target) / denom
+
+    def _upper_bound_margin(value: float, limit: float) -> float:
+        denom = abs(limit) if abs(limit) > 0.0 else 1.0
+        return (value - limit) / denom
+
+    def _lower_bound_margin(value: float, limit: float) -> float:
+        denom = abs(limit) if abs(limit) > 0.0 else 1.0
+        return (limit - value) / denom
 
     margins: Dict[str, float] = {}
 
     if problem_key.startswith("p1"):
-        margins = {
-            "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 4.0,
-            "average_triangularity": float(
-                metrics_map.get("average_triangularity", float("nan"))
+        ar = float(metrics_map.get("aspect_ratio", float("nan")))
+        tri = float(metrics_map.get("average_triangularity", float("nan")))
+        iota = float(
+            metrics_map.get(
+                "edge_rotational_transform_over_n_field_periods", float("nan")
             )
-            - (-0.5),
-            "edge_rotational_transform": 0.3
-            - float(
-                metrics_map.get(
-                    "edge_rotational_transform_over_n_field_periods", float("nan")
-                )
-            ),
+        )
+        margins = {
+            "aspect_ratio": _upper_bound_margin(ar, 4.0),
+            "average_triangularity": _upper_bound_margin(tri, -0.5),
+            "edge_rotational_transform": _lower_bound_margin(iota, 0.3),
         }
     elif problem_key.startswith("p2"):
+        ar = float(metrics_map.get("aspect_ratio", float("nan")))
+        iota = float(
+            metrics_map.get(
+                "edge_rotational_transform_over_n_field_periods", float("nan")
+            )
+        )
+        mirror = float(metrics_map.get("edge_magnetic_mirror_ratio", float("nan")))
+        elong = float(metrics_map.get("max_elongation", float("nan")))
         # Geometric constraints (always required)
         margins = {
-            "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 10.0,
-            "edge_rotational_transform": 0.25
-            - float(
-                metrics_map.get(
-                    "edge_rotational_transform_over_n_field_periods", float("nan")
-                )
-            ),
-            "edge_magnetic_mirror_ratio": float(
-                metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
-            )
-            - 0.2,
-            "max_elongation": float(metrics_map.get("max_elongation", float("nan")))
-            - 5.0,
+            "aspect_ratio": _upper_bound_margin(ar, 10.0),
+            "edge_rotational_transform": _lower_bound_margin(iota, 0.25),
+            "edge_magnetic_mirror_ratio": _upper_bound_margin(mirror, 0.2),
+            "max_elongation": _upper_bound_margin(elong, 5.0),
         }
         # Physics constraints (only at high fidelity)
         if not is_low_fidelity:
             margins["qi_log10"] = _log10_margin(-4.0)
     else:  # Default to P3 logic
+        iota = float(
+            metrics_map.get(
+                "edge_rotational_transform_over_n_field_periods", float("nan")
+            )
+        )
+        mirror = float(metrics_map.get("edge_magnetic_mirror_ratio", float("nan")))
         # Geometric constraints (always required)
         margins = {
-            "edge_rotational_transform": 0.25
-            - float(
-                metrics_map.get(
-                    "edge_rotational_transform_over_n_field_periods", float("nan")
-                )
-            ),
-            "edge_magnetic_mirror_ratio": float(
-                metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
-            )
-            - 0.25,
+            "edge_rotational_transform": _lower_bound_margin(iota, 0.25),
+            "edge_magnetic_mirror_ratio": _upper_bound_margin(mirror, 0.25),
         }
         # Physics constraints (only at high fidelity)
         if not is_low_fidelity:
             well = metrics_map.get("vacuum_well")
-            margins["vacuum_well"] = -float(well) if well is not None else float("inf")
+            well_value = float(well) if well is not None else float("nan")
+            # Normalize like constellaration.problems.MHDStableQIStellarator:
+            # denom = max(1e-1, vacuum_well_lower_bound) where lower bound is 0.0.
+            margins["vacuum_well"] = _lower_bound_margin(well_value, 0.0) / 0.1
 
             flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
-            margins["flux_compression"] = (
-                float(flux_value) - 0.9 if flux_value is not None else float("inf")
-            )
+            flux = float(flux_value) if flux_value is not None else float("nan")
+            margins["flux_compression"] = _upper_bound_margin(flux, 0.9)
 
             margins["qi_log10"] = _log10_margin(-3.5)
 

@@ -1244,8 +1244,9 @@ class CycleExecutor:
                 params: Mapping[str, Any],
             ) -> Tuple[float, Sequence[float]]:
                 dummy_candidate = {"candidate_params": params}
+                p_key = (self.config.problem or "").lower()
                 predicted_list = surrogate_model.rank_candidates(
-                    [dummy_candidate], minimize_objective=False
+                    [dummy_candidate], minimize_objective=p_key.startswith("p1")
                 )
                 predicted = predicted_list[0]
 
@@ -1286,8 +1287,6 @@ class CycleExecutor:
                             elongation = 1.0
                     except Exception:
                         elongation = 1.0
-
-                p_key = (self.config.problem or "").lower()
 
                 if p_key.startswith("p1"):
                     predicted_alm_constraints = [0.0, 0.0, 0.0]
