@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence, Tuple
 
-import jax.numpy as jnp
 import numpy as np
 import torch
 from constellaration.geometry import surface_rz_fourier as surface_module
@@ -49,75 +48,165 @@ def _is_maximization_problem(problem: str) -> bool:
     return problem_lower.startswith("p2")
 
 
+def _build_local_mask(max_poloidal: int, max_toroidal: int) -> np.ndarray:
+    """Build stellarator-symmetric mask without depending on constellaration.
+
+    Returns a boolean mask of shape (mpol+1, 2*ntor+1) where True indicates
+    an active coefficient that should be optimized.
+    """
+    grid_h = max_poloidal + 1
+
+    poloidal = np.arange(grid_h)[:, None]
+    toroidal = np.arange(-max_toroidal, max_toroidal + 1)[None, :]
+
+    # Stellarator symmetry: m=0 only has n >= 1 active, m>0 has all n
+    return (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
+
+
+def _extract_masked_params(
+    params: Mapping[str, Any], max_poloidal: int, max_toroidal: int
+) -> Tuple[np.ndarray, dict]:
+    """Extract active Fourier coefficients from params as a flat vector.
+
+    Returns:
+        flat_vector: 1D array of active coefficients [r_cos_masked, z_sin_masked]
+        metadata: dict with n_field_periods, is_stellarator_symmetric, and shapes
+    """
+    mask = _build_local_mask(max_poloidal, max_toroidal)
+    grid_h = max_poloidal + 1
+    grid_w = 2 * max_toroidal + 1
+
+    r_cos = np.asarray(params.get("r_cos", []), dtype=float)
+    z_sin = np.asarray(params.get("z_sin", []), dtype=float)
+
+    # Resize to expected shape (pad with zeros or truncate)
+    r_cos_resized = np.zeros((grid_h, grid_w), dtype=float)
+    z_sin_resized = np.zeros((grid_h, grid_w), dtype=float)
+
+    if r_cos.size > 0:
+        src_h, src_w = r_cos.shape
+        copy_h = min(src_h, grid_h)
+        # Center the source around the middle column (n=0)
+        src_center = src_w // 2
+        dst_center = grid_w // 2
+        src_start = max(0, src_center - dst_center)
+        dst_start = max(0, dst_center - src_center)
+        copy_w_actual = min(src_w - src_start, grid_w - dst_start)
+        r_cos_resized[:copy_h, dst_start : dst_start + copy_w_actual] = r_cos[
+            :copy_h, src_start : src_start + copy_w_actual
+        ]
+
+    if z_sin.size > 0:
+        src_h, src_w = z_sin.shape
+        copy_h = min(src_h, grid_h)
+        src_center = src_w // 2
+        dst_center = grid_w // 2
+        src_start = max(0, src_center - dst_center)
+        dst_start = max(0, dst_center - src_center)
+        copy_w_actual = min(src_w - src_start, grid_w - dst_start)
+        z_sin_resized[:copy_h, dst_start : dst_start + copy_w_actual] = z_sin[
+            :copy_h, src_start : src_start + copy_w_actual
+        ]
+
+    # Extract masked values in row-major order
+    r_cos_masked = r_cos_resized[mask]
+    z_sin_masked = z_sin_resized[mask]
+
+    flat_vector = np.concatenate([r_cos_masked, z_sin_masked])
+
+    metadata = {
+        "n_field_periods": params.get("n_field_periods", 1),
+        "is_stellarator_symmetric": params.get("is_stellarator_symmetric", True),
+        "r_cos_full": r_cos_resized,
+        "z_sin_full": z_sin_resized,
+        "mask": mask,
+        "n_masked": int(mask.sum()),
+    }
+
+    return flat_vector, metadata
+
+
+def _reconstruct_params(flat_vector: np.ndarray, metadata: dict) -> dict[str, Any]:
+    """Reconstruct params dict from flat vector and metadata."""
+    mask = metadata["mask"]
+    n_masked = metadata["n_masked"]
+
+    # Split vector into r_cos and z_sin portions
+    r_cos_masked = flat_vector[:n_masked]
+    z_sin_masked = flat_vector[n_masked:]
+
+    # Reconstruct full matrices
+    r_cos_full = metadata["r_cos_full"].copy()
+    z_sin_full = metadata["z_sin_full"].copy()
+
+    r_cos_full[mask] = r_cos_masked
+    z_sin_full[mask] = z_sin_masked
+
+    return {
+        "r_cos": r_cos_full.tolist(),
+        "z_sin": z_sin_full.tolist(),
+        "n_field_periods": metadata["n_field_periods"],
+        "is_stellarator_symmetric": metadata["is_stellarator_symmetric"],
+    }
+
+
 def _compute_index_mapping(
     boundary_template: Any, max_poloidal: int, max_toroidal: int, device: str
 ) -> Tuple[torch.Tensor, int]:
-    """Compute the index mapping from compact (optimized) vector to dense (surrogate) vector.
+    """Compute the index mapping from compact (masked) to dense (surrogate) vector.
+
+    This function computes the mapping algebraically by understanding both orderings:
+
+    1. **Compact (masked)**: Elements extracted by `mask_and_ravel` from a SurfaceRZFourier
+       pytree. The mask follows stellarator symmetry rules:
+       - For m=0: only n >= 1 are active
+       - For m>0: all n in [-ntor, ntor] are active
+       Order: r_cos masked elements, then z_sin masked elements (pytree leaf order).
+
+    2. **Dense (structured_flatten)**: Layout is [r_cos..., z_sin...] where each matrix
+       is flattened in row-major order: m=0..mpol, n=-ntor..ntor.
 
     Returns:
-        dense_indices: Tensor of shape (compact_size,) containing indices in the dense vector
-                       where each compact element should be placed.
-                       Sorted such that dense_indices[i] corresponds to compact_vector[i].
+        dense_indices: Tensor of shape (compact_size,) containing indices in the dense
+                       vector where each compact element should be placed.
         dense_size: Size of the dense vector.
     """
+    grid_h = max_poloidal + 1
+    grid_w = 2 * max_toroidal + 1
+    half_dense = grid_h * grid_w
+    dense_size = 2 * half_dense  # r_cos + z_sin
 
-    dummy_params = {
-        "r_cos": np.zeros((max_poloidal + 1, 2 * max_toroidal + 1)),
-        "z_sin": np.zeros((max_poloidal + 1, 2 * max_toroidal + 1)),
-        "n_field_periods": boundary_template.n_field_periods,
-        "is_stellarator_symmetric": True,
-    }
+    # Build the mask the same way constellaration does (stellarator symmetric):
+    # For m=0: only n >= 1 are active (R_cos(0,0) is major radius, kept; but mask excludes n<1)
+    # Wait - looking at build_mask more carefully:
+    # (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
+    # So for m=0: n >= 1 is kept
+    # For m>0: all n are kept
+    poloidal = np.arange(grid_h)[:, None]  # (mpol+1, 1)
+    toroidal = np.arange(-max_toroidal, max_toroidal + 1)[None, :]  # (1, 2*ntor+1)
 
-    boundary = tools.make_boundary_from_params(dummy_params)
+    mask_array = (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
 
-    # Set max modes (redundant if dummy_params matched, but safe)
-    boundary = surface_module.set_max_mode_numbers(
-        boundary,
-        max_poloidal_mode=max_poloidal,
-        max_toroidal_mode=max_toroidal,
-    )
+    # Get (m, n_idx) pairs where mask is True, in row-major order
+    # np.argwhere returns in row-major order: iterates m first, then n_idx within each m
+    masked_indices = np.argwhere(mask_array)  # Shape (N, 2) with [m, n_idx]
 
-    mask = surface_module.build_mask(
-        boundary,
-        max_poloidal_mode=max_poloidal,
-        max_toroidal_mode=max_toroidal,
-    )
+    compact_to_dense = []
 
-    flat_jax, unravel_fn = pytree.mask_and_ravel(boundary, mask)
-    compact_size = flat_jax.size
+    # r_cos portion (first half of dense vector)
+    # structured_flatten ordering: for m in 0..mpol, for n in -ntor..ntor:
+    #   index = m * grid_w + (n + ntor)
+    for m, n_idx in masked_indices:
+        dense_idx = m * grid_w + n_idx
+        compact_to_dense.append(int(dense_idx))
 
-    # IDs 1..N
-    ids = jnp.arange(1, compact_size + 1, dtype=float)
-    boundary_ids = unravel_fn(ids)
+    # z_sin portion (second half of dense vector, offset by half_dense)
+    # Same mask applies to z_sin
+    for m, n_idx in masked_indices:
+        dense_idx = half_dense + m * grid_w + n_idx
+        compact_to_dense.append(int(dense_idx))
 
-    params_ids = {
-        "r_cos": np.asarray(boundary_ids.r_cos).tolist(),
-        "z_sin": np.asarray(boundary_ids.z_sin).tolist(),
-        "n_field_periods": boundary_ids.n_field_periods,
-        "is_stellarator_symmetric": boundary_ids.is_stellarator_symmetric,
-    }
-
-    dense_vector, _ = tools.structured_flatten(params_ids)
-    dense_size = dense_vector.size
-
-    # Collect pairs (compact_id, dense_idx)
-    # Use explicit integer comparison for robustness (IDs are integers 1..N stored as floats)
-    pairs = []
-    for i, val in enumerate(dense_vector):
-        int_val = int(round(val))
-        if int_val >= 1:  # Valid IDs are 1, 2, 3, ...
-            compact_id = int_val - 1
-            pairs.append((compact_id, i))
-
-    # Sort by compact_id so that dense_indices[k] corresponds to compact_vector[k]
-    pairs.sort(key=lambda x: x[0])
-
-    # Extract dense indices in order
-    sorted_dense_indices = [p[1] for p in pairs]
-
-    return torch.tensor(
-        sorted_dense_indices, dtype=torch.long, device=device
-    ), dense_size
+    return torch.tensor(compact_to_dense, dtype=torch.long, device=device), dense_size
 
 
 def gradient_descent_on_inputs(
@@ -159,25 +248,10 @@ def gradient_descent_on_inputs(
     for candidate in candidates:
         params = candidate["params"]
 
-        # 1. Convert to SurfaceRZFourier
-        boundary = tools.make_boundary_from_params(params)
+        # 1. Extract masked params using local helper (mock-safe)
+        flat_np, metadata = _extract_masked_params(params, max_poloidal, max_toroidal)
+        n_field_periods = metadata["n_field_periods"]
 
-        # 2. Build mask for optimization (optimize only active modes)
-        boundary = surface_module.set_max_mode_numbers(
-            boundary,
-            max_poloidal_mode=max_poloidal,
-            max_toroidal_mode=max_toroidal,
-        )
-
-        mask = surface_module.build_mask(
-            boundary,
-            max_poloidal_mode=max_poloidal,
-            max_toroidal_mode=max_toroidal,
-        )
-
-        # 3. Flatten to JAX array -> Numpy -> Torch
-        flat_jax, unravel_fn = pytree.mask_and_ravel(boundary, mask)
-        flat_np = np.array(flat_jax)
         x_torch = torch.tensor(
             flat_np, dtype=torch.float32, device=device, requires_grad=True
         )
@@ -193,7 +267,7 @@ def gradient_descent_on_inputs(
             x_dense[dense_indices] = x_torch
 
             # Append n_field_periods
-            nfp_val = float(boundary.n_field_periods)
+            nfp_val = float(n_field_periods)
             nfp_tensor = torch.tensor([nfp_val], device=device, dtype=x_torch.dtype)
             x_input = torch.cat([x_dense, nfp_tensor], dim=0)
 
@@ -262,21 +336,9 @@ def gradient_descent_on_inputs(
             loss.backward()
             optimizer.step()
 
-        # 5. Reconstruction
+        # 5. Reconstruction using local helper (mock-safe)
         x_final_np = x_torch.detach().cpu().numpy()
-        boundary_new = unravel_fn(jnp.array(x_final_np))
-
-        # 6. Convert back to dict params
-        params_new = {
-            "r_cos": np.asarray(boundary_new.r_cos).tolist(),
-            "z_sin": np.asarray(boundary_new.z_sin).tolist(),
-            "n_field_periods": boundary_new.n_field_periods,
-            "is_stellarator_symmetric": boundary_new.is_stellarator_symmetric,
-        }
-        if boundary_new.r_sin is not None:
-            params_new["r_sin"] = np.asarray(boundary_new.r_sin).tolist()
-        if boundary_new.z_cos is not None:
-            params_new["z_cos"] = np.asarray(boundary_new.z_cos).tolist()
+        params_new = _reconstruct_params(x_final_np, metadata)
 
         optimized_candidates.append(
             {

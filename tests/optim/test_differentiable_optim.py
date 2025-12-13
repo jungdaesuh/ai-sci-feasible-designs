@@ -60,6 +60,7 @@ class TestDifferentiableOptim(unittest.TestCase):
         self.cfg.constraint_weights = ai_config.ConstraintWeightsConfig(
             mhd=1.0, qi=1.0, elongation=1.0
         )
+        self.cfg.problem = "p1"  # Add problem attribute for optimization direction
 
     def test_gradient_descent_updates_params(self):
         # Create a dummy candidate
