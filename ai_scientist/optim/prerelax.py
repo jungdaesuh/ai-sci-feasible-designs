@@ -48,7 +48,7 @@ def geometric_energy(
 
     # 3. Elongation Constraint (Soft)
     # Avoid pinching (elongation > 10 is usually invalid).
-    elo = geometry.elongation(r_cos, z_sin, nfp)
+    elo = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
     elo_penalty = torch.relu(elo - 10.0) ** 2
 
     # Total Energy

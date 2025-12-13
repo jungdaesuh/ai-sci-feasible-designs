@@ -177,7 +177,7 @@ class StellaratorEnv(gym.Env):
                     self.params.get("n_field_periods") or self.params.get("nfp", 1)
                 )
 
-                computed_elong = float(geometry.elongation(r_cos, z_sin, nfp).item())
+                computed_elong = float(geometry.elongation_isoperimetric(r_cos, z_sin, nfp).item())
                 elong_limit = self.target_metrics.get("max_elongation", 5.0)
                 elong_violation = max(0.0, computed_elong - elong_limit)
                 cost += 3.0 * elong_violation  # Moderate elongation penalty

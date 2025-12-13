@@ -536,7 +536,7 @@ class CycleExecutor:
                         nfp_t = torch.tensor(nfp_list, dtype=torch.float32)
 
                         ar_batch = geometry.aspect_ratio(r_cos_t, z_sin_t, nfp_t)
-                        elo_batch = geometry.elongation(r_cos_t, z_sin_t, nfp_t)
+                        elo_batch = geometry.elongation_isoperimetric(r_cos_t, z_sin_t, nfp_t)
 
                         for k, idx in enumerate(indices_to_compute):
                             candidate_pool[idx]["aspect_ratio"] = float(
@@ -1289,7 +1289,7 @@ class CycleExecutor:
                                 z_sin_list, dtype=torch.float32
                             ).unsqueeze(0)
                             elongation = float(
-                                geometry.elongation(r_cos_t, z_sin_t, nfp).item()
+                                geometry.elongation_isoperimetric(r_cos_t, z_sin_t, nfp).item()
                             )
                         else:
                             elongation = 1.0
@@ -2086,7 +2086,7 @@ def _surrogate_rank_screen_candidates(
                                 z_sin_list, dtype=torch.float32
                             ).unsqueeze(0)
                             elo_val = float(
-                                geometry.elongation(r_cos_t, z_sin_t, nfp).item()
+                                geometry.elongation_isoperimetric(r_cos_t, z_sin_t, nfp).item()
                             )
                     except Exception:
                         pass
