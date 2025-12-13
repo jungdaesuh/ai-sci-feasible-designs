@@ -11,7 +11,7 @@ import math
 import os
 import threading
 from collections import defaultdict
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Protocol, runtime_checkable
 
 import numpy as np
 import pydantic
@@ -28,6 +28,50 @@ except ImportError:
     ConstellarationSettings = None  # type: ignore[misc, assignment]
 
 from ai_scientist.backends.base import PhysicsBackend
+
+
+# --- Type Protocol for Metrics ---
+# Fixes Issue #13: Provides type safety for metrics objects from different backends
+# (constellaration.Metrics, MockMetrics, or dict fallback)
+
+
+@runtime_checkable
+class MetricsProtocol(Protocol):
+    """Protocol defining the interface for physics metrics.
+
+    This protocol allows type-safe handling of metrics from different sources:
+    - constellaration.forward_model.Metrics (real physics)
+    - ai_scientist.backends.mock.MockMetrics (testing)
+    - Dict fallback (when module unavailable)
+
+    Required attributes are those used by compute_objective(), compute_constraint_margins(),
+    and related functions.
+    """
+
+    @property
+    def aspect_ratio(self) -> float:
+        """Aspect ratio (major/minor radius). Lower = more compact."""
+        ...
+
+    @property
+    def max_elongation(self) -> float:
+        """Maximum elongation of plasma cross-section."""
+        ...
+
+    @property
+    def minimum_normalized_magnetic_gradient_scale_length(self) -> float:
+        """Gradient scale length. Higher = simpler coils."""
+        ...
+
+    @property
+    def edge_magnetic_mirror_ratio(self) -> float:
+        """Edge magnetic mirror ratio."""
+        ...
+
+
+# Note: Functions below use `Any` for metrics parameter to maintain compatibility
+# with both MetricsProtocol-compliant objects and dict fallbacks. The Protocol
+# above documents the expected interface.
 
 
 def _is_constellaration_available() -> bool:
@@ -701,7 +745,35 @@ def forward_model_batch(
     pool_type: str = "thread",
     use_cache: bool = True,
 ) -> List[EvaluationResult]:
-    """Parallel batch evaluation."""
+    """Parallel batch evaluation of multiple boundary configurations.
+
+    Args:
+        boundaries: List of boundary parameter dictionaries.
+        settings: ForwardModelSettings configuration.
+        n_workers: Number of parallel workers (default: 4).
+        pool_type: Executor type - "thread" or "process" (default: "thread").
+        use_cache: Whether to use evaluation cache (default: True).
+
+    Returns:
+        List of EvaluationResult objects, one per boundary.
+
+    Note on GIL and Parallelism (Issue #15):
+        Python's Global Interpreter Lock (GIL) limits true parallelism for
+        CPU-bound Python code in ThreadPoolExecutor. However:
+
+        - If constellaration/VMEC++ releases the GIL (native C++ code does),
+          ThreadPoolExecutor achieves true parallelism and is preferred due to
+          lower memory overhead and shared cache access.
+
+        - For pure Python compute or if GIL contention is observed, switch to
+          pool_type="process" for true parallelism at the cost of:
+          - Higher memory usage (separate process per worker)
+          - Serialization overhead for data transfer
+          - Separate caches per process
+
+        Recommendation: Start with "thread" (default). If profiling shows GIL
+        contention (workers waiting despite available CPU), switch to "process".
+    """
     results: List[EvaluationResult | None] = [None] * len(boundaries)
 
     executor_cls = (

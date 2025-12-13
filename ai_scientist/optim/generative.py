@@ -514,7 +514,7 @@ class DiffusionDesignModel:
         params = cand.get("params") or cand.get("candidate_params") or {}
 
         # Helper to find values in metrics or params
-        def get_val(key):
+        def get_val(key: str) -> float | None:
             # Try metrics first
             if isinstance(metrics, dict):
                 v = metrics.get(key)
