@@ -47,6 +47,7 @@ from constellaration import forward_model
 from orchestration import adaptation as adaptation_helpers
 from ai_scientist.prefilter import FeasibilityPrefilter
 from ai_scientist.optim import geometry
+from ai_scientist.objective_types import get_training_target
 
 # Constants
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -1379,9 +1380,7 @@ class CycleExecutor:
                     n_field_periods_val=initial_params_map.get("n_field_periods", 1),
                     problem=self.config.problem,
                     steps=budget_per_step,
-                    target="hv"
-                    if (self.config.problem or "").lower().startswith("p3")
-                    else "objective",
+                    target=get_training_target(self.config.problem or "p3"),
                 )
                 x_new = jnp.array(x_new_np)
 

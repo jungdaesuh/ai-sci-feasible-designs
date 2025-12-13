@@ -25,6 +25,7 @@ from ai_scientist.constraints import (
 )
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+from ai_scientist.objective_types import TargetKind
 from ai_scientist.utils import pytree
 
 _logger = logging.getLogger(__name__)
@@ -42,12 +43,12 @@ except ValueError:
     pass
 
 
-def _is_maximization_problem(problem: str, target: str = "objective") -> bool:
+def _is_maximization_problem(problem: str, target: TargetKind) -> bool:
     """Return True if the target should be maximized.
 
     Args:
         problem: Problem identifier (p1, p2, p3).
-        target: The surrogate training target ("objective" or "hv").
+        target: The surrogate training target (TargetKind.OBJECTIVE or TargetKind.HV).
 
     Direction logic:
         - HV (hypervolume) is ALWAYS maximized regardless of problem.
@@ -57,7 +58,7 @@ def _is_maximization_problem(problem: str, target: str = "objective") -> bool:
             P3: aspect_ratio -> minimize
     """
     # HV is always maximized (Pareto hypervolume metric)
-    if target.lower() == "hv":
+    if target == TargetKind.HV:
         return True
 
     # Physics objective direction
@@ -279,7 +280,7 @@ def gradient_descent_on_inputs(
     steps: int = 100,
     lr: float = 1e-2,
     device: str = "cpu",
-    target: str | None = None,
+    target: TargetKind,
 ) -> list[Mapping[str, Any]]:
     """Optimize candidate parameters using gradient descent on the surrogate.
 
@@ -290,6 +291,8 @@ def gradient_descent_on_inputs(
         steps: Number of optimization steps.
         lr: Learning rate.
         device: Device to run optimization on.
+        target: Surrogate training target (TargetKind.OBJECTIVE or TargetKind.HV).
+                Use get_training_target() to obtain this from problem type.
 
     Returns:
         List of optimized candidate dictionaries.
@@ -405,13 +408,8 @@ def gradient_descent_on_inputs(
             # - P2: MAXIMIZE gradient -> LCB, then negate
             # - P3 with HV target: MAXIMIZE HV -> LCB, then negate
             beta = 0.1
-            # Determine target: use explicit if provided, else infer from problem
-            effective_target = (
-                target
-                if target is not None
-                else ("hv" if problem.lower().startswith("p3") else "objective")
-            )
-            if _is_maximization_problem(problem, effective_target):
+            # Use explicit target (required parameter - no fallback inference)
+            if _is_maximization_problem(problem, target):
                 # Maximize: use LCB (pessimistic for maximization), then negate
                 loss_obj = -(pred_obj.squeeze() - beta * std_obj.squeeze())
             else:
@@ -512,9 +510,14 @@ def optimize_alm_inner_loop(
     steps: int = 10,
     lr: float = 1e-2,
     device: str = "cpu",
-    target: str | None = None,
+    target: TargetKind,
 ) -> np.ndarray:
-    """Optimize the ALM inner loop using gradient descent on the surrogate."""
+    """Optimize the ALM inner loop using gradient descent on the surrogate.
+
+    Args:
+        target: Surrogate training target (TargetKind.OBJECTIVE or TargetKind.HV).
+                Use get_training_target() to obtain this from problem type.
+    """
 
     if surrogate._schema is None:
         raise RuntimeError(
@@ -614,13 +617,8 @@ def optimize_alm_inner_loop(
         s_elo = std_elo.squeeze()
 
         # Objective term (pessimistic for both directions)
-        # Determine target: use explicit if provided, else infer from problem
-        effective_target = (
-            target
-            if target is not None
-            else ("hv" if problem.lower().startswith("p3") else "objective")
-        )
-        if _is_maximization_problem(problem, effective_target):
+        # Use explicit target (required parameter - no fallback inference)
+        if _is_maximization_problem(problem, target):
             # P2/P3: MAXIMIZE target -> minimize -objective
             # LCB: mean - beta*std (pessimistic for maximization)
             obj_term = -(pred_obj.squeeze() - beta * std_obj.squeeze())

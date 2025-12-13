@@ -5,6 +5,7 @@ import numpy as np
 import torch.nn as nn
 
 from ai_scientist import config as ai_config
+from ai_scientist.objective_types import TargetKind
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 
@@ -101,7 +102,12 @@ class TestDifferentiableOptim(unittest.TestCase):
 
         # Run optimization
         optimized = differentiable.gradient_descent_on_inputs(
-            candidates, self.surrogate, self.cfg, steps=10, lr=0.1
+            candidates,
+            self.surrogate,
+            self.cfg,
+            steps=10,
+            lr=0.1,
+            target=TargetKind.OBJECTIVE,
         )
 
         self.assertEqual(len(optimized), 1)
@@ -152,6 +158,7 @@ class TestDifferentiableOptim(unittest.TestCase):
             n_field_periods_val=1,
             steps=5,
             lr=0.1,
+            target=TargetKind.OBJECTIVE,
         )
 
         # Check shape
@@ -164,32 +171,34 @@ class TestDifferentiableOptim(unittest.TestCase):
     def test_p3_uses_maximization_direction(self):
         """P3 with HV target should maximize (not minimize)."""
         # P1: minimize (physics objective = elongation)
-        self.assertFalse(differentiable._is_maximization_problem("p1"))
         self.assertFalse(
-            differentiable._is_maximization_problem("p1", target="objective")
+            differentiable._is_maximization_problem("p1", target=TargetKind.OBJECTIVE)
         )
 
         # P2: maximize (physics objective = gradient)
-        self.assertTrue(differentiable._is_maximization_problem("p2"))
         self.assertTrue(
-            differentiable._is_maximization_problem("p2", target="objective")
+            differentiable._is_maximization_problem("p2", target=TargetKind.OBJECTIVE)
         )
 
         # P3 with physics objective: minimize (aspect_ratio)
         self.assertFalse(
-            differentiable._is_maximization_problem("p3", target="objective")
+            differentiable._is_maximization_problem("p3", target=TargetKind.OBJECTIVE)
         )
 
         # P3 with HV target: MAXIMIZE (key fix!)
-        self.assertTrue(differentiable._is_maximization_problem("p3", target="hv"))
+        self.assertTrue(
+            differentiable._is_maximization_problem("p3", target=TargetKind.HV)
+        )
 
     def test_explicit_target_overrides_inference(self):
         """Explicit target parameter should work regardless of problem name."""
-        # For P1, if target="hv" is passed, should maximize
-        self.assertTrue(differentiable._is_maximization_problem("p1", target="hv"))
-        # For P3, if target="objective" is passed, should minimize
+        # For P1, if target=HV is passed, should maximize
+        self.assertTrue(
+            differentiable._is_maximization_problem("p1", target=TargetKind.HV)
+        )
+        # For P3, if target=OBJECTIVE is passed, should minimize
         self.assertFalse(
-            differentiable._is_maximization_problem("p3", target="objective")
+            differentiable._is_maximization_problem("p3", target=TargetKind.OBJECTIVE)
         )
 
 

@@ -30,7 +30,52 @@ is expected (or vice versa) will cause silent semantic bugs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Literal
+
+
+# =============================================================================
+# TargetKind: Surrogate Training Target (SSOT)
+# =============================================================================
+
+
+class TargetKind(str, Enum):
+    """Surrogate training target kind.
+
+    This enum is the Single Source of Truth (SSOT) for what the surrogate
+    model predicts during gradient-based optimization.
+
+    Values:
+        OBJECTIVE: Problem-specific physics objective (elongation, gradient, aspect).
+        HV: Hypervolume metric for Pareto optimization (P3 multi-objective).
+
+    Usage:
+        Always pass TargetKind to gradient_descent_on_inputs() and
+        optimize_alm_inner_loop() to avoid semantic drift between training
+        and optimization.
+    """
+
+    OBJECTIVE = "objective"
+    HV = "hv"
+
+
+def get_training_target(problem: str) -> TargetKind:
+    """Get the canonical training target for a problem type.
+
+    This is the SSOT for caller → optimizer target synchronization.
+    Any change to this policy automatically propagates to all callers.
+
+    Policy:
+        P3 (multi-objective): Uses HV as surrogate target for Pareto optimization.
+        P1/P2 (single-objective): Uses physics objective directly.
+
+    Args:
+        problem: Problem identifier (p1, p2, p3).
+
+    Returns:
+        TargetKind enum value.
+    """
+    return TargetKind.HV if problem.lower().startswith("p3") else TargetKind.OBJECTIVE
 
 
 @dataclass(frozen=True)

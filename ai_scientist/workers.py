@@ -22,6 +22,7 @@ from ai_scientist.optim.samplers import (
     RotatingEllipseSampler,
 )
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+from ai_scientist.objective_types import get_training_target
 
 
 # =============================================================================
@@ -121,9 +122,7 @@ class OptimizationWorker(Worker):
                     initial_guesses,
                     self.surrogate,
                     self.cfg,
-                    target="hv"
-                    if (self.cfg.problem or "").lower().startswith("p3")
-                    else "objective",
+                    target=get_training_target(self.cfg.problem or "p3"),
                 )
                 return {"candidates": optimized_candidates, "status": "optimized"}
             except Exception as exc:
