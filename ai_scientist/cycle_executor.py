@@ -536,7 +536,9 @@ class CycleExecutor:
                         nfp_t = torch.tensor(nfp_list, dtype=torch.float32)
 
                         ar_batch = geometry.aspect_ratio(r_cos_t, z_sin_t, nfp_t)
-                        elo_batch = geometry.elongation_isoperimetric(r_cos_t, z_sin_t, nfp_t)
+                        elo_batch = geometry.elongation_isoperimetric(
+                            r_cos_t, z_sin_t, nfp_t
+                        )
 
                         for k, idx in enumerate(indices_to_compute):
                             candidate_pool[idx]["aspect_ratio"] = float(
@@ -1128,6 +1130,18 @@ class CycleExecutor:
             title, content, out_dir=self.config.reporting_dir
         )
 
+        # Log cache info at cycle end (AoT recommendation for observability)
+        if log_cache_stats:
+            from ai_scientist import forward_model as fm
+
+            cache_info = fm.get_cache_info()
+            print(
+                f"[runner][cycle={cycle_number}] Cache stats: "
+                f"size={cache_info.get('currsize', 0)}/{cache_info.get('maxsize', 0)} "
+                f"hits={cache_info.get('hits', 0)} misses={cache_info.get('misses', 0)} "
+                f"rate={100 * cache_info.get('hits', 0) / (cache_info.get('hits', 0) + cache_info.get('misses', 0) + 1e-9):.1f}%"
+            )
+
         return CycleResult(
             cycle_index=cycle_index,
             candidates_evaluated=len(screen_results),
@@ -1289,7 +1303,9 @@ class CycleExecutor:
                                 z_sin_list, dtype=torch.float32
                             ).unsqueeze(0)
                             elongation = float(
-                                geometry.elongation_isoperimetric(r_cos_t, z_sin_t, nfp).item()
+                                geometry.elongation_isoperimetric(
+                                    r_cos_t, z_sin_t, nfp
+                                ).item()
                             )
                         else:
                             elongation = 1.0
@@ -2086,7 +2102,9 @@ def _surrogate_rank_screen_candidates(
                                 z_sin_list, dtype=torch.float32
                             ).unsqueeze(0)
                             elo_val = float(
-                                geometry.elongation_isoperimetric(r_cos_t, z_sin_t, nfp).item()
+                                geometry.elongation_isoperimetric(
+                                    r_cos_t, z_sin_t, nfp
+                                ).item()
                             )
                     except Exception:
                         pass
