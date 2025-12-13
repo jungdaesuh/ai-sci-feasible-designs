@@ -239,6 +239,13 @@ class GeometerWorker(Worker):
             if torch.min(norm_n) < 1e-4:
                 return False
 
+            # 1b. Check for self-intersection (figure-8 shapes, folded surfaces)
+            intersection_code = geometry.check_self_intersection(
+                r_cos, z_sin, nfp, n_theta=32, n_zeta=32
+            )
+            if intersection_code.item() > 0:
+                return False
+
             # 2. Check Elongation (B7 FIX: use isoperimetric method for benchmark alignment)
             elo = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
             if elo.item() > 10.0:

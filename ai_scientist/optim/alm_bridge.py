@@ -183,7 +183,10 @@ def step_alm(
 
     n_evals = 0
 
-    mp_context = multiprocessing.get_context("forkserver")
+    # Use 'spawn' context for cross-platform portability (macOS, Windows, Linux)
+    # Note: 'forkserver' is only available on Linux and can cause issues with
+    # JAX/PyTorch GPU memory when forking.
+    mp_context = multiprocessing.get_context("spawn")
 
     with futures.ProcessPoolExecutor(
         max_workers=num_workers, mp_context=mp_context

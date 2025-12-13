@@ -219,6 +219,16 @@ def _compute_index_mapping(
 
     mask_array = (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
 
+    # IMPORTANT: R₀₀ (major radius) is intentionally EXCLUDED from optimization.
+    # Physics Rationale:
+    #   1. R₀₀ sets the overall scale of the stellarator (normalization).
+    #   2. The aspect ratio metric already captures compactness relative to R₀₀.
+    #   3. Optimizing R₀₀ would be redundant with aspect ratio minimization.
+    #   4. Constellaration benchmarks treat R₀₀ as a fixed scale parameter.
+    #
+    # The mask follows stellarator symmetry: (m>0) OR (m=0 AND n>=1).
+    # This excludes (m=0, n=0) and (m=0, n<0) from the optimization vector.
+
     # Get (m, n_idx) pairs where mask is True, in row-major order
     # np.argwhere returns in row-major order: iterates m first, then n_idx within each m
     masked_indices = np.argwhere(mask_array)  # Shape (N, 2) with [m, n_idx]
