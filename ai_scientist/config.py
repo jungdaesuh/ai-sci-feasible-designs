@@ -188,6 +188,16 @@ class ConstraintWeightsConfig:
 
 @dataclass(frozen=True)
 class GenerativeConfig:
+    """Configuration for generative models (VAE/Diffusion).
+
+    IMPORTANT: Generative models are DISABLED by default (enabled=False).
+
+    To enable, set in your experiment YAML config:
+        generative:
+          enabled: true
+          checkpoint_path: /path/to/diffusion_v2.pt
+    """
+
     enabled: bool
     backend: str = "vae"
     latent_dim: int = 16
@@ -278,7 +288,17 @@ class ALMConfig:
 
 @dataclass(frozen=True)
 class ASOConfig:
-    """Configuration for Agent-Supervised Optimization loop."""
+    """Configuration for Agent-Supervised Optimization loop.
+
+    IMPORTANT: ASO is DISABLED by default (enabled=False).
+
+    To enable LLM supervision, either:
+    1. Set `aso.enabled: true` in your experiment YAML config
+    2. Use ExperimentConfig.p3_aso_enabled() factory method
+    3. Use ExperimentConfig.p3_high_fidelity() factory method
+
+    ASO requires valid LLM API credentials.
+    """
 
     # Control mode
     enabled: bool = False
