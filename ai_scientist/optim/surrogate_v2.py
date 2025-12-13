@@ -54,13 +54,16 @@ class StellaratorNeuralOp(nn.Module):
         self.input_channels = 2  # r_cos, z_sin
 
         # 1. Spectral Branch (Operating on coefficient grid)
+        # Dropout added after each SiLU for regularization (AoT recommendation)
         self.conv_net = nn.Sequential(
             nn.Conv2d(self.input_channels, hidden_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
+            nn.Dropout2d(p=0.1),
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
+            nn.Dropout2d(p=0.1),
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
@@ -80,11 +83,14 @@ class StellaratorNeuralOp(nn.Module):
         # Multi-head output (Fusion of Spectral + Geometric)
         fusion_dim = hidden_dim + self.geo_dim
 
+        # Dropout added for regularization (AoT recommendation)
         self.head_base = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.SiLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
+            nn.Dropout(p=0.1),
         )
 
         self.head_objective = nn.Linear(hidden_dim, 1)
@@ -147,9 +153,10 @@ class StellaratorNeuralOp(nn.Module):
         # Stack to (Batch, 3, N_points)
         # R, Z, Phi are (Batch, T, ZetaTotal)
         # Flatten spatial dims
-        X_flat = X.view(batch_size, -1)
-        Y_flat = Y.view(batch_size, -1)
-        Z_flat = Z_cart.view(batch_size, -1)
+        # Use reshape (not view) because upstream ops can yield non-contiguous tensors.
+        X_flat = X.reshape(batch_size, -1)
+        Y_flat = Y.reshape(batch_size, -1)
+        Z_flat = Z_cart.reshape(batch_size, -1)
 
         points = torch.stack([X_flat, Y_flat, Z_flat], dim=1)  # (B, 3, N)
 
@@ -378,8 +385,6 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_iota_norm = (y_iota - self._y_iota_mean) / self._y_iota_std
 
         dataset = TensorDataset(X, y_obj_norm, y_mhd_norm, y_qi_norm, y_iota_norm)
-        # Use a larger batch size for efficiency if possible, but keep it stochastic
-        loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
         # 2. Initialize Models if needed or if schema changed
         # Check dimensions match schema (ignoring appended nfp)
@@ -408,21 +413,66 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     mpol=current_mpol, ntor=current_ntor, hidden_dim=self._hidden_dim
                 ).to(self._device)
                 self._models.append(model)
-                self._optimizers.append(optim.Adam(model.parameters(), lr=self._lr))
+                # Weight decay added for regularization (AoT recommendation)
+                self._optimizers.append(
+                    optim.Adam(model.parameters(), lr=self._lr, weight_decay=1e-4)
+                )
 
-        # 3. Train Loop (Sequential over ensemble members)
-        # Deep Ensembles rely on random initialization and stochastic shuffling
+        # 3. Train Loop with Early Stopping (AoT recommendation)
+        # Deep Ensembles: random init + bagging for better calibration
+        # (Lakshminarayanan et al., 2017: "Simple and Scalable Predictive Uncertainty")
         criterion = nn.MSELoss()
+        n_samples = len(dataset)
+
+        # Early stopping parameters
+        early_stopping_patience = 10
+        min_val_improvement = 1e-4
 
         for idx, model in enumerate(self._models):
             model.train()
             optimizer = self._optimizers[idx]
 
-            # Optional: Bagging (bootstrap sampling) could be added here by resampling the dataset
-            # For now, we use the full dataset with shuffling, which is standard for Deep Ensembles.
+            # P1 FIX: Bootstrap sampling (bagging) for each ensemble member
+            # This improves uncertainty calibration by introducing data diversity
+            rng = torch.Generator()
+            rng.manual_seed(42 + idx)  # Reproducible but different per model
+            bootstrap_indices = torch.randint(0, n_samples, (n_samples,), generator=rng)
+            bootstrap_dataset = torch.utils.data.Subset(
+                dataset, bootstrap_indices.tolist()
+            )
+
+            # Train/Validation split (80/20) for early stopping
+            n_bootstrap = len(bootstrap_dataset)
+            n_train = int(0.8 * n_bootstrap)
+            n_val = n_bootstrap - n_train
+
+            if n_val < 2:
+                # Not enough samples for validation, skip early stopping
+                train_dataset = bootstrap_dataset
+                val_loader = None
+            else:
+                train_dataset, val_dataset = torch.utils.data.random_split(
+                    bootstrap_dataset,
+                    [n_train, n_val],
+                    generator=torch.Generator().manual_seed(42 + idx),
+                )
+                val_loader = DataLoader(
+                    val_dataset, batch_size=self._batch_size, shuffle=False
+                )
+
+            train_loader = DataLoader(
+                train_dataset, batch_size=self._batch_size, shuffle=True
+            )
+
+            # Early stopping state
+            best_val_loss = float("inf")
+            patience_counter = 0
+            best_state_dict = None
 
             for epoch in range(self._epochs):
-                for xb, yb_obj, yb_mhd, yb_qi, yb_iota in loader:
+                # Training phase
+                model.train()
+                for xb, yb_obj, yb_mhd, yb_qi, yb_iota in train_loader:
                     optimizer.zero_grad()
                     pred_obj, pred_mhd, pred_qi, pred_iota = model(xb)
 
@@ -437,6 +487,46 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
                     loss.backward()
                     optimizer.step()
+
+                # Validation phase for early stopping
+                if val_loader is not None:
+                    model.eval()
+                    val_loss_sum = 0.0
+                    val_count = 0
+                    with torch.no_grad():
+                        for xb, yb_obj, yb_mhd, yb_qi, yb_iota in val_loader:
+                            pred_obj, pred_mhd, pred_qi, pred_iota = model(xb)
+                            val_loss = (
+                                criterion(pred_obj, yb_obj)
+                                + criterion(pred_mhd, yb_mhd)
+                                + criterion(pred_qi, yb_qi)
+                                + criterion(pred_iota, yb_iota)
+                            )
+                            val_loss_sum += val_loss.item() * len(xb)
+                            val_count += len(xb)
+
+                    avg_val_loss = (
+                        val_loss_sum / val_count if val_count > 0 else float("inf")
+                    )
+
+                    # Check for improvement
+                    if avg_val_loss < best_val_loss - min_val_improvement:
+                        best_val_loss = avg_val_loss
+                        best_state_dict = {
+                            k: v.clone() for k, v in model.state_dict().items()
+                        }
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= early_stopping_patience:
+                            logging.debug(
+                                f"[surrogate_v2] Model {idx}: early stopping at epoch {epoch + 1}"
+                            )
+                            break
+
+            # Restore best model weights
+            if best_state_dict is not None:
+                model.load_state_dict(best_state_dict)
 
         self._trained = True
 

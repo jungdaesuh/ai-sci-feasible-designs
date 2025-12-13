@@ -6,6 +6,7 @@ using a differentiable surrogate model.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Sequence, Tuple
 
 import numpy as np
@@ -25,6 +26,8 @@ from ai_scientist.constraints import (
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.utils import pytree
+
+_logger = logging.getLogger(__name__)
 
 # Register SurfaceRZFourier as a Pytree to ensure JAX compatibility
 # (In case the installed constellaration library hasn't registered it yet)
@@ -99,6 +102,14 @@ def _extract_masked_params(
 
     if r_cos.size > 0:
         src_h, src_w = r_cos.shape
+        src_ntor = (src_w - 1) // 2
+        # P0 FIX: Warn if high-frequency toroidal modes will be truncated
+        if src_ntor > max_toroidal:
+            _logger.warning(
+                "Truncating r_cos ntor from %d to %d - high-frequency modes will be lost",
+                src_ntor,
+                max_toroidal,
+            )
         copy_h = min(src_h, grid_h)
         # Center the source around the middle column (n=0)
         src_center = src_w // 2
@@ -112,6 +123,14 @@ def _extract_masked_params(
 
     if z_sin.size > 0:
         src_h, src_w = z_sin.shape
+        src_ntor = (src_w - 1) // 2
+        # P0 FIX: Warn if high-frequency toroidal modes will be truncated
+        if src_ntor > max_toroidal:
+            _logger.warning(
+                "Truncating z_sin ntor from %d to %d - high-frequency modes will be lost",
+                src_ntor,
+                max_toroidal,
+            )
         copy_h = min(src_h, grid_h)
         src_center = src_w // 2
         dst_center = grid_w // 2
