@@ -560,11 +560,33 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         qi_stack = torch.stack(preds_qi).cpu().numpy()
 
         # Statistics
-        obj_mean = np.mean(obj_stack, axis=0)
-        obj_std = np.std(obj_stack, axis=0)
+        obj_mean_norm = np.mean(obj_stack, axis=0)
+        obj_std_norm = np.std(obj_stack, axis=0)
 
-        mhd_mean = np.mean(mhd_stack, axis=0)
-        qi_mean = np.mean(qi_stack, axis=0)
+        mhd_mean_norm = np.mean(mhd_stack, axis=0)
+        qi_mean_norm = np.mean(qi_stack, axis=0)
+
+        # Denormalize to original units so feasibility thresholds are meaningful.
+        # This mirrors `predict_torch` but operates on numpy arrays.
+        if hasattr(self, "_y_obj_mean"):
+            y_obj_mean = float(self._y_obj_mean.detach().cpu().item())
+            y_obj_std = float(self._y_obj_std.detach().cpu().item())
+            y_mhd_mean = float(self._y_mhd_mean.detach().cpu().item())
+            y_mhd_std = float(self._y_mhd_std.detach().cpu().item())
+            y_qi_log_mean = float(self._y_qi_log_mean.detach().cpu().item())
+            y_qi_log_std = float(self._y_qi_log_std.detach().cpu().item())
+
+            obj_mean = obj_mean_norm * y_obj_std + y_obj_mean
+            obj_std = obj_std_norm * y_obj_std
+
+            mhd_mean = mhd_mean_norm * y_mhd_std + y_mhd_mean
+
+            qi_log_mean = qi_mean_norm * y_qi_log_std + y_qi_log_mean
+            qi_mean = np.power(10.0, qi_log_mean)
+        else:
+            obj_mean, obj_std = obj_mean_norm, obj_std_norm
+            mhd_mean = mhd_mean_norm
+            qi_mean = qi_mean_norm
 
         # Analytically compute elongation to keep downstream tests working
         with torch.no_grad():
@@ -584,7 +606,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                 geometry.elongation(r_cos_grid, z_sin_grid, nfp_batch).cpu().numpy()
             )
 
-        predictions: list[SurrogatePrediction] = []
+            predictions: list[SurrogatePrediction] = []
         for i, candidate in enumerate(candidates):
             # Feasibility based on mean predictions
             is_likely_feasible = mhd_mean[i] >= 0
