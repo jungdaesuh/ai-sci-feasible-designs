@@ -345,7 +345,26 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_mhd = torch.tensor(y_mhd_list, dtype=torch.float32).to(self._device)
         y_qi = torch.tensor(y_qi_list, dtype=torch.float32).to(self._device)
 
-        dataset = TensorDataset(X, y_obj, y_mhd, y_qi)
+        # Normalize targets for balanced multi-task learning
+        # This ensures each loss term contributes proportionally regardless of scale
+        # Store statistics for denormalization during inference
+        self._y_obj_mean = y_obj.mean()
+        self._y_obj_std = y_obj.std().clamp(min=1e-6)
+        self._y_mhd_mean = y_mhd.mean()
+        self._y_mhd_std = y_mhd.std().clamp(min=1e-6)
+        self._y_qi_mean = y_qi.mean()
+        self._y_qi_std = y_qi.std().clamp(min=1e-6)
+
+        # Apply log transform to QI before normalization (QI spans many orders of magnitude)
+        y_qi_log = torch.log10(y_qi.clamp(min=1e-12))
+        self._y_qi_log_mean = y_qi_log.mean()
+        self._y_qi_log_std = y_qi_log.std().clamp(min=1e-6)
+
+        y_obj_norm = (y_obj - self._y_obj_mean) / self._y_obj_std
+        y_mhd_norm = (y_mhd - self._y_mhd_mean) / self._y_mhd_std
+        y_qi_norm = (y_qi_log - self._y_qi_log_mean) / self._y_qi_log_std
+
+        dataset = TensorDataset(X, y_obj_norm, y_mhd_norm, y_qi_norm)
         # Use a larger batch size for efficiency if possible, but keep it stochastic
         loader = DataLoader(dataset, batch_size=self._batch_size, shuffle=True)
 
@@ -394,10 +413,12 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     optimizer.zero_grad()
                     pred_obj, pred_mhd, pred_qi = model(xb)
 
+                    # With normalized targets, all losses are on same scale
+                    # Equal weighting is now appropriate
                     loss = (
                         criterion(pred_obj, yb_obj)
-                        + 0.5 * criterion(pred_mhd, yb_mhd)
-                        + 0.5 * criterion(pred_qi, yb_qi)
+                        + criterion(pred_mhd, yb_mhd)
+                        + criterion(pred_qi, yb_qi)
                     )
 
                     loss.backward()
@@ -454,15 +475,36 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         stack_mhd = torch.stack(preds_mhd)
         stack_qi = torch.stack(preds_qi)
 
-        # Compute Mean and Std
-        return (
-            torch.mean(stack_obj, dim=0),
-            torch.std(stack_obj, dim=0),
-            torch.mean(stack_mhd, dim=0),
-            torch.std(stack_mhd, dim=0),
-            torch.mean(stack_qi, dim=0),
-            torch.std(stack_qi, dim=0),
-        )
+        # Compute Mean and Std in normalized space
+        obj_mean_norm = torch.mean(stack_obj, dim=0)
+        obj_std_norm = torch.std(stack_obj, dim=0)
+        mhd_mean_norm = torch.mean(stack_mhd, dim=0)
+        mhd_std_norm = torch.std(stack_mhd, dim=0)
+        qi_mean_norm = torch.mean(stack_qi, dim=0)
+        qi_std_norm = torch.std(stack_qi, dim=0)
+
+        # Denormalize predictions to original scale
+        # obj and mhd: linear denormalization
+        # qi: model predicts log10(qi), convert back to raw qi
+        if hasattr(self, "_y_obj_mean"):
+            obj_mean = obj_mean_norm * self._y_obj_std + self._y_obj_mean
+            obj_std = obj_std_norm * self._y_obj_std
+            mhd_mean = mhd_mean_norm * self._y_mhd_std + self._y_mhd_mean
+            mhd_std = mhd_std_norm * self._y_mhd_std
+            # QI was trained in log10 space, denormalize to log10 then convert to raw
+            qi_log_mean = qi_mean_norm * self._y_qi_log_std + self._y_qi_log_mean
+            qi_log_std = qi_std_norm * self._y_qi_log_std
+            # Convert log10(qi) back to raw qi: qi = 10^(log10_qi)
+            qi_mean = torch.pow(10.0, qi_log_mean)
+            # For std, use delta method: std(10^x) ≈ 10^x * ln(10) * std(x)
+            qi_std = qi_mean * 2.302585 * qi_log_std
+        else:
+            # Fallback if not trained (shouldn't happen in normal use)
+            obj_mean, obj_std = obj_mean_norm, obj_std_norm
+            mhd_mean, mhd_std = mhd_mean_norm, mhd_std_norm
+            qi_mean, qi_std = qi_mean_norm, qi_std_norm
+
+        return (obj_mean, obj_std, mhd_mean, mhd_std, qi_mean, qi_std)
 
     def rank_candidates(
         self,

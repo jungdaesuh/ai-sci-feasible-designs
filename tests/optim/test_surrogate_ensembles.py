@@ -64,7 +64,11 @@ def test_surrogate_ensemble_init_and_fit():
 
 
 def test_surrogate_ensemble_predict_mean():
-    """Test that predict_torch returns the mean of the ensemble."""
+    """Test that predict_torch returns the denormalized mean of the ensemble.
+
+    The surrogate trains on normalized targets and denormalizes predictions.
+    We verify that the denormalized output equals the expected denormalized mean.
+    """
     n_ensembles = 2
     surrogate = NeuralOperatorSurrogate(
         min_samples=4, epochs=2, n_ensembles=n_ensembles, hidden_dim=16
@@ -83,17 +87,26 @@ def test_surrogate_ensemble_predict_mean():
     # Set nfp to 3
     x[0, -1] = 3.0
 
-    # Get individual predictions manually
-    obj_preds = []
+    # Get individual predictions manually (in normalized space)
+    obj_preds_norm = []
     for model in surrogate._models:
         model.eval()
         with torch.no_grad():
             o, _, _ = model(x)
-            obj_preds.append(o.item())
+            obj_preds_norm.append(o.item())
 
-    mean_expected = np.mean(obj_preds)
+    mean_normalized = np.mean(obj_preds_norm)
 
-    # Get ensemble prediction
+    # Denormalize the expected mean using surrogate's stored statistics
+    # obj_denorm = obj_norm * std + mean
+    if hasattr(surrogate, "_y_obj_mean"):
+        mean_expected = (
+            mean_normalized * surrogate._y_obj_std.item() + surrogate._y_obj_mean.item()
+        )
+    else:
+        mean_expected = mean_normalized
+
+    # Get ensemble prediction (denormalized)
     with torch.no_grad():
         obj, _, _, _, _, _ = surrogate.predict_torch(x)
 

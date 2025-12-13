@@ -506,7 +506,6 @@ def forward_model(
     )
     settings_hash = hashlib.sha256(settings_json.encode("utf-8")).hexdigest()
     cache_key = f"{d_hash}:{settings_hash}"
-    cache_key = f"{d_hash}:{settings_hash}"
 
     if use_cache and cache_key in _EVALUATION_CACHE:
         _CACHE_STATS["hits"] += 1

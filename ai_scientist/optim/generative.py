@@ -194,9 +194,31 @@ class DiffusionDesignModel:
         return self.__model is not None
 
     def _build_noise_schedule(self) -> None:
+        """Build the DDPM noise schedule with proper posterior variance.
+
+        The posterior variance in DDPM is:
+            beta_tilde_t = beta_t * (1 - alpha_hat_{t-1}) / (1 - alpha_hat_t)
+
+        This is the variance of q(x_{t-1} | x_t, x_0), which is the correct
+        variance to use during sampling (not simply beta_t).
+        """
         self.beta = torch.linspace(1e-4, 0.02, self._timesteps, device=self._device)
         self.alpha = 1.0 - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+
+        # Compute alpha_hat_prev: alpha_hat shifted by 1 with alpha_hat[-1] = 1.0
+        # alpha_hat_prev[t] = alpha_hat[t-1] for t > 0, else 1.0
+        self.alpha_hat_prev = torch.cat(
+            [torch.tensor([1.0], device=self._device), self.alpha_hat[:-1]]
+        )
+
+        # Posterior variance: beta_tilde = beta * (1 - alpha_hat_prev) / (1 - alpha_hat)
+        # Clamp denominator to avoid division by zero at t=0
+        self.beta_tilde = (
+            self.beta
+            * (1.0 - self.alpha_hat_prev)
+            / (1.0 - self.alpha_hat).clamp(min=1e-8)
+        )
 
     def _ensure_model(self) -> None:
         if self.__model is not None:
@@ -235,10 +257,24 @@ class DiffusionDesignModel:
 
         # Helper to find values in metrics or params
         def get_val(key):
+            # Try metrics first
             if isinstance(metrics, dict):
                 v = metrics.get(key)
                 if v is not None:
                     return float(v)
+            elif hasattr(metrics, "model_dump"):
+                # Pydantic model - use model_dump()
+                m_dict = metrics.model_dump()
+                v = m_dict.get(key)
+                if v is not None:
+                    return float(v)
+            elif hasattr(metrics, key):
+                # Direct attribute access
+                v = getattr(metrics, key, None)
+                if v is not None:
+                    return float(v)
+
+            # Try params
             if isinstance(params, dict):
                 v = params.get(key)
                 if v is not None:
@@ -596,22 +632,29 @@ class DiffusionDesignModel:
                 generator=rng,
             )
 
+            # DDPM reverse process: x_{t-1} = mu_theta(x_t, t) + sigma_t * z
+            # where mu_theta = (1/sqrt(alpha_t)) * (x_t - beta_t/sqrt(1-alpha_hat_t) * eps_theta)
+            # and sigma_t = sqrt(beta_tilde_t) is the POSTERIOR variance (not beta_t!)
             for i in reversed(range(self._timesteps)):
                 t = torch.full((n_samples,), i, device=self._device, dtype=torch.long)
                 predicted_noise = self._model(x, t, M)
 
                 alpha = self.alpha[i]
                 alpha_hat = self.alpha_hat[i]
-                beta = self.beta[i]
+                beta_tilde = self.beta_tilde[i]  # Use posterior variance, not beta!
 
                 if i > 0:
                     noise = torch.randn_like(x)
                 else:
                     noise = torch.zeros_like(x)
 
-                x = (1 / torch.sqrt(alpha)) * (
+                # Compute mean: mu_theta(x_t, t)
+                mu = (1 / torch.sqrt(alpha)) * (
                     x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise
-                ) + torch.sqrt(beta) * noise
+                )
+
+                # Add noise with correct posterior variance
+                x = mu + torch.sqrt(beta_tilde) * noise
 
             # Move to CPU
             latent_samples = x.cpu().numpy()
@@ -878,16 +921,18 @@ class GenerativeDesignModel:
 
                 recon, mu, logvar = self._model(x_img)
 
-                # Loss
-                # MSE between recon and x_img
-                recon_loss = F.mse_loss(recon, x_img, reduction="sum") / batch_size
+                # Loss - using proper per-element normalization for both terms
+                # This ensures consistent scaling regardless of input dimensions
+                #
+                # Reconstruction: MSE per element (mean over batch AND spatial dims)
+                recon_loss = F.mse_loss(recon, x_img, reduction="mean")
 
-                # KLD
-                # -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-                kld_loss = (
-                    -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
-                )
+                # KLD: -0.5 * mean(1 + log(sigma^2) - mu^2 - sigma^2)
+                # Using mean over both batch and latent dims for consistent scaling
+                kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
+                # With proper normalization, kl_weight should be ~1.0
+                # But we keep user-specified weight for backward compatibility
                 loss = recon_loss + self._kl_weight * kld_loss
 
                 loss.backward()

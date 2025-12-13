@@ -212,9 +212,14 @@ def gradient_descent_on_inputs(
             # MHD: Good if > 0. Pessimistic: mean - beta*std
             viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
 
-            # QI: Good if < 0 (if centered) or just minimize it.
-            # Using raw value as penalty (assuming minimizing QI).
-            viol_qi = torch.relu(pred_qi.squeeze() + beta * std_qi.squeeze())
+            # QI constraint: log10(qi) <= -3.5 (P3 default threshold)
+            # Surrogate predicts raw QI, so we convert to log10 for comparison
+            qi_raw = pred_qi.squeeze()
+            qi_positive = qi_raw.abs() + QI_EPS
+            log10_qi = torch.log10(qi_positive)
+            s_qi = std_qi.squeeze()
+            s_log10_qi = s_qi / (qi_positive * 2.302585)  # Uncertainty propagation
+            viol_qi = torch.relu((log10_qi + beta * s_log10_qi) - LOG10_QI_THRESHOLD_P3)
 
             # Elongation: Good if < MAX_ELONGATION
             viol_elo = torch.relu(
@@ -260,16 +265,21 @@ def gradient_descent_on_inputs(
     return optimized_candidates
 
 
-# Problem-dependent QI thresholds (raw values)
-QI_THRESHOLD_P2 = 1e-4  # log10(qi) <= -4.0
-QI_THRESHOLD_P3 = 3.16e-4  # log10(qi) <= -3.5
-QI_EPS = 1e-12  # Small epsilon for numerical stability
+# Problem-dependent QI thresholds
+# The physics constraints are defined in LOG space: log10(qi) <= threshold
+# We use LOG10 thresholds here and compare log10(qi) to threshold.
+# This is more numerically stable than comparing raw QI values, especially
+# since QI spans many orders of magnitude (1e-6 to 1e-1).
+LOG10_QI_THRESHOLD_P2 = -4.0  # Constraint: log10(qi) <= -4.0
+LOG10_QI_THRESHOLD_P3 = -3.5  # Constraint: log10(qi) <= -3.5
+QI_EPS = 1e-12  # Small epsilon for numerical stability in log computation
 
 
-def _get_qi_threshold(problem: str) -> float:
+def _get_log10_qi_threshold(problem: str) -> float:
+    """Get the log10(qi) threshold for the given problem."""
     if problem.lower().startswith("p2"):
-        return QI_THRESHOLD_P2
-    return QI_THRESHOLD_P3
+        return LOG10_QI_THRESHOLD_P2
+    return LOG10_QI_THRESHOLD_P3
 
 
 def optimize_alm_inner_loop(
@@ -320,7 +330,7 @@ def optimize_alm_inner_loop(
 
     optimizer = torch.optim.Adam([x_torch], lr=lr)
 
-    qi_threshold = _get_qi_threshold(problem)
+    log10_qi_threshold = _get_log10_qi_threshold(problem)
     beta = 0.1  # Uncertainty penalty factor
 
     for _ in range(steps):
@@ -363,7 +373,7 @@ def optimize_alm_inner_loop(
 
         obj = pred_obj.squeeze() + beta * std_obj.squeeze()
         mhd = pred_mhd.squeeze()
-        qi = pred_qi.squeeze()
+        qi_raw = pred_qi.squeeze()  # Raw QI value from surrogate
         elo = pred_elo.squeeze()
 
         # Std
@@ -381,13 +391,22 @@ def optimize_alm_inner_loop(
             # Pessimistic: mean + beta*std
             obj_term = obj
 
-        # QI positivity with scale preservation (abs() + eps instead of softplus)
-        # This keeps raw QI values in correct order of magnitude
-        qi_positive = qi.abs() + QI_EPS
+        # QI constraint: log10(qi) <= threshold
+        # The surrogate predicts RAW qi, so we convert to log10 for comparison
+        # This is dimensionally correct since the physics constraint is in log space
+        qi_positive = qi_raw.abs() + QI_EPS
+        log10_qi = torch.log10(qi_positive)
+
+        # Uncertainty propagation: for log transformation, d(log10(x))/dx = 1/(x*ln(10))
+        # So std(log10(qi)) ≈ std(qi) / (qi * ln(10))
+        s_log10_qi = s_qi / (qi_positive * 2.302585)  # ln(10) ≈ 2.302585
 
         # Constraints (Pessimistic)
+        # MHD: Good if > 0. Pessimistic: mean - beta*std (lower confidence bound)
         c1 = torch.relu(-(mhd - beta * s_mhd))
-        c2 = torch.relu((qi_positive + beta * s_qi) - qi_threshold)
+        # QI: Good if log10(qi) < threshold. Pessimistic: mean + beta*std (upper confidence bound)
+        c2 = torch.relu((log10_qi + beta * s_log10_qi) - log10_qi_threshold)
+        # Elongation: Good if < MAX_ELONGATION. Pessimistic: mean + beta*std
         c3 = torch.relu((elo + beta * s_elo) - MAX_ELONGATION)
 
         constraints = torch.stack([c1, c2, c3])

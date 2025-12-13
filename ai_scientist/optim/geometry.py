@@ -452,26 +452,35 @@ def elongation(
     var_Z = torch.mean(Zc**2, dim=1)
     cov_RZ = torch.mean(Rc * Zc, dim=1)
 
-    # Eigenvalues of 2x2 covariance matrix
+    # Eigenvalues of 2x2 covariance matrix: [[var_R, cov_RZ], [cov_RZ, var_Z]]
+    # Eigenvalues: lambda = (tr ± sqrt(tr² - 4*det)) / 2
     tr = var_R + var_Z
     det = var_R * var_Z - cov_RZ**2
 
     # Numerical stability: prevent sqrt of negative values from floating-point error
     # (det can exceed tr²/4 slightly due to numerical noise)
-    gap = torch.clamp(tr**2 - 4 * det, min=0.0)
-    sqrt_gap = torch.sqrt(gap)
+    discriminant = torch.clamp(tr**2 - 4 * det, min=0.0)
+    sqrt_discriminant = torch.sqrt(discriminant)
 
-    l1 = (tr + sqrt_gap) / 2
-    l2 = (tr - sqrt_gap) / 2
+    # Compute l1 (larger eigenvalue) directly
+    l1 = (tr + sqrt_discriminant) / 2
+
+    # NUMERICAL STABILITY FIX:
+    # Instead of l2 = (tr - sqrt_discriminant) / 2, which suffers from catastrophic
+    # cancellation when tr ≈ sqrt_discriminant (near-circular cross-sections),
+    # we use: l2 = det / l1 (since l1 * l2 = det)
+    # This is stable because l1 is always well-conditioned.
+    l1_safe = torch.clamp(l1, min=1e-10)
+    l2 = det / l1_safe
 
     # Detect degenerate cross-sections (point-like, near-zero variance in both axes)
     # These should return elongation = 1.0 (isotropic/circular assumption)
     MIN_TRACE = 1e-6
     is_degenerate = tr < MIN_TRACE
 
-    # Safe ratio: clamp both eigenvalues to prevent 0/0 or inf scenarios
-    l1_safe = torch.clamp(l1, min=1e-8)
-    l2_safe = torch.clamp(l2, min=1e-8)
+    # For elongation, we need sqrt(l1/l2) = sqrt(l1² / det)
+    # This avoids issues when l2 is very small
+    l2_safe = torch.clamp(l2, min=1e-10)
 
     # Elongation per slice
     elo_slice = torch.sqrt(l1_safe / l2_safe)
@@ -493,32 +502,42 @@ def aspect_ratio(
     """
     Compute Aspect Ratio = R_major / r_minor_eff.
 
-    R_major: R(0,0) component (approximate).
-    r_minor_eff: Average effective radius sqrt(Area/pi).
+    R_major: Mean of R along the magnetic axis (geometric center at theta=0),
+             averaged over all toroidal angles zeta. This correctly accounts
+             for all toroidal mode contributions (n != 0).
 
-    Corrected to use Green's theorem symmetric form for Area:
-    Area = 0.5 * int (R * Z_theta - Z * R_theta) dtheta
+    r_minor_eff: Average effective radius sqrt(Area/pi) where Area is computed
+                 using Green's theorem: Area = 0.5 * int (R * Z_theta - Z * R_theta) dtheta
+
+    Note: Using R(m=0, n=0) coefficient directly would be incorrect for stellarators
+    with significant n != 0 modes, as it ignores the toroidal oscillations.
     """
-    ntor = (r_cos.shape[2] - 1) // 2
-    # Major radius approx (m=0, n=0)
-    R00 = r_cos[:, 0, ntor]
-
     d = _compute_derivatives(r_cos, z_sin, n_field_periods, n_theta, n_zeta)
     R, Z = d["R"], d["Z"]
     R_t, Z_t = d["R_t"], d["Z_t"]  # d/dtheta
 
+    # R_major: Average R at the geometric center of each cross-section
+    # The geometric center at each zeta is approximately R_mean over theta
+    # A more precise definition: mean of R along theta=0 (outboard midplane)
+    # For a centered stellarator, this equals the average R over the surface
+    # We use the mean over all (theta, zeta) as a robust approximation
+    R_center_per_zeta = torch.mean(R, dim=1)  # Mean over theta -> (B, n_zeta)
+    R_major = torch.mean(R_center_per_zeta, dim=1)  # Mean over zeta -> (B,)
+
     # Area = 0.5 * integral (R dZ - Z dR)
     #      = 0.5 * integral (R Z_t - Z R_t) dtheta
     # Discrete integral: mean(...) * 2pi
-
     integrand = R * Z_t - Z * R_t
     cross_section_area = 0.5 * torch.mean(integrand, dim=1) * 2 * torch.pi
 
-    # Ensure positive area
+    # Ensure positive area and compute effective minor radius
     r_minor = torch.sqrt(torch.abs(cross_section_area) / torch.pi)
     mean_r_minor = torch.mean(r_minor, dim=1)
 
-    return R00 / mean_r_minor
+    # Clamp minor radius to avoid division by zero
+    mean_r_minor = torch.clamp(mean_r_minor, min=1e-6)
+
+    return R_major / mean_r_minor
 
 
 def mean_curvature(

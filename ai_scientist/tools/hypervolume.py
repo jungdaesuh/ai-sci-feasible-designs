@@ -1,4 +1,19 @@
-"""Hypervolume and Pareto front utilities."""
+"""Hypervolume and Pareto front utilities.
+
+Sign Convention (P3 Multi-Objective):
+-------------------------------------
+P3 has two objectives:
+  1. Minimize aspect_ratio (lower is better - more compact)
+  2. Maximize gradient (L_∇B) (higher is better - simpler coils)
+
+For hypervolume calculation with pymoo (which assumes minimization):
+  - We convert to minimization form: (-gradient, aspect_ratio)
+  - Reference point: (1.0, 20.0) means worst acceptable is gradient=1, aspect=20
+
+For Pareto dominance (using natural units):
+  - Point A dominates B if: A.gradient >= B.gradient AND A.aspect <= B.aspect
+    with at least one strict inequality.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +23,8 @@ from typing import Any, Mapping, Sequence, Tuple
 import numpy as np
 from pymoo.indicators import hv as pymoo_hv
 
+# Reference point for hypervolume in MINIMIZATION form: (-gradient, aspect_ratio)
+# This means: worst acceptable gradient is -1 (i.e., gradient=1), worst aspect is 20
 _P3_REFERENCE_POINT: Tuple[float, float] = (1.0, 20.0)
 
 
@@ -42,24 +59,49 @@ class ParetoEntry:
         }
 
 
-def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
+def _to_minimization_form(gradient: float, aspect: float) -> Tuple[float, float]:
+    """Convert natural units (max gradient, min aspect) to minimization form for HV.
+
+    Returns (-gradient, aspect) so both objectives are minimized.
+    """
+    return -gradient, aspect
+
+
+def _extract_natural_objectives(metrics: Mapping[str, Any]) -> Tuple[float, float]:
+    """Extract (gradient, aspect_ratio) in natural units from metrics.
+
+    Returns:
+        (gradient, aspect_ratio) where higher gradient is better, lower aspect is better.
+    """
     gradient = float(
         metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
     )
     aspect = float(
         metrics.get("aspect_ratio", 1e9)
     )  # Large value if aspect ratio is missing
-    return -gradient, aspect
+    return gradient, aspect
 
 
-def _extract_p3_point(metrics: Mapping[str, Any]) -> Tuple[float, float]:
-    vector = _objective_vector(metrics)
-    return -vector[0], vector[1]
+def _objective_vector(metrics: Mapping[str, Any]) -> Tuple[float, float]:
+    """Return the P3 objective vector in minimization form for hypervolume.
+
+    This matches `constellaration.problems.MHDStableQIStellarator._score`:
+    X = [(-gradient, aspect_ratio), ...]
+    """
+    gradient, aspect = _extract_natural_objectives(metrics)
+    return _to_minimization_form(gradient, aspect)
 
 
 def _dominates(a: Tuple[float, float], b: Tuple[float, float]) -> bool:
-    """Return True if objective a Pareto dominates b (higher gradient, lower aspect)."""
+    """Return True if point a Pareto dominates b in natural units.
 
+    Args:
+        a: (gradient_a, aspect_a) - natural units
+        b: (gradient_b, aspect_b) - natural units
+
+    Returns:
+        True if a dominates b (higher gradient AND lower aspect, with strict inequality).
+    """
     higher_gradient = a[0] >= b[0]
     lower_aspect = a[1] <= b[1]
     strict = a[0] > b[0] or a[1] < b[1]
@@ -82,14 +124,20 @@ def summarize_p3_candidates(
     *,
     reference_point: Tuple[float, float] = _P3_REFERENCE_POINT,
 ) -> P3Summary:
-    """Produce the hypervolume score and all non-dominated seeds for a candidate batch."""
+    """Produce the hypervolume score and all non-dominated seeds for a candidate batch.
 
+    All internal calculations use natural units (gradient, aspect) where:
+    - Higher gradient is better
+    - Lower aspect is better
+
+    Hypervolume is computed by converting to minimization form (-gradient, aspect).
+    """
     from ai_scientist.tools.evaluation import _DEFAULT_RELATIVE_TOLERANCE, design_hash
 
     @dataclass(frozen=True)
     class _P3Entry:
-        gradient: float
-        aspect: float
+        gradient: float  # Natural units: higher is better
+        aspect: float  # Natural units: lower is better
         seed: int
         evaluation: Mapping[str, Any]
         feasibility: float
@@ -102,7 +150,8 @@ def summarize_p3_candidates(
             design_id = design_hash(candidate.get("params", {}))
         design_id = str(design_id)
         eval_metrics = candidate["evaluation"]["metrics"]
-        gradient, aspect = _extract_p3_point(eval_metrics)
+        # Extract in natural units (gradient, aspect)
+        gradient, aspect = _extract_natural_objectives(eval_metrics)
         seed = int(candidate.get("seed", -1))
         feasibility = float(candidate["evaluation"]["feasibility"])
         entries.append(
@@ -116,24 +165,27 @@ def summarize_p3_candidates(
             )
         )
 
+    # Build HV vectors in minimization form (-gradient, aspect)
     hv_vectors: list[Tuple[float, float]] = []
     for entry in entries:
         if entry.feasibility > _DEFAULT_RELATIVE_TOLERANCE:
             continue
-        hv_vectors.append((-entry.gradient, entry.aspect))
+        hv_vectors.append(_to_minimization_form(entry.gradient, entry.aspect))
 
+    # Find non-dominated (Pareto optimal) entries using natural units
     pareto_entries: list[ParetoEntry] = []
     for current_index, entry in enumerate(entries):
         if entry.feasibility > _DEFAULT_RELATIVE_TOLERANCE:
             continue
-        point = (entry.gradient, entry.aspect)
+        current_point = (entry.gradient, entry.aspect)  # Natural units
         dominated = False
         for other_index, other in enumerate(entries):
             if other_index == current_index:
                 continue
             if other.feasibility > _DEFAULT_RELATIVE_TOLERANCE:
                 continue
-            if _dominates((other.gradient, other.aspect), point):
+            other_point = (other.gradient, other.aspect)  # Natural units
+            if _dominates(other_point, current_point):
                 dominated = True
                 break
         if dominated:
@@ -150,6 +202,7 @@ def summarize_p3_candidates(
             )
         )
 
+    # Sort by gradient descending (best first), then aspect ascending
     pareto_entries.sort(key=lambda item: (-item.gradient, item.aspect_ratio))
     return P3Summary(
         hv_score=_hypervolume_minimization(hv_vectors, reference_point),
