@@ -63,7 +63,11 @@ def propose_boundary(
                 new_params["r_cos"] = r_cos.tolist()
         if "z_sin" in new_params and new_params["z_sin"] is not None:
             z_sin = np.asarray(new_params["z_sin"])
-            z_sin[0, :] = 0.0
+            if z_sin.ndim > 1:
+                center_idx = z_sin.shape[1] // 2
+                # Keep the canonical convention used by constellaration masks:
+                # for m=0 we only keep toroidal modes with n>=1.
+                z_sin[0, : center_idx + 1] = 0.0
             new_params["z_sin"] = z_sin.tolist()
 
     return new_params
