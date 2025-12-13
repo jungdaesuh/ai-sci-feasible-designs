@@ -319,6 +319,7 @@ def gradient_descent_on_inputs(
         # 4. Optimization Loop with early stopping
         optimizer = torch.optim.Adam([x_torch], lr=lr)
         best_loss = float("inf")
+        best_x_torch = x_torch.detach().clone()  # Capture initial state as best
         patience_counter = 0
 
         for step in range(steps):
@@ -422,18 +423,19 @@ def gradient_descent_on_inputs(
             loss.backward()
             optimizer.step()
 
-            # Early stopping check
+            # Early stopping check: track best parameters seen
             current_loss = loss.item()
             if current_loss < best_loss - EARLY_STOPPING_MIN_IMPROVEMENT:
                 best_loss = current_loss
+                best_x_torch = x_torch.detach().clone()  # Capture best parameters
                 patience_counter = 0
             else:
                 patience_counter += 1
                 if patience_counter >= EARLY_STOPPING_PATIENCE:
                     break  # Converged
 
-        # 5. Reconstruction using local helper (mock-safe)
-        x_final_np = x_torch.detach().cpu().numpy()
+        # 5. Reconstruction using best parameters (not just last step)
+        x_final_np = best_x_torch.cpu().numpy()
         params_new = _reconstruct_params(x_final_np, metadata)
 
         optimized_candidates.append(

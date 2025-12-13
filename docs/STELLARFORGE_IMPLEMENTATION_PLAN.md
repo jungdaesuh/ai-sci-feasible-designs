@@ -1,7 +1,7 @@
 # StellarForge Implementation Plan (Paper-Backed v2)
 
-> **Document Status**: Implementation Plan for StellarForge Tri-Hybrid Architecture  
-> **Last Updated**: 2025-12-09  
+> **Document Status**: Implementation Plan for StellarForge Tri-Hybrid Architecture
+> **Last Updated**: 2025-12-09
 > **Based on**: Padidar et al. (2025), Stark et al. (2025), Ridwan et al. (2025)
 
 ---
@@ -65,7 +65,7 @@ This document details the implementation plan for upgrading the AI Scientist sys
 
 ### Phase 1: Generative Model Upgrade (Priority: Critical)
 
-**Timeline**: 2-3 days  
+**Timeline**: 2-3 days
 **Compute**: A100 GPU or equivalent
 
 #### 4.1.1 Configuration Updates
@@ -82,7 +82,7 @@ class GenerativeConfig:
     learning_rate: float = 1e-3
     epochs: int = 250                    # Paper: 250 epochs
     kl_weight: float = 0.001
-    
+
     # NEW: Paper-backed specifications
     checkpoint_path: Path | None = None  # Pre-trained model path
     device: str = "cuda"                 # Compute device
@@ -105,16 +105,16 @@ class DiffusionDesignModel:
     def __init__(self, ..., pca_components: int = 50):
         self.pca = None
         self.pca_components = pca_components
-        
+
     def fit(self, boundaries: np.ndarray, metrics: np.ndarray):
         """Train diffusion model on PCA-compressed latent space."""
         # Step 1: Fit PCA (661 → 50)
         self.pca = PCA(n_components=self.pca_components)
         latent = self.pca.fit_transform(boundaries)
-        
+
         # Step 2: Train diffusion on latent
         self._train_diffusion(latent, metrics)
-        
+
     def sample(self, n_samples: int, target_metrics: dict) -> np.ndarray:
         """Generate samples in latent space, then inverse transform."""
         latent_samples = self._diffusion_sample(n_samples, target_metrics)
@@ -138,19 +138,19 @@ class StellaratorDiffusion(nn.Module):
         input_embed_dim: int = 64,  # Paper: x → 64
     ):
         super().__init__()
-        
+
         # Sinusoidal embeddings (per Padidar Appendix B)
         self.time_embed = SinusoidalEmbedding(time_embed_dim)
         self.input_embed = nn.Linear(input_dim, input_embed_dim)
         self.condition_embed = nn.Linear(4, condition_dim)  # (ι, A, nfp, N)
-        
+
         # 4 hidden layers × 2048, GELU activation
         total_embed = input_embed_dim + time_embed_dim + condition_dim
         layers = [nn.Linear(total_embed, hidden_dim), nn.GELU()]
         for _ in range(n_layers - 1):
             layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.GELU()])
         layers.append(nn.Linear(hidden_dim, input_dim))
-        
+
         self.net = nn.Sequential(*layers)
 ```
 
@@ -163,7 +163,7 @@ Update `create_generative_model()`:
 def create_generative_model(cfg: ExperimentConfig) -> DiffusionDesignModel | None:
     if not cfg.generative.enabled:
         return None
-    
+
     model = DiffusionDesignModel(
         hidden_dim=cfg.generative.hidden_dim,
         n_layers=cfg.generative.n_layers,
@@ -171,7 +171,7 @@ def create_generative_model(cfg: ExperimentConfig) -> DiffusionDesignModel | Non
         learning_rate=cfg.generative.learning_rate,
         epochs=cfg.generative.epochs,
     )
-    
+
     # Load pre-trained checkpoint
     if cfg.generative.checkpoint_path:
         ckpt_path = Path(cfg.generative.checkpoint_path)
@@ -180,7 +180,7 @@ def create_generative_model(cfg: ExperimentConfig) -> DiffusionDesignModel | Non
             print(f"[runner] Loaded Dreamer checkpoint: {ckpt_path}")
         else:
             print(f"[runner] Warning: Checkpoint not found: {ckpt_path}")
-    
+
     return model
 ```
 
@@ -192,7 +192,7 @@ Parameterize `ExplorationWorker.run()`:
 ```python
 def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
     n_samples = context.get("n_samples", 10)
-    
+
     # Dynamic target metrics (not hardcoded)
     target_metrics = context.get("target_metrics", {
         "aspect_ratio": self.cfg.optimization.target_aspect_ratio,
@@ -200,7 +200,7 @@ def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
         "nfp": self.cfg.nfp,
         "N": 1 if self.cfg.quasisymmetry == "QH" else 0,
     })
-    
+
     if isinstance(self.generative_model, DiffusionDesignModel):
         samples = self.generative_model.sample(n_samples, target_metrics)
     # ... rest of method
@@ -210,7 +210,7 @@ def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
 
 ### Phase 2: Geometric Pre-relaxation (Priority: High)
 
-**Timeline**: 1-2 days  
+**Timeline**: 1-2 days
 **Based on**: LEGO-xtal (Ridwan et al., 2025)
 
 #### 4.2.1 New File: Pre-relaxation Module
@@ -221,8 +221,8 @@ def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
 """
 Geometric pre-relaxation before VMEC++ evaluation.
 
-Based on LEGO-xtal (Ridwan et al., 2025): Optimize generated structures to 
-target local environment BEFORE expensive physics simulation. This filters 
+Based on LEGO-xtal (Ridwan et al., 2025): Optimize generated structures to
+target local environment BEFORE expensive physics simulation. This filters
 out geometrically invalid candidates in milliseconds vs minutes with VMEC++.
 """
 
@@ -236,20 +236,20 @@ def compute_geometric_energy(boundary: np.ndarray) -> float:
     1. High curvature regions
     2. Self-intersections
     3. Deviation from target aspect ratio
-    
+
     Returns:
         float: Geometric energy (lower is better)
     """
     # Convert boundary coefficients to surface points
     surface_points = fourier_to_xyz(boundary)
-    
+
     # Curvature penalty (prefer smooth surfaces)
     curvature = compute_mean_curvature(surface_points)
     curvature_penalty = np.mean(curvature ** 2)
-    
+
     # Self-intersection penalty
     intersection_penalty = detect_self_intersection(surface_points)
-    
+
     # Total energy
     return curvature_penalty + 10.0 * intersection_penalty
 
@@ -262,34 +262,34 @@ def prerelax_boundary(
 ) -> Tuple[np.ndarray, bool]:
     """
     Gradient descent to minimize geometric energy.
-    
+
     Args:
         boundary: Initial Fourier coefficients (661-dim)
         steps: Number of optimization steps
         lr: Learning rate
         threshold: Energy threshold for acceptance
-        
+
     Returns:
         Tuple of (relaxed_boundary, is_valid)
     """
     x = torch.tensor(boundary, requires_grad=True, dtype=torch.float32)
     optimizer = torch.optim.Adam([x], lr=lr)
-    
+
     for step in range(steps):
         optimizer.zero_grad()
-        
+
         # Compute energy (with autograd)
         energy = _geometric_energy_torch(x)
         energy.backward()
         optimizer.step()
-        
+
         # Early termination if converged
         if energy.item() < threshold:
             break
-    
+
     relaxed = x.detach().numpy()
     is_valid = compute_geometric_energy(relaxed) < threshold
-    
+
     return relaxed, is_valid
 ```
 
@@ -306,18 +306,18 @@ def evaluate_boundary(
     prerelax_steps: int = 50,
 ) -> EvaluationResult:
     """Evaluate a boundary with optional geometric pre-relaxation."""
-    
+
     if prerelax:
         from ai_scientist.optim.prerelax import prerelax_boundary
         boundary, is_valid = prerelax_boundary(boundary, steps=prerelax_steps)
-        
+
         if not is_valid:
             # Skip VMEC++ for geometrically invalid boundaries
             return EvaluationResult(
                 success=False,
                 error="Failed geometric pre-relaxation",
             )
-    
+
     # Continue with VMEC++ evaluation
     return _run_vmec(boundary, settings)
 ```
@@ -326,7 +326,7 @@ def evaluate_boundary(
 
 ### Phase 3: RL Agent Integration (Priority: Medium)
 
-**Timeline**: 3-5 days  
+**Timeline**: 3-5 days
 **Based on**: BoltzGen (Stark et al., 2025), StellarForge Plan
 
 #### 4.3.1 New File: RL Environment
@@ -348,9 +348,9 @@ from gymnasium import spaces
 
 class StellaratorEnv(gym.Env):
     """Stellarator refinement environment for PPO/SAC training."""
-    
+
     metadata = {"render_modes": []}
-    
+
     def __init__(
         self,
         surrogate,
@@ -360,77 +360,77 @@ class StellaratorEnv(gym.Env):
         cliff_penalty: float = 100.0,
     ):
         super().__init__()
-        
+
         self.surrogate = surrogate
         self.target_metrics = target_metrics
         self.delta_scale = delta_scale
         self.max_steps = max_steps
         self.cliff_penalty = cliff_penalty
-        
+
         # State: Fourier coefficients (661-dim)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(661,), dtype=np.float32
         )
-        
+
         # Action: Delta adjustments to coefficients
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(661,), dtype=np.float32
         )
-        
+
         self.state = None
         self.step_count = 0
-        
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
+
         # Initialize from a Dreamer-generated seed
         if options and "initial_boundary" in options:
             self.state = options["initial_boundary"].copy()
         else:
             self.state = np.random.randn(661).astype(np.float32)
-        
+
         self.step_count = 0
         return self.state, {}
-    
+
     def step(self, action: np.ndarray):
         # Apply micro-surgery delta
         self.state += action * self.delta_scale
         self.step_count += 1
-        
+
         # Get surrogate predictions (milliseconds)
         pred = self.surrogate.predict(self.state.reshape(1, -1))[0]
-        
+
         # Compute reward with cliff penalties
         reward = self._compute_reward(pred)
-        
+
         # Check termination
         terminated = self._is_feasible(pred)
         truncated = self.step_count >= self.max_steps
-        
+
         info = {"predictions": pred}
-        
+
         return self.state, reward, terminated, truncated, info
-    
+
     def _compute_reward(self, pred: dict) -> float:
         """Reward shaping with cliff penalties for constraint violations."""
         # Objective reward (maximize L_∇B)
         objective_reward = pred.get("L_grad_B", 0.0)
-        
+
         # Cliff penalties for hard constraints
         penalties = 0.0
-        
+
         # Vacuum well must be positive (W > 0)
         vacuum_well = pred.get("vacuum_well", 0.0)
         if vacuum_well < 0:
             penalties += self.cliff_penalty * abs(vacuum_well)
-        
+
         # Magnetic well constraint
         magnetic_well = pred.get("magnetic_well", 0.0)
         if magnetic_well < 0:
             penalties += self.cliff_penalty * abs(magnetic_well)
-        
+
         return objective_reward - penalties
-    
+
     def _is_feasible(self, pred: dict) -> bool:
         """Check if current state satisfies all constraints."""
         return (
@@ -457,10 +457,10 @@ def train_rl_agent(
     checkpoint_dir: str = "checkpoints/rl",
 ):
     """Train PPO agent for micro-surgery refinement."""
-    
+
     # Create environment
     env = StellaratorEnv(surrogate, target_metrics)
-    
+
     # Initialize PPO (CleanRL implementation)
     agent = PPO(
         env=env,
@@ -472,11 +472,11 @@ def train_rl_agent(
         gae_lambda=0.95,
         clip_range=0.2,
     )
-    
+
     # Train
     agent.learn(total_timesteps=total_timesteps)
     agent.save(f"{checkpoint_dir}/ppo_stellarator.pt")
-    
+
     return agent
 ```
 
@@ -637,7 +637,7 @@ device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 generative:
   enabled: true
   backend: diffusion
-  
+
   # Paper specs (Padidar et al.)
   hidden_dim: 2048
   n_layers: 4
@@ -646,7 +646,7 @@ generative:
   epochs: 250
   diffusion_timesteps: 200
   learning_rate: 0.0005
-  
+
   # Checkpoint
   checkpoint_path: checkpoints/diffusion_paper_spec.pt
   device: cuda

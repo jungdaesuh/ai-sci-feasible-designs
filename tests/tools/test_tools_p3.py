@@ -9,7 +9,9 @@ def test_evaluate_p3_records_high_fidelity(mock_backend):
     params = base_params()
 
     result = tools.evaluate_p3(params)
-    assert result["objective"] == pytest.approx(float(result["metrics"]["aspect_ratio"]))
+    assert result["objective"] == pytest.approx(
+        float(result["metrics"]["aspect_ratio"])
+    )
     assert result["score"] > 0
     assert "hv" in result
     assert mock_backend.call_count == 1

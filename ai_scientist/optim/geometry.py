@@ -47,6 +47,12 @@ def fourier_to_real_space(
     R(theta, zeta) = sum_{m,n} r_cos[m,n] * cos(m*theta - n*Nfp*zeta)
     Z(theta, zeta) = sum_{m,n} z_sin[m,n] * sin(m*theta - n*Nfp*zeta)
 
+    Memory Optimization:
+        Uses trigonometric separability to avoid building a full (M, N, T, Z) angle tensor.
+        cos(mθ - nNζ) = cos(mθ)cos(nNζ) + sin(mθ)sin(nNζ)
+        sin(mθ - nNζ) = sin(mθ)cos(nNζ) - cos(mθ)sin(nNζ)
+        This reduces peak memory from O(M*N*T*Z) to O(M*Z) + O(M*T) + O(N*Z).
+
     Args:
         r_cos: Fourier coefficients for R [mpol+1, 2*ntor+1] (numpy or torch)
         z_sin: Fourier coefficients for Z [mpol+1, 2*ntor+1] (numpy or torch)
@@ -72,7 +78,6 @@ def fourier_to_real_space(
 
     # Create grid
     if is_torch:
-        # torch.linspace includes endpoint by default. Simulate endpoint=False by adding one step and slicing.
         theta = torch.linspace(0, 2 * pi, n_theta + 1)[:-1]
         zeta_one_period = torch.linspace(0, 2 * pi / n_field_periods, n_zeta + 1)[:-1]
     else:
@@ -81,9 +86,7 @@ def fourier_to_real_space(
             0, 2 * pi / n_field_periods, n_zeta, endpoint=False
         )
 
-    # Repeat for all field periods? Or just return one period?
-    # Usually GNNs might operate on one period or the whole torus.
-    # Let's generate the full torus for completeness in visualization/point clouds.
+    # Generate full torus zeta grid
     zeta_list = []
     for i in range(n_field_periods):
         zeta_list.append(zeta_one_period + i * (2 * pi / n_field_periods))
@@ -93,12 +96,6 @@ def fourier_to_real_space(
     else:
         zeta = np.concatenate(zeta_list)
 
-    # Meshgrid (theta, zeta)
-    # Shapes: T (n_theta, 1), Z (1, n_zeta_total)
-    theta_grid = theta[:, None] if not is_torch else theta.unsqueeze(1)
-    zeta_grid = zeta[None, :] if not is_torch else zeta.unsqueeze(0)
-
-    # Vectorized Fourier summation (replaces nested loops for ~10-50x speedup)
     # Precompute mode indices
     if is_torch:
         m_idx = torch.arange(mpol + 1, dtype=r_cos.dtype, device=r_cos.device)
@@ -110,37 +107,78 @@ def fourier_to_real_space(
     # n values: maps 0..2*ntor to -ntor..ntor
     n_vals = n_idx - ntor
 
-    # Build angle grid: shape (mpol+1, 2*ntor+1, n_theta, n_zeta_total)
-    # angle[m, n_idx, t, z] = m * theta[t] - (n_idx - ntor) * Nfp * zeta[z]
+    # =========================================================================
+    # Memory-optimized Fourier summation using trig separability
+    # =========================================================================
+    # Instead of building full (M, N, T, Z) angle tensor, we use:
+    #   cos(mθ - nNζ) = cos(mθ)cos(nNζ) + sin(mθ)sin(nNζ)
+    #   sin(mθ - nNζ) = sin(mθ)cos(nNζ) - cos(mθ)sin(nNζ)
+    #
+    # This allows two-stage contraction:
+    #   Stage 1: Contract over n to get (M, Z) intermediates
+    #   Stage 2: Contract over m to get (T, Z) result
+    # =========================================================================
+
     if is_torch:
-        m_term = m_idx[:, None, None, None] * theta_grid[None, None, :, :]
-        n_term = (n_vals[None, :, None, None] * n_field_periods) * zeta_grid[
-            None, None, :, :
-        ]
-        angles = m_term - n_term  # (mpol+1, 2*ntor+1, n_theta, n_zeta_total)
+        # Precompute separable trig terms
+        # cos(mθ), sin(mθ): shape (M, T)
+        m_theta = m_idx[:, None] * theta[None, :]  # (M, T)
+        cos_m_theta = torch.cos(m_theta)  # (M, T)
+        sin_m_theta = torch.sin(m_theta)  # (M, T)
 
-        # Compute cos/sin for all angles
-        cos_angles = torch.cos(angles)
-        sin_angles = torch.sin(angles)
+        # cos(nNζ), sin(nNζ): shape (N, Z)
+        n_nfp_zeta = (n_vals * n_field_periods)[:, None] * zeta[None, :]  # (N, Z)
+        cos_n_zeta = torch.cos(n_nfp_zeta)  # (N, Z)
+        sin_n_zeta = torch.sin(n_nfp_zeta)  # (N, Z)
 
-        # Vectorized sum: R = sum_{m,n} r_cos[m,n] * cos(angle[m,n,:,:])
-        # Using einsum: 'mn,mntz->tz'
-        R = torch.einsum("mn,mntz->tz", r_cos, cos_angles)
-        Z = torch.einsum("mn,mntz->tz", z_sin, sin_angles)
+        # Stage 1: Contract over n -> (M, Z)
+        # A_rc[m,z] = sum_n r_cos[m,n] * cos(nNζ[z])
+        # B_rc[m,z] = sum_n r_cos[m,n] * sin(nNζ[z])
+        A_rc = torch.einsum("mn,nz->mz", r_cos, cos_n_zeta)  # (M, Z)
+        B_rc = torch.einsum("mn,nz->mz", r_cos, sin_n_zeta)  # (M, Z)
+
+        # Same for z_sin
+        A_zs = torch.einsum("mn,nz->mz", z_sin, cos_n_zeta)  # (M, Z)
+        B_zs = torch.einsum("mn,nz->mz", z_sin, sin_n_zeta)  # (M, Z)
+
+        # Stage 2: Contract over m -> (T, Z)
+        # R[t,z] = sum_m cos(mθ[t]) * A_rc[m,z] + sin(mθ[t]) * B_rc[m,z]
+        R = torch.einsum("mt,mz->tz", cos_m_theta, A_rc) + torch.einsum(
+            "mt,mz->tz", sin_m_theta, B_rc
+        )
+
+        # Z[t,z] = sum_m sin(mθ[t]) * A_zs[m,z] - cos(mθ[t]) * B_zs[m,z]
+        Z = torch.einsum("mt,mz->tz", sin_m_theta, A_zs) - torch.einsum(
+            "mt,mz->tz", cos_m_theta, B_zs
+        )
+
+        Phi = zeta[None, :].expand(n_theta, -1)
     else:
-        m_term = m_idx[:, None, None, None] * theta_grid[None, None, :, :]
-        n_term = (n_vals[None, :, None, None] * n_field_periods) * zeta_grid[
-            None, None, :, :
-        ]
-        angles = m_term - n_term
+        # NumPy version
+        m_theta = m_idx[:, None] * theta[None, :]  # (M, T)
+        cos_m_theta = np.cos(m_theta)
+        sin_m_theta = np.sin(m_theta)
 
-        cos_angles = np.cos(angles)
-        sin_angles = np.sin(angles)
+        n_nfp_zeta = (n_vals * n_field_periods)[:, None] * zeta[None, :]  # (N, Z)
+        cos_n_zeta = np.cos(n_nfp_zeta)
+        sin_n_zeta = np.sin(n_nfp_zeta)
 
-        R = np.einsum("mn,mntz->tz", r_cos, cos_angles)
-        Z = np.einsum("mn,mntz->tz", z_sin, sin_angles)
+        # Stage 1: Contract over n -> (M, Z)
+        A_rc = np.einsum("mn,nz->mz", r_cos, cos_n_zeta)
+        B_rc = np.einsum("mn,nz->mz", r_cos, sin_n_zeta)
+        A_zs = np.einsum("mn,nz->mz", z_sin, cos_n_zeta)
+        B_zs = np.einsum("mn,nz->mz", z_sin, sin_n_zeta)
 
-    Phi = zeta_grid.expand_as(R) if is_torch else np.broadcast_to(zeta_grid, R.shape)
+        # Stage 2: Contract over m -> (T, Z)
+        R = np.einsum("mt,mz->tz", cos_m_theta, A_rc) + np.einsum(
+            "mt,mz->tz", sin_m_theta, B_rc
+        )
+        Z = np.einsum("mt,mz->tz", sin_m_theta, A_zs) - np.einsum(
+            "mt,mz->tz", cos_m_theta, B_zs
+        )
+
+        Phi = np.broadcast_to(zeta[None, :], R.shape)
+
     return R, Z, Phi
 
 
@@ -157,6 +195,12 @@ def batch_fourier_to_real_space(
 ]:
     """
     Batched version of fourier_to_real_space for PyTorch.
+
+    Memory Optimization:
+        Uses trigonometric separability to avoid building a full (B, M, N, T, Z) angle tensor.
+        cos(mθ - nNζ) = cos(mθ)cos(nNζ) + sin(mθ)sin(nNζ)
+        sin(mθ - nNζ) = sin(mθ)cos(nNζ) - cos(mθ)sin(nNζ)
+        This reduces peak memory from O(B*M*N*T*Z) to O(B*M*Z) + O(M*T) + O(B*N*Z).
 
     Args:
         r_cos: (Batch, mpol+1, 2*ntor+1)
@@ -180,11 +224,8 @@ def batch_fourier_to_real_space(
 
     if is_variable_nfp:
         # n_zeta is total points over [0, 2pi]
-        # We generate a fixed grid for the whole torus
-        zeta = torch.linspace(0, 2 * pi, n_zeta + 1, device=device)[:-1]  # (n_zeta,)
-
-        # Ensure n_field_periods is (Batch, 1, 1) for broadcasting
-        nfp_tensor = n_field_periods.view(batch_size, 1, 1)
+        zeta = torch.linspace(0, 2 * pi, n_zeta + 1, device=device)[:-1]  # (Z,)
+        nfp_tensor = n_field_periods.view(batch_size, 1)  # (B, 1)
     else:
         # Legacy mode: n_zeta per period
         zeta_one = torch.linspace(
@@ -193,52 +234,78 @@ def batch_fourier_to_real_space(
         zeta_list = [
             zeta_one + i * (2 * pi / n_field_periods) for i in range(n_field_periods)
         ]
-        zeta = torch.cat(zeta_list)  # (n_zeta * nfp,)
-        nfp_tensor = float(n_field_periods)  # Scalar broadcast
+        zeta = torch.cat(zeta_list)  # (Z,)
+        nfp_scalar = float(n_field_periods)
 
-    theta = torch.linspace(0, 2 * pi, n_theta + 1, device=device)[:-1]
+    theta = torch.linspace(0, 2 * pi, n_theta + 1, device=device)[:-1]  # (T,)
 
-    # (1, n_theta, 1)
-    theta_grid = theta.view(1, n_theta, 1)
-    # (1, 1, n_zeta_total)
-    zeta_grid = zeta.view(1, 1, -1)
-
-    # Vectorized Fourier summation (replaces nested loops for ~10-50x speedup)
     # Precompute mode indices
-    m_idx = torch.arange(mpol + 1, dtype=r_cos.dtype, device=device)
-    n_idx_arr = torch.arange(2 * ntor + 1, dtype=r_cos.dtype, device=device)
+    m_idx = torch.arange(mpol + 1, dtype=r_cos.dtype, device=device)  # (M,)
+    n_idx_arr = torch.arange(2 * ntor + 1, dtype=r_cos.dtype, device=device)  # (N,)
     n_vals = n_idx_arr - ntor  # Maps 0..2*ntor to -ntor..ntor
 
-    # Build angle grid
-    # m*theta term: shape (1, mpol+1, 1, n_theta, 1)
-    m_theta = m_idx.view(1, -1, 1, 1, 1) * theta_grid.view(1, 1, 1, n_theta, 1)
+    # =========================================================================
+    # Memory-optimized Fourier summation using trig separability
+    # =========================================================================
+    # cos(mθ - nNζ) = cos(mθ)cos(nNζ) + sin(mθ)sin(nNζ)
+    # sin(mθ - nNζ) = sin(mθ)cos(nNζ) - cos(mθ)sin(nNζ)
+    #
+    # For fixed Nfp: both m*theta and n*Nfp*zeta terms are shared across batch
+    # For variable Nfp: m*theta is still shared, but n*Nfp*zeta depends on batch
+    # =========================================================================
 
-    # n*Nfp*zeta term: shape depends on whether nfp is variable
+    # Precompute cos(mθ), sin(mθ) - shape (M, T), shared across batch
+    m_theta = m_idx[:, None] * theta[None, :]  # (M, T)
+    cos_m_theta = torch.cos(m_theta)  # (M, T)
+    sin_m_theta = torch.sin(m_theta)  # (M, T)
+
     if is_variable_nfp:
-        # nfp_tensor: (B, 1, 1) -> expand for modes
-        # n_vals: (2*ntor+1,) -> (1, 1, 2*ntor+1, 1, 1)
-        # zeta_grid: (1, 1, n_zeta) -> (1, 1, 1, 1, n_zeta)
-        n_zeta_term = (
-            n_vals.view(1, 1, -1, 1, 1)
-            * nfp_tensor.view(batch_size, 1, 1, 1, 1)
-            * zeta_grid.view(1, 1, 1, 1, -1)
+        # Variable Nfp: n*Nfp*zeta depends on batch
+        # n_vals: (N,), nfp_tensor: (B, 1), zeta: (Z,)
+        # n_nfp_zeta: (B, N, Z)
+        n_nfp_zeta = (
+            n_vals[None, :, None] * nfp_tensor[:, :, None] * zeta[None, None, :]
+        )
+        cos_n_zeta = torch.cos(n_nfp_zeta)  # (B, N, Z)
+        sin_n_zeta = torch.sin(n_nfp_zeta)  # (B, N, Z)
+
+        # Stage 1: Contract over n -> (B, M, Z)
+        # A_rc[b,m,z] = sum_n r_cos[b,m,n] * cos(n*Nfp[b]*zeta[z])
+        A_rc = torch.einsum("bmn,bnz->bmz", r_cos, cos_n_zeta)  # (B, M, Z)
+        B_rc = torch.einsum("bmn,bnz->bmz", r_cos, sin_n_zeta)  # (B, M, Z)
+        A_zs = torch.einsum("bmn,bnz->bmz", z_sin, cos_n_zeta)  # (B, M, Z)
+        B_zs = torch.einsum("bmn,bnz->bmz", z_sin, sin_n_zeta)  # (B, M, Z)
+
+        # Stage 2: Contract over m -> (B, T, Z)
+        # R[b,t,z] = sum_m cos(mθ[t]) * A_rc[b,m,z] + sin(mθ[t]) * B_rc[b,m,z]
+        R = torch.einsum("mt,bmz->btz", cos_m_theta, A_rc) + torch.einsum(
+            "mt,bmz->btz", sin_m_theta, B_rc
+        )
+        Z = torch.einsum("mt,bmz->btz", sin_m_theta, A_zs) - torch.einsum(
+            "mt,bmz->btz", cos_m_theta, B_zs
         )
     else:
-        n_zeta_term = (
-            n_vals.view(1, 1, -1, 1, 1) * nfp_tensor * zeta_grid.view(1, 1, 1, 1, -1)
+        # Fixed Nfp: fully separable, shared trig terms
+        # cos(nNζ), sin(nNζ): shape (N, Z)
+        n_nfp_zeta = (n_vals * nfp_scalar)[:, None] * zeta[None, :]  # (N, Z)
+        cos_n_zeta = torch.cos(n_nfp_zeta)  # (N, Z)
+        sin_n_zeta = torch.sin(n_nfp_zeta)  # (N, Z)
+
+        # Stage 1: Contract over n -> (B, M, Z)
+        A_rc = torch.einsum("bmn,nz->bmz", r_cos, cos_n_zeta)  # (B, M, Z)
+        B_rc = torch.einsum("bmn,nz->bmz", r_cos, sin_n_zeta)  # (B, M, Z)
+        A_zs = torch.einsum("bmn,nz->bmz", z_sin, cos_n_zeta)  # (B, M, Z)
+        B_zs = torch.einsum("bmn,nz->bmz", z_sin, sin_n_zeta)  # (B, M, Z)
+
+        # Stage 2: Contract over m -> (B, T, Z)
+        R = torch.einsum("mt,bmz->btz", cos_m_theta, A_rc) + torch.einsum(
+            "mt,bmz->btz", sin_m_theta, B_rc
+        )
+        Z = torch.einsum("mt,bmz->btz", sin_m_theta, A_zs) - torch.einsum(
+            "mt,bmz->btz", cos_m_theta, B_zs
         )
 
-    # angles: (B, mpol+1, 2*ntor+1, n_theta, n_zeta)
-    angles = m_theta - n_zeta_term
-
-    cos_angles = torch.cos(angles)
-    sin_angles = torch.sin(angles)
-
-    # Vectorized sum using einsum: 'bmn,bmntz->btz'
-    R = torch.einsum("bmn,bmntz->btz", r_cos, cos_angles)
-    Z = torch.einsum("bmn,bmntz->btz", z_sin, sin_angles)
-
-    Phi = zeta_grid.expand(batch_size, n_theta, zeta.size(0))
+    Phi = zeta[None, None, :].expand(batch_size, n_theta, -1)
 
     return R, Z, Phi
 

@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import threading
 from collections import defaultdict
 from typing import Any, Dict, List, Mapping
 
@@ -59,6 +60,7 @@ class _LRUCache:
 
     Uses collections.OrderedDict for zero external dependencies.
     Move-to-end on access provides LRU semantics.
+    All operations are protected by a threading.Lock for thread safety.
     """
 
     def __init__(self, maxsize: int = _CACHE_MAX_SIZE_DEFAULT):
@@ -66,30 +68,36 @@ class _LRUCache:
 
         self._cache: "OrderedDict[str, EvaluationResult]" = OrderedDict()
         self._maxsize = maxsize
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> "EvaluationResult | None":
-        if key in self._cache:
-            # Move to end (most recently used)
-            self._cache.move_to_end(key)
-            return self._cache[key]
-        return None
+        with self._lock:
+            if key in self._cache:
+                # Move to end (most recently used)
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
 
     def set(self, key: str, value: "EvaluationResult") -> None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        self._cache[key] = value
-        # Evict oldest entries if over capacity
-        while len(self._cache) > self._maxsize:
-            self._cache.popitem(last=False)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            self._cache[key] = value
+            # Evict oldest entries if over capacity
+            while len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
 
     def __contains__(self, key: str) -> bool:
-        return key in self._cache
+        with self._lock:
+            return key in self._cache
 
     def clear(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     def __len__(self) -> int:
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
 
     @property
     def maxsize(self) -> int:
@@ -205,9 +213,38 @@ def _auto_select_backend() -> "PhysicsBackend":
         return MockPhysicsBackend()
 
 
+def _is_cache_disabled() -> bool:
+    """Check if cache is disabled via environment variable."""
+    return os.environ.get("AI_SCIENTIST_DISABLE_CACHE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def get_cache_stats() -> Dict[str, int]:
-    """Return a copy of the cache statistics."""
+    """Return a copy of the cache statistics (hits and misses)."""
     return dict(_CACHE_STATS)
+
+
+def get_cache_info() -> Dict[str, int | bool]:
+    """Return comprehensive cache information for observability.
+
+    Returns:
+        Dict containing:
+            - size: Current number of cached entries
+            - maxsize: Maximum cache capacity
+            - hits: Number of cache hits
+            - misses: Number of cache misses
+            - disabled: Whether cache is disabled via env var
+    """
+    return {
+        "size": len(_EVALUATION_CACHE),
+        "maxsize": _EVALUATION_CACHE.maxsize,
+        "hits": _CACHE_STATS.get("hits", 0),
+        "misses": _CACHE_STATS.get("misses", 0),
+        "disabled": _is_cache_disabled(),
+    }
 
 
 def clear_cache() -> None:
@@ -622,7 +659,10 @@ def forward_model(
     settings_hash = hashlib.sha256(settings_json.encode("utf-8")).hexdigest()
     cache_key = f"{d_hash}:{settings_hash}"
 
-    if use_cache:
+    # Respect both use_cache parameter and AI_SCIENTIST_DISABLE_CACHE env var
+    cache_enabled = use_cache and not _is_cache_disabled()
+
+    if cache_enabled:
         cached_result = _EVALUATION_CACHE.get(cache_key)
         if cached_result is not None:
             _CACHE_STATS["hits"] += 1
@@ -637,7 +677,7 @@ def forward_model(
     result = backend.evaluate(boundary, settings)
 
     # 4. Update Cache (LRU eviction handled automatically)
-    if use_cache:
+    if cache_enabled:
         _EVALUATION_CACHE.set(cache_key, result)
 
     return result

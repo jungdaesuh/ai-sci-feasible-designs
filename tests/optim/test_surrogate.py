@@ -24,18 +24,19 @@ def test_ensemble_uncertainty_positive(predictions):
     surrogate = NeuralOperatorSurrogate()
     surrogate._models = [MagicMock() for _ in range(len(predictions))]
 
-    # Setup mocks: each model returns (obj, mhd, qi) tensors
+    # Setup mocks: each model returns (obj, mhd, qi, iota) tensors
     for i, model in enumerate(surrogate._models):
         preds_tensor = torch.tensor(predictions[i], dtype=torch.float32)
         model.return_value = (
             preds_tensor,
             torch.zeros_like(preds_tensor),
             torch.zeros_like(preds_tensor),
+            torch.zeros_like(preds_tensor),
         )
 
     # Call the actual predict_torch method to aggregate ensemble predictions
     x = torch.zeros((len(predictions[0]), 10))  # Batch size = len(predictions[0])
-    obj_mean, obj_std, _, _, _, _ = surrogate.predict_torch(x)
+    obj_mean, obj_std, _, _, _, _, _, _ = surrogate.predict_torch(x)
 
     # Verify uncertainty is non-negative
     assert torch.all(obj_std >= 0)
@@ -66,18 +67,19 @@ def test_ensemble_variance_decreases_with_agreement(predictions):
     surrogate = NeuralOperatorSurrogate()
     surrogate._models = [MagicMock() for _ in range(len(predictions))]
 
-    # Setup mocks: each model returns (obj, mhd, qi) tensors
+    # Setup mocks: each model returns (obj, mhd, qi, iota) tensors
     for i, model in enumerate(surrogate._models):
         preds_tensor = torch.tensor(predictions[i], dtype=torch.float32)
         model.return_value = (
             preds_tensor,
             torch.zeros_like(preds_tensor),
             torch.zeros_like(preds_tensor),
+            torch.zeros_like(preds_tensor),
         )
 
     # Call the actual predict_torch method to aggregate ensemble predictions
     x = torch.zeros((len(predictions[0]), 10))
-    obj_mean, obj_std, _, _, _, _ = surrogate.predict_torch(x)
+    obj_mean, obj_std, _, _, _, _, _, _ = surrogate.predict_torch(x)
 
     variance = obj_std.detach().cpu().numpy() ** 2
     predictions_np = np.array(predictions, dtype=np.float32)

@@ -12,7 +12,7 @@ def mock_dependencies():
     """Mock dependencies for all tests in this module."""
     mock_vmecpp = MagicMock()
     mock_constellaration = MagicMock()
-    
+
     # Setup mock modules dictionary
     mock_modules = {
         "vmecpp": mock_vmecpp,
@@ -37,14 +37,15 @@ def mock_dependencies():
     with patch.dict(sys.modules, mock_modules):
         # Force re-import of ai_scientist.problems to pick up mocks
         import importlib
+
         if "ai_scientist.problems" in sys.modules:
             importlib.reload(sys.modules["ai_scientist.problems"])
         else:
             importlib.import_module("ai_scientist.problems")
-        
+
         yield
 
-        # Cleanup handled by patch.dict for mocks, but we should remove the reloaded module 
+        # Cleanup handled by patch.dict for mocks, but we should remove the reloaded module
         # so subsequent tests don't use this mocked version
         if "ai_scientist.problems" in sys.modules:
             del sys.modules["ai_scientist.problems"]

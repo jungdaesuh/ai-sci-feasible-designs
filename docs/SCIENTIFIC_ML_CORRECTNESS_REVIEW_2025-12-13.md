@@ -1,7 +1,7 @@
 # Scientific & ML Correctness Review
-Date: 2025-12-13  
-Scope: Math, physics, AI/ML, and logic correctness for `ai_scientist/`  
-Repo SHA: `ae4ed74ffa6ae30d9a46447c484948bb55e1eaa2`  
+Date: 2025-12-13
+Scope: Math, physics, AI/ML, and logic correctness for `ai_scientist/`
+Repo SHA: `ae4ed74ffa6ae30d9a46447c484948bb55e1eaa2`
 Bundled `constellaration/` SHA: `3c97274d189335a7c827d482ad5a939dba540116`
 
 ## Executive Summary
@@ -221,4 +221,3 @@ The following targeted tests were executed and passed (they validate internal co
 - PPO: `ai_scientist/optim/rl_ppo.py`
 - RL environment: `ai_scientist/rl_env.py`
 - Differentiable optimization: `ai_scientist/optim/differentiable.py`
-

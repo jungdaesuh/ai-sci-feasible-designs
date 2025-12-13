@@ -16,7 +16,9 @@ def test_evaluate_p1_caches_by_stage(mock_backend) -> None:
     params = base_params()
 
     result = tools.evaluate_p1(params, stage="screen")
-    assert result["objective"] == pytest.approx(float(result["metrics"]["max_elongation"]))
+    assert result["objective"] == pytest.approx(
+        float(result["metrics"]["max_elongation"])
+    )
     assert "metrics" in result
     assert mock_backend.call_count == 1
 

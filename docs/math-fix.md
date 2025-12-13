@@ -17,9 +17,9 @@ Coordinator Retraining Target: P2/P3 → score (maximize), P1 → objective (min
 RL Goal: Option C (feasibility priority + continuous improvement)
 Proposed Changes (Final)
 P0 Critical Fixes
-[MODIFY] 
+[MODIFY]
 forward_model.py
-Bug: 
+Bug:
 max_violation()
  silently treats NaN as 0.0
 
@@ -28,19 +28,19 @@ Fix:
 import math
 def max_violation(margins: Mapping[str, float]) -> float:
     """Return maximum constraint violation.
-    
+
     If any margin is non-finite (NaN/inf), returns inf (conservative infeasibility).
     """
     if not margins:
         return float("inf")
-    
+
     # If ANY margin is non-finite, entire feasibility is undefined → infeasible
     for value in margins.values():
         if not math.isfinite(value):
             return float("inf")
-    
+
     return float(max(0.0, max(margins.values())))
-Note: No 
+Note: No
 stage
  parameter added to avoid call-site migration. Logging is optional internal detail.
 
@@ -53,7 +53,7 @@ def compute_constraint_margins(
     stage: str = "high",  # NEW: optional stage parameter
 ) -> Dict[str, float]:
     """Compute margins for constraints based on problem and stage.
-    
+
     Args:
         metrics: Metrics object or dict
         problem: Problem type (p1, p2, p3)
@@ -66,13 +66,13 @@ def compute_constraint_margins(
     )
     problem_key = problem.lower()
     is_low_fidelity = stage.lower() in ("screen", "low", "default")
-    
+
     # ... existing margin computation ...
-    
+
     # For P3:
     if problem_key.startswith("p3"):
         margins = {}
-        
+
         # Geometric constraints (always required)
         margins["edge_rotational_transform"] = 0.25 - float(
             metrics_map.get("edge_rotational_transform_over_n_field_periods", float("nan"))
@@ -80,20 +80,20 @@ def compute_constraint_margins(
         margins["edge_magnetic_mirror_ratio"] = float(
             metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
         ) - 0.25
-        
+
         # Physics constraints (only at high fidelity)
         if not is_low_fidelity:
             # Vacuum well
             well = metrics_map.get("vacuum_well")
             margins["vacuum_well"] = -float(well) if well is not None else float("inf")
-            
+
             # Flux compression
             flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
             margins["flux_compression"] = float(flux_value) - 0.9 if flux_value is not None else float("inf")
-            
+
             # QI (log scale)
             margins["qi_log10"] = _log10_margin(-3.5)
-        
+
         return margins
 Call Sites to Update:
 
@@ -101,11 +101,11 @@ File	Line	Current Call	New Call
 forward_model.py
 (internal)	N/A	Primary definition
 backends/real.py
-117	
+117
 compute_constraint_margins(metrics, settings.problem)
 compute_constraint_margins(metrics, settings.problem, stage=settings.stage)
 backends/mock.py
-179	
+179
 compute_constraint_margins(metrics, problem)
 compute_constraint_margins(metrics, problem, stage=stage)
 cycle_executor.py
@@ -115,14 +115,14 @@ cycle_executor.py
 cycle_executor.py
 1705	tools.compute_constraint_margins(metrics, problem_type)	tools.compute_constraint_margins(metrics, problem_type, stage=stage) (if stage in scope)
 tools/evaluation.py
-251-252	Wrapper function	Add 
+251-252	Wrapper function	Add
 stage
  parameter and forward
 tools/evaluation.py
-312, 317	Internal calls	Add 
+312, 317	Internal calls	Add
 stage
  from context
-[MODIFY] 
+[MODIFY]
 coordinator.py
 Bug 1: Always uses minimize_objective=True
 Bug 2: Wrong label structure
@@ -131,19 +131,19 @@ Fix (unchanged from v3, correct):
 
 def _periodic_retrain(self, cycle: int, experiment_id: int, candidates: List[Dict[str, Any]]) -> None:
     # ...
-    
+
     for cand in top_elites:
         params = cand.get("params", cand.get("candidate_params"))
         if params is None:
             continue
-        
+
         eval_data = cand.get("evaluation", {})
         actual_metrics = eval_data.get("metrics", {})
-        
+
         # Skip if metrics are missing (don't train on fabricated targets)
         if not actual_metrics:
             continue
-        
+
         problem = self.cfg.problem.lower()
         if problem.startswith("p1"):
             target = eval_data.get("objective")
@@ -160,19 +160,19 @@ def _periodic_retrain(self, cycle: int, experiment_id: int, candidates: List[Dic
                 else:
                     continue  # Skip: can't compute target
             minimize_obj = False
-        
+
         if target is None:
             continue
-        
+
         metrics_list.append({
             "candidate_params": params,
             "metrics": actual_metrics,
         })
         target_values.append(float(target))
-    
+
     if metrics_list:
         self.surrogate.fit(metrics_list, target_values, minimize_objective=minimize_obj)
-[MODIFY] 
+[MODIFY]
 differentiable.py
 Bug 1: QI threshold too loose
 Bug 2: softplus destroys raw QI scale
@@ -219,12 +219,12 @@ def optimize_alm_inner_loop(
     ...,
     problem: str = "p3",  # NEW PARAMETER
 ) -> np.ndarray:
-    
+
     qi_threshold = _get_qi_threshold(problem)
-    
+
     for _ in range(steps):
         # ...
-        
+
         # Objective term (pessimistic for both directions)
         if problem.lower().startswith("p2"):
             # P2: MAXIMIZE gradient → minimize -gradient
@@ -234,10 +234,10 @@ def optimize_alm_inner_loop(
             # P1/P3: MINIMIZE objective
             # Pessimistic: mean + β·std
             obj_term = pred_obj.squeeze() + beta * std_obj.squeeze()
-        
+
         # QI positivity with scale preservation
         qi_positive = pred_qi.squeeze().abs() + QI_EPS
-        
+
         c2 = torch.relu(qi_positive + beta * s_qi - qi_threshold)
 Call site update (cycle_executor.py:1369):
 
@@ -251,7 +251,7 @@ x_new_np = differentiable.optimize_alm_inner_loop(
     steps=budget_per_step,
 )
 P1 High Priority Fixes
-[MODIFY] 
+[MODIFY]
 rl_env.py
 Bug 1: Uses raw QI, dead zone once feasible
 Bug 2 (v3.2): After retraining change, obj_val becomes score (grad/aspect), not AR
@@ -266,19 +266,19 @@ from ai_scientist.optim import geometry
 import torch
 def _compute_score(self, vec: np.ndarray) -> float:
     # ... surrogate prediction gives obj_val, mhd_val, qi_val ...
-    
+
     # QI in log scale (consistent with benchmark)
     QI_CLAMP_FLOOR = 1e-10
     qi_clamped = max(QI_CLAMP_FLOOR, qi_val)
     log_qi = np.log10(qi_clamped)
     qi_target = self.target_metrics.get("log10_qi_threshold", -4.0)
-    
+
     qi_feasibility_penalty = max(0.0, log_qi - qi_target)
     qi_continuous = (log_qi - qi_target)
-    
+
     mhd_violation = max(0.0, -mhd_val)
     mhd_continuous = -mhd_val
-    
+
     # v3.2 FIX: Compute AR directly from params, NOT from obj_val
     # (obj_val is now score=grad/aspect after retraining change)
     ar_target = self.target_metrics.get("aspect_ratio", 8.0)
@@ -289,16 +289,16 @@ def _compute_score(self, vec: np.ndarray) -> float:
         computed_ar = float(geometry.aspect_ratio(r_cos, z_sin, nfp).item())
     except Exception:
         computed_ar = ar_target  # Fallback: no AR penalty if computation fails
-    
+
     ar_deviation = abs(computed_ar - ar_target)
-    
+
     cost = 0.0
     cost += 10.0 * qi_feasibility_penalty
     cost += 0.5 * qi_continuous
     cost += 5.0 * mhd_violation
     cost += 0.3 * mhd_continuous
     cost += 1.0 * ar_deviation
-    
+
     return -cost  # Higher is better
 Corrected Reward Scale Sanity Table:
 
@@ -315,7 +315,7 @@ Negative reward = bad (cost positive)
 Positive reward = good (cost negative)
 Feasibility penalties dominate (10x, 5x) ✓
 Continuous improvement gives small reward (~0.5) ✓
-[MODIFY] 
+[MODIFY]
 surrogate.py
 Bug: Ignores predicted objective
 
@@ -334,52 +334,52 @@ def rank_candidates(
     exploration_ratio: float = 0.0,
 ) -> list[SurrogatePrediction]:
     # ...
-    
+
     exploration_weight = max(0.0, float(exploration_ratio)) * 0.1
-    
+
     if not self._trained:
         return self._heuristic_rank(candidates, minimize_objective)
-    
+
     # ... prediction code ...
-    
+
     # Gate objective weight on actual regressor existence
     # self._regressors is dict[str, RandomForestRegressor]
     objective_regressor_trained = (
-        self._trained 
+        self._trained
         and self._regressors.get("objective") is not None
     )
-    
+
     if objective_regressor_trained:
         training_size = self._last_fit_count
         MIN_SAMPLES_FOR_OBJ = 32
         obj_weight = min(1.0, training_size / (MIN_SAMPLES_FOR_OBJ * 2))
     else:
         obj_weight = 0.0
-    
+
     ranked: list[SurrogatePrediction] = []
     for i, candidate in enumerate(candidates):
         pf = prob[i]
         obj = objs[i]
-        
+
         constraint_distance = float(candidate.get("constraint_distance", 0.0))
         constraint_distance = max(0.0, constraint_distance)
-        
+
         # Classifier entropy (binary classification uncertainty proxy)
         uncertainty = float(pf * (1.0 - pf))
-        
+
         # Expected value: feasibility-weighted objective
         base_score = self._expected_value(pf, obj, minimize_objective)
-        
+
         # Composite score with ramped objective contribution
         score = (
-            obj_weight * base_score 
+            obj_weight * base_score
             + (1.0 - obj_weight) * float(pf)
-            - constraint_distance 
+            - constraint_distance
             + exploration_weight * uncertainty
         )
-        
+
         ranked.append(SurrogatePrediction(...))
-    
+
     return sorted(ranked, key=lambda item: item.expected_value, reverse=True)
 P2 Low Priority Fixes (Unchanged)
 problems.py
@@ -394,7 +394,7 @@ def test_max_violation_nonfinite():
     assert max_violation({"a": 0.5, "b": -0.1}) == 0.5
 def test_screen_stage_skips_physics_constraints():
     from ai_scientist.forward_model import compute_constraint_margins
-    
+
     # Screen stage: no flux/vacuum_well/QI required
     screen_metrics = {
         "edge_rotational_transform_over_n_field_periods": 0.3,
@@ -402,7 +402,7 @@ def test_screen_stage_skips_physics_constraints():
         # No flux, vacuum_well, qi
     }
     margins = compute_constraint_margins(screen_metrics, "p3", stage="screen")
-    
+
     # Only geometric constraints returned
     assert "flux_compression" not in margins
     assert "vacuum_well" not in margins
@@ -411,14 +411,14 @@ def test_screen_stage_skips_physics_constraints():
 def test_qi_abs_preserves_scale():
     import torch
     QI_EPS = 1e-12
-    
+
     qi = torch.tensor([1e-4, 1e-5, -1e-4], requires_grad=True)
     qi_positive = qi.abs() + QI_EPS
-    
+
     # Scale preserved
     assert qi_positive[0].item() == pytest.approx(1e-4, rel=1e-6)
     assert qi_positive[1].item() == pytest.approx(1e-5, rel=1e-6)
-    
+
     # Gradient flows
     loss = qi_positive.sum()
     loss.backward()
@@ -426,12 +426,12 @@ def test_qi_abs_preserves_scale():
     assert all(g != 0 for g in qi.grad)
 def test_surrogate_objective_weight_gating():
     from ai_scientist.optim.surrogate import SurrogateBundle
-    
+
     bundle = SurrogateBundle()
-    
+
     # Before training: no gating
     assert bundle._regressors.get("objective") is None
-    
+
     # After training
     bundle.fit(mock_metrics_list, mock_targets, minimize_objective=True)
     assert bundle._regressors.get("objective") is not None
@@ -449,12 +449,12 @@ Summary Checklist
  QI uses abs() + eps (not softplus) for raw scale preservation
  SurrogateBundle gates on self._regressors.get("objective")
  RL sanity table arithmetic matches actual cost definition
- Explicit call site list for stage-aware 
+ Explicit call site list for stage-aware
 compute_constraint_margins()
  Screen stage constraint policy: geometric only at low fidelity
  P2/P3 retraining uses score (maximize), P1 uses objective (minimize)
  Coordinator skips rows with missing metrics
- Differentiable optimization threads 
+ Differentiable optimization threads
 problem
  through call sites
  v3.2: RL env computes AR from params via geometry.aspect_ratio()

@@ -83,7 +83,7 @@ class TestFidelityControllerMock(unittest.TestCase):
         self.pkg_patchers = []
         if "ai_scientist" in sys.modules:
             import ai_scientist
-            
+
             # Patch each attribute
             for name, mock_obj in [
                 ("tools", self.mock_tools),

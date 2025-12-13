@@ -92,7 +92,7 @@ def test_surrogate_ensemble_predict_mean():
     for model in surrogate._models:
         model.eval()
         with torch.no_grad():
-            o, _, _ = model(x)
+            o, _, _, _ = model(x)
             obj_preds_norm.append(o.item())
 
     mean_normalized = np.mean(obj_preds_norm)
@@ -108,7 +108,7 @@ def test_surrogate_ensemble_predict_mean():
 
     # Get ensemble prediction (denormalized)
     with torch.no_grad():
-        obj, _, _, _, _, _ = surrogate.predict_torch(x)
+        obj, _, _, _, _, _, _, _ = surrogate.predict_torch(x)
 
     assert np.isclose(obj.item(), mean_expected, atol=1e-5)
 
