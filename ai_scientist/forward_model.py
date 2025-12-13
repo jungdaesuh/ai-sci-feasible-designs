@@ -353,6 +353,10 @@ def compute_constraint_margins(
     feasibility tolerance used across the codebase (typically `1e-2`), mirroring
     the normalization in `constellaration.problems.*._normalized_constraint_violations`.
 
+    Note: The returned dict keys use canonical constraint names from
+    `ai_scientist.constraints`. These map to full metrics field names via
+    `get_metrics_key()`.
+
     Args:
         metrics: Metrics object or dict
         problem: Problem type (p1, p2, p3)

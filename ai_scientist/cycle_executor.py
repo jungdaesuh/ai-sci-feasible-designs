@@ -1328,28 +1328,10 @@ class CycleExecutor:
         num_alm_steps = max(1, active_budgets.screen_evals_per_cycle // budget_per_step)
 
         p_key = (self.config.problem or "").lower()
-        if p_key.startswith("p1"):
-            constraint_names = [
-                "aspect_ratio",
-                "average_triangularity",
-                "edge_rotational_transform",
-            ]
-        elif p_key.startswith("p2"):
-            constraint_names = [
-                "aspect_ratio",
-                "edge_rotational_transform",
-                "edge_magnetic_mirror_ratio",
-                "max_elongation",
-                "qi_log10",
-            ]
-        else:
-            constraint_names = [
-                "edge_rotational_transform",
-                "edge_magnetic_mirror_ratio",
-                "vacuum_well",
-                "flux_compression",
-                "qi_log10",
-            ]
+        # Use centralized constraint registry for consistent naming
+        from ai_scientist.constraints import get_constraint_names
+
+        constraint_names = get_constraint_names(p_key)
 
         import nevergrad
 

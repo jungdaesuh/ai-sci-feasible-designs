@@ -5,6 +5,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from ai_scientist.constraints import get_constraint_names
+
 
 class Problem(ABC):
     """Abstract base class for optimization problems."""
@@ -62,7 +64,7 @@ class P1Problem(Problem):
 
     @property
     def constraint_names(self) -> List[str]:
-        return ["aspect_ratio", "average_triangularity", "edge_rotational_transform"]
+        return get_constraint_names("p1")
 
     # Constraint constants (exposed for prompts)
     _aspect_ratio_upper_bound = 4.0
@@ -105,13 +107,7 @@ class P2Problem(Problem):
 
     @property
     def constraint_names(self) -> List[str]:
-        return [
-            "aspect_ratio",
-            "edge_rotational_transform",
-            "qi",
-            "edge_magnetic_mirror_ratio",
-            "max_elongation",
-        ]
+        return get_constraint_names("p2")
 
     # Constraint constants (exposed for prompts)
     _aspect_ratio_upper_bound = 10.0
@@ -169,13 +165,7 @@ class P3Problem(Problem):
 
     @property
     def constraint_names(self) -> List[str]:
-        return [
-            "edge_rotational_transform",
-            "qi",
-            "edge_magnetic_mirror_ratio",
-            "flux_compression",
-            "vacuum_well",
-        ]
+        return get_constraint_names("p3")
 
     # Constraint constants (exposed for prompts)
     _edge_rotational_transform_over_n_field_periods_lower_bound = 0.25

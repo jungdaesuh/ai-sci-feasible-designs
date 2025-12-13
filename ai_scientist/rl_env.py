@@ -40,6 +40,7 @@ class StellaratorEnv(gym.Env):
         max_steps: int = 20,
         action_scale: float = 1e-3,
         device: str = "cpu",
+        problem: str = "p3",
     ):
         """
         Initialize the RL environment.
@@ -51,6 +52,8 @@ class StellaratorEnv(gym.Env):
             max_steps: Maximum steps per episode.
             action_scale: Scaling factor for actions (deltas).
             device: Compute device for surrogate calls.
+            problem: Problem type ("p1", "p2", "p3"). Controls which constraints
+                     are penalized in the reward function. Default "p3".
         """
         self.surrogate = surrogate
         self.params = initial_params
@@ -58,6 +61,7 @@ class StellaratorEnv(gym.Env):
         self.max_steps = max_steps
         self.action_scale = action_scale
         self.device = device
+        self.problem = problem.lower()  # Store problem type for reward shaping
 
         # Flatten params to create state vector
         # Note: We rely on surrogate's schema to ensure consistency
@@ -92,6 +96,12 @@ class StellaratorEnv(gym.Env):
 
         Uses log-scale QI with continuous improvement shaping (Option C).
         Computes AR directly from params via geometry module (v3.2 fix).
+
+        IMPORTANT: Reward penalties are now problem-aware (B3 fix):
+        - QI penalty: All problems
+        - MHD/vacuum_well penalty: P3 only (not P2!)
+        - Elongation penalty: P2 only (has max_elongation constraint)
+        - Aspect ratio penalty: All problems
         """
         # Preprocess for surrogate: Append nfp
         nfp = float(self.params.get("n_field_periods") or self.params.get("nfp", 1))
@@ -139,13 +149,42 @@ class StellaratorEnv(gym.Env):
         cost += 0.5 * qi_continuous  # Mild improvement push
 
         # 2. MHD Stability (Vacuum Well) - want > 0
-        mhd_violation = max(0.0, -mhd_val)
-        mhd_continuous = -mhd_val
+        # B3 FIX: Only penalize for P3 problems (vacuum_well is a P3-only constraint!)
+        if self.problem.startswith("p3"):
+            mhd_violation = max(0.0, -mhd_val)
+            mhd_continuous = -mhd_val
 
-        cost += 5.0 * mhd_violation  # Strong MHD feasibility push
-        cost += 0.3 * mhd_continuous  # Mild MHD improvement
+            cost += 5.0 * mhd_violation  # Strong MHD feasibility push
+            cost += 0.3 * mhd_continuous  # Mild MHD improvement
 
-        # 3. Aspect Ratio Target (v3.2 FIX: compute from params, NOT obj_val)
+        # 3. Elongation Constraint (P2 only: max_elongation <= 5.0)
+        # B3 FIX: P2 has elongation constraint that P3 does not
+        if self.problem.startswith("p2"):
+            try:
+                mpol = self.schema.mpol
+                ntor = self.schema.ntor
+                grid_h = mpol + 1
+                grid_w = 2 * ntor + 1
+                half_size = grid_h * grid_w
+
+                r_cos = torch.tensor(vec[:half_size], dtype=torch.float32).view(
+                    1, grid_h, grid_w
+                )
+                z_sin = torch.tensor(
+                    vec[half_size : 2 * half_size], dtype=torch.float32
+                ).view(1, grid_h, grid_w)
+                nfp = float(
+                    self.params.get("n_field_periods") or self.params.get("nfp", 1)
+                )
+
+                computed_elong = float(geometry.elongation(r_cos, z_sin, nfp).item())
+                elong_limit = self.target_metrics.get("max_elongation", 5.0)
+                elong_violation = max(0.0, computed_elong - elong_limit)
+                cost += 3.0 * elong_violation  # Moderate elongation penalty
+            except Exception:
+                pass  # Skip elongation penalty if computation fails
+
+        # 4. Aspect Ratio Target (v3.2 FIX: compute from params, NOT obj_val)
         # After retraining change, obj_val becomes score (grad/aspect), not AR
         ar_target = self.target_metrics.get("aspect_ratio", 8.0)
         try:
@@ -162,6 +201,7 @@ class StellaratorEnv(gym.Env):
             z_sin = torch.tensor(
                 vec[half_size : 2 * half_size], dtype=torch.float32
             ).view(1, grid_h, grid_w)
+            nfp = float(self.params.get("n_field_periods") or self.params.get("nfp", 1))
 
             computed_ar = float(geometry.aspect_ratio(r_cos, z_sin, nfp).item())
         except Exception:

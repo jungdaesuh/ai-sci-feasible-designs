@@ -48,34 +48,12 @@ def _alm_constraint_names(problem: str) -> list[str]:
     from `constellaration.optimization.augmented_lagrangian_runner.objective_constraints`.
     Those constraints are *not* the same as the benchmark problem constraint lists
     (notably P3 includes an aspect-ratio upper-bound constraint injected by the runner).
+
+    NOTE: Uses the centralized constraint registry from ai_scientist.constraints.
     """
-    key = (problem or "p3").lower()
-    if key.startswith("p1"):
-        # constellaration runner order: [aspect_ratio, average_triangularity, iota_lower_bound]
-        return [
-            "aspect_ratio",
-            "average_triangularity",
-            "edge_rotational_transform_over_n_field_periods",
-        ]
-    if key.startswith("p2"):
-        # constellaration runner order: [aspect_ratio, iota_lower_bound, log10(qi), mirror, elong]
-        return [
-            "aspect_ratio",
-            "edge_rotational_transform_over_n_field_periods",
-            "log10_qi",
-            "edge_magnetic_mirror_ratio",
-            "max_elongation",
-        ]
-    # P3 runner order includes aspect_ratio upper bound as a constraint:
-    # [aspect_ratio, iota_lower_bound, log10(qi), mirror, flux, vacuum_well_scaled]
-    return [
-        "aspect_ratio",
-        "edge_rotational_transform_over_n_field_periods",
-        "log10_qi",
-        "edge_magnetic_mirror_ratio",
-        "flux_compression_in_regions_of_bad_curvature",
-        "vacuum_well",
-    ]
+    from ai_scientist.constraints import get_constraint_names
+
+    return get_constraint_names(problem, for_alm=True)
 
 
 class TrajectoryState(pydantic.BaseModel):
