@@ -2059,10 +2059,20 @@ def _surrogate_rank_screen_candidates(
             }
         )
 
+    # Compute exploration ratio with UCB decay schedule (Issue #11)
+    from ai_scientist.exploration import compute_exploration_ratio_from_config
+
+    ucb_exploration_ratio = compute_exploration_ratio_from_config(
+        cycle,
+        ucb_exploration_initial=cfg.proposal_mix.ucb_exploration_initial,
+        ucb_exploration_final=cfg.proposal_mix.ucb_exploration_final,
+        ucb_decay_cycles=cfg.proposal_mix.ucb_decay_cycles,
+    )
+
     ranked_predictions = surrogate_model.rank_candidates(
         pool_entries,
         minimize_objective=minimize_objective,
-        exploration_ratio=cfg.proposal_mix.exploration_ratio,
+        exploration_ratio=ucb_exploration_ratio,
         problem=problem,
     )
 

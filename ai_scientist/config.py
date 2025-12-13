@@ -177,6 +177,10 @@ class ProposalMixConfig:
     exploitation_ratio: float = 0.0
     surrogate_pool_multiplier: float = 2.0
     sampler_type: str = "standard"
+    # UCB exploration parameters (Issue #11)
+    ucb_exploration_initial: float = 2.0  # High exploration at start
+    ucb_exploration_final: float = 0.1  # Low exploration at end
+    ucb_decay_cycles: int = 20  # Cycles to decay from initial to final
 
 
 @dataclass(frozen=True)
@@ -239,6 +243,20 @@ class RetrainingConfig:
     min_elites: int = 32  # Minimum elite candidates to trigger retraining
     hv_stagnation_threshold: float = 0.005  # HV delta below this triggers retraining
     hv_stagnation_lookback: int = 3  # Number of cycles to check for stagnation
+
+
+@dataclass(frozen=True)
+class CurriculumConfig:
+    """Configuration for curriculum learning P1→P2→P3 (Issue #12).
+
+    When enabled, the optimizer starts with easier problems (P1) and
+    progressively adds constraints as feasibility thresholds are met.
+    """
+
+    enabled: bool = False  # Disabled by default
+    advancement_threshold: float = 0.3  # Feasibility rate to advance
+    min_cycles_per_stage: int = 5  # Minimum cycles before advancing
+    initial_stage: str = "p1"  # Starting stage (p1, p2, or p3)
 
 
 @dataclass(frozen=True)
@@ -374,6 +392,7 @@ class ExperimentConfig:
     retraining: RetrainingConfig = field(default_factory=RetrainingConfig)
     alm: ALMConfig = field(default_factory=ALMConfig)
     aso: ASOConfig = field(default_factory=ASOConfig)
+    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)  # Issue #12
     optimizer_backend: str = "nevergrad"
     experiment_tag: str = "default"
     initialization_strategy: str = "template"
@@ -579,6 +598,10 @@ def _proposal_mix_from_dict(
         jitter_scale=float(config.get("jitter_scale", 0.01)),
         surrogate_pool_multiplier=float(config.get("surrogate_pool_multiplier", 2.0)),
         sampler_type=str(config.get("sampler_type", "standard")),
+        # UCB parameters (Issue #11)
+        ucb_exploration_initial=float(config.get("ucb_exploration_initial", 2.0)),
+        ucb_exploration_final=float(config.get("ucb_exploration_final", 0.1)),
+        ucb_decay_cycles=int(config.get("ucb_decay_cycles", 20)),
     )
 
 
@@ -754,6 +777,17 @@ def _retraining_config_from_dict(data: Mapping[str, Any] | None) -> RetrainingCo
     )
 
 
+def _curriculum_config_from_dict(data: Mapping[str, Any] | None) -> CurriculumConfig:
+    """Parse curriculum learning configuration (Issue #12)."""
+    config = data or {}
+    return CurriculumConfig(
+        enabled=bool(config.get("enabled", False)),
+        advancement_threshold=float(config.get("advancement_threshold", 0.3)),
+        min_cycles_per_stage=int(config.get("min_cycles_per_stage", 5)),
+        initial_stage=str(config.get("initial_stage", "p1")),
+    )
+
+
 def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
     config_path = Path(path) if path is not None else DEFAULT_EXPERIMENT_CONFIG_PATH
     payload = load(config_path)
@@ -808,6 +842,7 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         retraining=_retraining_config_from_dict(payload.get("retraining")),
         alm=_alm_config_from_dict(payload.get("alm")),
         aso=_aso_config_from_dict(payload.get("aso")),
+        curriculum=_curriculum_config_from_dict(payload.get("curriculum")),
         optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
         experiment_tag=str(payload.get("experiment_tag", "default")),
         initialization_strategy=str(payload.get("initialization_strategy", "template")),

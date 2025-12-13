@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from jaxtyping import Float
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -84,8 +85,13 @@ class StellaratorNeuralOp(nn.Module):
             embedding_dim=self.geo_dim, align_input=True
         )
 
-        # Multi-head output (Fusion of Spectral + Geometric)
-        fusion_dim = hidden_dim + self.geo_dim
+        # Multi-head output (Fusion of Spectral + Geometric + Fidelity)
+        # Fidelity embedding (Issue #10): 2 levels (screen=0, promote=1)
+        self.fidelity_embedding_dim = 8
+        self.fidelity_embedding = nn.Embedding(
+            num_embeddings=2, embedding_dim=self.fidelity_embedding_dim
+        )
+        fusion_dim = hidden_dim + self.geo_dim + self.fidelity_embedding_dim
 
         # Dropout added for regularization (AoT recommendation)
         self.head_base = nn.Sequential(
@@ -105,6 +111,21 @@ class StellaratorNeuralOp(nn.Module):
         # P3 constraint heads: mirror_ratio and flux_compression (Issue #1 fix)
         self.head_mirror_ratio = nn.Linear(hidden_dim, 1)
         self.head_flux_compression = nn.Linear(hidden_dim, 1)
+
+        # Gradient checkpointing flag (Issue #9) - disabled by default
+        self._use_checkpointing = False
+
+    def enable_checkpointing(self, enabled: bool = True) -> None:
+        """Enable/disable gradient checkpointing for memory efficiency (Issue #9).
+
+        When enabled, intermediate activations in compute-heavy operations
+        (_generate_point_cloud and geo_encoder) are recomputed during backward
+        pass instead of being stored, reducing peak memory usage by ~30-50%.
+
+        Args:
+            enabled: Whether to enable checkpointing. Default True.
+        """
+        self._use_checkpointing = enabled
 
     def _init_cached_grids(self) -> None:
         """Pre-compute and cache theta grids and trig terms.
@@ -210,6 +231,8 @@ class StellaratorNeuralOp(nn.Module):
     def forward(
         self,
         x: Float[torch.Tensor, "batch input_dim"],  # pyright: ignore[reportUndefinedVariable]
+        fidelity: torch.Tensor
+        | None = None,  # (batch,) int: 0=screen, 1=promote (Issue #10)
     ) -> tuple[
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable] obj
         Float[torch.Tensor, "batch"],  # pyright: ignore[reportUndefinedVariable] mhd
@@ -222,6 +245,9 @@ class StellaratorNeuralOp(nn.Module):
         Args:
             x: Flattened input tensor of shape (Batch, 2 * (mpol+1) * (2*ntor+1) + 1)
                The last element is n_field_periods.
+            fidelity: Optional fidelity level tensor (Issue #10). Shape (Batch,).
+                      Values: 0=screen (low-fidelity), 1=promote (high-fidelity).
+                      If None, defaults to high-fidelity (1).
         """
         batch_size = x.shape[0]
 
@@ -250,17 +276,42 @@ class StellaratorNeuralOp(nn.Module):
 
         # Generate Point Cloud using cached grids (Issue #6 fix)
         # This avoids regenerating theta/zeta grids every forward pass
-        points = self._generate_point_cloud(r_cos_in, z_sin_in, nfp_batch)  # (B, 3, N)
+        # Gradient checkpointing (Issue #9): recompute activations during backward
+        if self._use_checkpointing and self.training:
+            # Checkpoint point cloud generation (memory-intensive)
+            points = torch_checkpoint(
+                self._generate_point_cloud,
+                r_cos_in,
+                z_sin_in,
+                nfp_batch,
+                use_reentrant=False,
+            )
+        else:
+            points = self._generate_point_cloud(
+                r_cos_in, z_sin_in, nfp_batch
+            )  # (B, 3, N)
 
         # Augmentation: Random Rotation during training to enforce SE(3) invariance
         if self.training:
             rot_mat = equivariance.random_rotation_matrix(batch_size, device=x.device)
             points = torch.bmm(rot_mat, points)
 
-        geo_vec = self.geo_encoder(points)  # (B, geo_dim)
+        # Checkpoint PointNet encoder (Issue #9)
+        if self._use_checkpointing and self.training:
+            geo_vec = torch_checkpoint(self.geo_encoder, points, use_reentrant=False)
+        else:
+            geo_vec = self.geo_encoder(points)  # (B, geo_dim)
 
-        # --- Fusion ---
-        combined = torch.cat([spectral_vec, geo_vec], dim=1)
+        # --- Fusion with Fidelity Conditioning (Issue #10) ---
+        # Get fidelity embeddings
+        if fidelity is not None:
+            fid_embed = self.fidelity_embedding(fidelity)  # (B, 8)
+        else:
+            # Default to high-fidelity (1)
+            fid_embed = self.fidelity_embedding(
+                torch.ones(batch_size, dtype=torch.long, device=x.device)
+            )
+        combined = torch.cat([spectral_vec, geo_vec, fid_embed], dim=1)
 
         base = self.head_base(combined)
 
@@ -322,6 +373,9 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._models: list[StellaratorNeuralOp] = []
         self._optimizers: list[optim.Optimizer] = []
         self._schema: tools.FlattenSchema | None = None
+
+        # Gradient checkpointing flag (Issue #9)
+        self._use_checkpointing = False
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Load model state from a checkpoint file (Task 3.2)."""
@@ -393,6 +447,19 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             # No need to init optimizers for inference-only mode
 
         self._trained = True
+
+    def enable_checkpointing(self, enabled: bool = True) -> None:
+        """Enable gradient checkpointing for all ensemble models (Issue #9).
+
+        Reduces peak memory usage by ~30-50% during training by recomputing
+        intermediate activations during backward pass instead of storing them.
+
+        Args:
+            enabled: Whether to enable checkpointing. Default True.
+        """
+        self._use_checkpointing = enabled
+        for model in self._models:
+            model.enable_checkpointing(enabled)
 
     def fit(
         self,
@@ -549,6 +616,9 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     mpol=current_mpol, ntor=current_ntor, hidden_dim=self._hidden_dim
                 ).to(self._device)
                 self._models.append(model)
+                # Enable checkpointing if configured (Issue #9)
+                if self._use_checkpointing:
+                    model.enable_checkpointing(True)
                 # Weight decay added for regularization (AoT recommendation)
                 self._optimizers.append(
                     optim.Adam(model.parameters(), lr=self._lr, weight_decay=1e-4)
