@@ -250,19 +250,26 @@ class FidelityController:
                 pass
             elif self.config.problem in ["p2", "p3"]:
                 eval_dict["minimize_objective"] = self.config.problem == "p3"
-                # Score logic
-                grad = float(
-                    metrics_dict.get(
-                        "minimum_normalized_magnetic_gradient_scale_length", 0.0
-                    )
-                )
-                aspect = float(metrics_dict.get("aspect_ratio", 1.0))
-                score = grad / max(1.0, aspect)
+                # Use canonical ranking score for consistency across codebase
+                # See ai_scientist.objective_types for semantics documentation
+                from ai_scientist.objective_types import compute_ranking_score
+
+                score = compute_ranking_score(metrics_dict, self.config.problem)
                 eval_dict["score"] = score
 
                 if self.config.problem == "p2":
+                    grad = float(
+                        metrics_dict.get(
+                            "minimum_normalized_magnetic_gradient_scale_length", 0.0
+                        )
+                    )
                     eval_dict["hv"] = max(0.0, grad - 1.0)
                 else:  # p3
+                    grad = float(
+                        metrics_dict.get(
+                            "minimum_normalized_magnetic_gradient_scale_length", 0.0
+                        )
+                    )
                     eval_dict["hv"] = max(0.0, grad - 1.0)
 
             if result.error_message:

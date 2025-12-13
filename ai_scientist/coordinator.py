@@ -452,21 +452,22 @@ class Coordinator:
                         continue
 
                     # Determine training target based on problem
+                    # IMPORTANT: We always use ranking_score for surrogate training
+                    # This is NOT the same as ALM objective or physics objective!
+                    # See ai_scientist.objective_types for the full vocabulary.
+                    from ai_scientist.objective_types import compute_ranking_score
+
                     if problem.startswith("p1"):
+                        # P1: ranking_score = -max_elongation (higher is better)
                         target = eval_data.get("objective", cand.get("objective"))
+                        if target is not None:
+                            target = -float(target)  # Negate for "higher is better"
                     else:
-                        # P2/P3: use score (higher = better)
+                        # P2/P3: use canonical ranking score (gradient / aspect)
                         target = eval_data.get("score", cand.get("score"))
                         if target is None:
-                            # Fallback: compute score from metrics
-                            grad = actual_metrics.get(
-                                "minimum_normalized_magnetic_gradient_scale_length"
-                            )
-                            aspect = actual_metrics.get("aspect_ratio")
-                            if grad is not None and aspect is not None:
-                                target = float(grad) / max(1.0, float(aspect))
-                            else:
-                                continue  # Skip: can't compute target
+                            # Recompute from metrics using canonical formula
+                            target = compute_ranking_score(actual_metrics, problem)
 
                     if target is None:
                         continue
@@ -908,7 +909,15 @@ class Coordinator:
     def _surrogate_rank_seeds(
         self, seeds: List[Dict[str, Any]], cycle: int
     ) -> List[Dict[str, Any]]:
-        """Rank seeds using the surrogate model."""
+        """Rank seeds using the surrogate model.
+
+        IMPORTANT: The surrogate predicts 'ranking_score', NOT 'alm_objective'!
+        - P1: ranking_score = -max_elongation (higher is better)
+        - P2/P3: ranking_score = gradient / aspect (higher is better)
+
+        This is consistent with surrogate training in _periodic_retrain().
+        See ai_scientist.objective_types for the full semantic vocabulary.
+        """
         if not seeds:
             return []
 

@@ -445,7 +445,25 @@ def compute_objective(
     metrics: Any,
     problem: str,
 ) -> float:
-    """Compute the primary objective function value."""
+    """Compute the primary PHYSICS objective function value.
+
+    IMPORTANT: This returns the benchmark-standard physics objective,
+    which is NOT the same as:
+    - ALM objective (what the optimizer minimizes: 20 - gradient for P2/P3)
+    - Ranking score (what surrogate predicts: gradient / aspect for P2/P3)
+
+    See ai_scientist.objective_types for the full vocabulary.
+
+    Args:
+        metrics: Metrics object from physics evaluation.
+        problem: Problem identifier (p1, p2, p3).
+
+    Returns:
+        Physics objective value. Direction varies by problem:
+        - P1: max_elongation (minimize)
+        - P2: gradient (maximize)
+        - P3: aspect_ratio (minimize)
+    """
     problem_key = problem.lower()
 
     if problem_key.startswith("p1"):
