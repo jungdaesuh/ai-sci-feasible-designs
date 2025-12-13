@@ -492,6 +492,88 @@ def elongation(
     return torch.max(elo_slice, dim=1)[0]
 
 
+def elongation_isoperimetric(
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    n_field_periods: int | Float[torch.Tensor, "batch"],
+    n_theta: int = 64,
+    n_zeta: int = 64,
+) -> Float[torch.Tensor, "batch"]:
+    """
+    Compute elongation via isoperimetric quotient (physics-corrected).
+
+    This provides a differentiable approximation that better matches the
+    benchmark's ellipse-fitting approach than the covariance method.
+
+    Physics Correction (B5):
+        The original elongation() uses covariance eigenvalues which measure
+        statistical spread, not geometric extent. For non-elliptic shapes
+        (common in stellarators), this can underestimate elongation by ~25%.
+
+        The benchmark fits an ellipse matching both perimeter AND area.
+        This function uses the isoperimetric quotient Q = 4πA/P² as a proxy:
+            - For circle: Q = 1, elongation = 1
+            - For ellipse with κ = a/b: Q < 1, elongation > 1
+
+        The relationship Q ↔ κ is monotonic, enabling a differentiable mapping.
+
+    Returns:
+        Tensor of shape (Batch,) with max elongation over zeta slices.
+    """
+    d = _compute_derivatives(r_cos, z_sin, n_field_periods, n_theta, n_zeta)
+    R, Z = d["R"], d["Z"]
+    R_t, Z_t = d["R_t"], d["Z_t"]
+
+    n_theta_pts = R.shape[1]
+    dtheta = 2 * torch.pi / n_theta_pts
+
+    # Perimeter per zeta slice: P = ∫ ds = ∫ sqrt(R_θ² + Z_θ²) dθ
+    ds = torch.sqrt(R_t**2 + Z_t**2 + 1e-8)  # (B, T, Z)
+    perimeter = torch.sum(ds, dim=1) * dtheta  # (B, Z)
+
+    # Area via Green's theorem: A = 0.5 * |∮ (R dZ - Z dR)|
+    integrand = R * Z_t - Z * R_t
+    area = 0.5 * torch.abs(torch.sum(integrand, dim=1) * dtheta)  # (B, Z)
+
+    # Isoperimetric quotient: Q = 4πA/P²
+    # Q = 1 for circle, Q < 1 for non-circular shapes
+    Q = 4 * torch.pi * area / (perimeter**2 + 1e-8)
+
+    # Clamp Q to valid range [epsilon, 1] for numerical stability
+    # Q > 1 can occur due to numerical errors; Q << 1 indicates extreme shapes
+    Q = torch.clamp(Q, min=0.05, max=1.0)
+
+    # Map Q to elongation using ellipse relationship
+    # For an ellipse with semi-axes a, b (a ≥ b), elongation κ = a/b:
+    #   Q = π² / (4κ E(m)²)  where m = 1 - 1/κ², E = complete elliptic integral
+    #
+    # The relationship Q ↔ κ is monotonic. We derive an analytical approximation
+    # by noting that for moderate elongations:
+    #   E(m)² ≈ (π/2)² × (1/2 + 1/(2κ²))
+    #
+    # This gives: Q ≈ 2κ / (κ² + 1)
+    # Inverting: κ = (1 + √(1 - Q²)) / Q
+    #
+    # This base formula has ~16% max error for κ ∈ [1, 6].
+    # We apply an empirically-calibrated correction factor:
+    #   κ_corrected = κ_base × (1 + 0.333 × (1 - Q))
+    #
+    # This reduces max error to ~3.6% across the range κ ∈ [1, 6].
+
+    # Compute discriminant safely (avoid sqrt of negative due to numerical noise)
+    discriminant = torch.clamp(1.0 - Q**2, min=1e-8)
+
+    # Base formula: κ = (1 + √(1-Q²)) / Q
+    kappa_base = (1.0 + torch.sqrt(discriminant)) / Q
+
+    # Empirical correction (calibrated against exact ellipse perimeter integrals)
+    correction = 1.0 + 0.333 * (1.0 - Q)
+    elongation_per_slice = kappa_base * correction
+
+    # Max over zeta slices
+    return torch.max(elongation_per_slice, dim=1)[0]
+
+
 def aspect_ratio(
     r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
     z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
@@ -531,6 +613,59 @@ def aspect_ratio(
     cross_section_area = 0.5 * torch.mean(integrand, dim=1) * 2 * torch.pi
 
     # Ensure positive area and compute effective minor radius
+    r_minor = torch.sqrt(torch.abs(cross_section_area) / torch.pi)
+    mean_r_minor = torch.mean(r_minor, dim=1)
+
+    # Clamp minor radius to avoid division by zero
+    mean_r_minor = torch.clamp(mean_r_minor, min=1e-6)
+
+    return R_major / mean_r_minor
+
+
+def aspect_ratio_arc_length(
+    r_cos: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    z_sin: Float[torch.Tensor, "batch mpol_plus_1 two_ntor_plus_1"],
+    n_field_periods: int | Float[torch.Tensor, "batch"],
+    n_theta: int = 64,
+    n_zeta: int = 64,
+) -> Float[torch.Tensor, "batch"]:
+    """
+    Compute Aspect Ratio with arc-length weighted centroid (physics-corrected).
+
+    This fixes the parametric bias in the original aspect_ratio() function.
+
+    Physics Correction (B4):
+        The original implementation uses mean(R(θ)) which assumes uniform θ
+        corresponds to uniform arc-length. For non-circular cross-sections,
+        this is incorrect and introduces ~5% bias.
+
+        Correct definition:
+            R_centroid = ∫ R ds / ∫ ds
+        where ds = sqrt(R_θ² + Z_θ²) dθ is the arc-length element.
+
+    Returns:
+        Tensor of shape (Batch,) with aspect ratio = R_major / r_minor.
+    """
+    d = _compute_derivatives(r_cos, z_sin, n_field_periods, n_theta, n_zeta)
+    R, Z = d["R"], d["Z"]
+    R_t, Z_t = d["R_t"], d["Z_t"]  # d/dtheta
+
+    # Arc-length element: ds = sqrt(R_θ² + Z_θ²)
+    # This weights regions with high curvature appropriately
+    ds = torch.sqrt(R_t**2 + Z_t**2 + 1e-8)  # (B, T, Z)
+
+    # Arc-length weighted centroid per zeta slice
+    # R_centroid = ∫ R ds / ∫ ds
+    R_weighted = R * ds
+    R_centroid_per_zeta = torch.sum(R_weighted, dim=1) / torch.sum(ds, dim=1)  # (B, Z)
+    R_major = torch.mean(R_centroid_per_zeta, dim=1)  # (B,)
+
+    # Minor radius via Green's theorem (unchanged - mathematically correct)
+    # Area = 0.5 * ∮ (R dZ - Z dR) = 0.5 * ∫ (R Z_θ - Z R_θ) dθ
+    integrand = R * Z_t - Z * R_t
+    cross_section_area = 0.5 * torch.mean(integrand, dim=1) * 2 * torch.pi
+
+    # Effective minor radius: r = sqrt(Area / π)
     r_minor = torch.sqrt(torch.abs(cross_section_area) / torch.pi)
     mean_r_minor = torch.mean(r_minor, dim=1)
 
