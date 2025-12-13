@@ -109,9 +109,11 @@ class TestPhysicsIntegration:
         if result.metrics:
             margins = compute_constraint_margins(result.metrics, "p2", stage="high")
 
-            # P2 constraints should include QI and MHD
+            # P2 constraints should include QI (in log-space) plus geometry/mirror/elongation.
+            # The vacuum well constraint is part of P3 (MHDStableQIStellarator), not P2.
             assert "qi" in margins or "qi_residual" in margins
-            assert "vacuum_well" in margins or "mhd" in margins
+            assert "max_elongation" in margins
+            assert "edge_magnetic_mirror_ratio" in margins
 
     def test_equilibrium_converges_for_valid_boundary(self, rotating_ellipse_boundary):
         """Verify VMEC converges for a known-valid boundary."""
