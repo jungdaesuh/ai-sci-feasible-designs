@@ -392,29 +392,60 @@ class Coordinator:
                 metrics_list = []
                 target_values = []
 
+                # Determine training target and direction based on problem type
+                problem = (self.cfg.problem or "p3").lower()
+                if problem.startswith("p1"):
+                    # P1: train on objective (elongation, minimize)
+                    minimize_obj = True
+                else:
+                    # P2/P3: train on score (grad/aspect, maximize)
+                    minimize_obj = False
+
                 for cand in top_elites:
                     params = cand.get("params", cand.get("candidate_params"))
                     if params is None:
                         continue
 
-                    # Use the best available objective value
-                    target = cand.get(
-                        "objective",
-                        cand.get(
-                            "rl_score",
-                            cand.get("surrogate_score", 0.0),
-                        ),
-                    )
+                    # Extract actual metrics from evaluation (not the full candidate)
+                    eval_data = cand.get("evaluation", {})
+                    actual_metrics = eval_data.get("metrics", {})
 
-                    metrics_list.append({"candidate_params": params, "metrics": cand})
+                    # Skip if metrics are missing (don't train on fabricated targets)
+                    if not actual_metrics:
+                        continue
+
+                    # Determine training target based on problem
+                    if problem.startswith("p1"):
+                        target = eval_data.get("objective", cand.get("objective"))
+                    else:
+                        # P2/P3: use score (higher = better)
+                        target = eval_data.get("score", cand.get("score"))
+                        if target is None:
+                            # Fallback: compute score from metrics
+                            grad = actual_metrics.get(
+                                "minimum_normalized_magnetic_gradient_scale_length"
+                            )
+                            aspect = actual_metrics.get("aspect_ratio")
+                            if grad is not None and aspect is not None:
+                                target = float(grad) / max(1.0, float(aspect))
+                            else:
+                                continue  # Skip: can't compute target
+
+                    if target is None:
+                        continue
+
+                    metrics_list.append(
+                        {"candidate_params": params, "metrics": actual_metrics}
+                    )
                     target_values.append(float(target))
 
                 if metrics_list:
                     print(
-                        f"[Coordinator] Retraining surrogate on {len(metrics_list)} samples..."
+                        f"[Coordinator] Retraining surrogate on {len(metrics_list)} samples "
+                        f"(minimize_objective={minimize_obj})..."
                     )
                     self.surrogate.fit(
-                        metrics_list, target_values, minimize_objective=True
+                        metrics_list, target_values, minimize_objective=minimize_obj
                     )
                     print("[Coordinator] Surrogate retraining complete")
             except Exception as e:

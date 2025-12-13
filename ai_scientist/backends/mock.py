@@ -25,7 +25,12 @@ class MockMetrics:
     mean_iota: float = 0.42
     edge_rotational_transform_over_n_field_periods: float = 0.14
     mirror_ratio: float = 0.15
+    edge_magnetic_mirror_ratio: float = 0.15
+    average_triangularity: float = -0.6
+    vacuum_well: float = 0.02
     relative_well_depth: float = 0.02
+    flux_compression_in_regions_of_bad_curvature: float | None = 0.1
+    qi: float | None = 1e-5
     beta_volume_average: float = 0.025
     vmec_converged: bool = True
     maximum_radius: float = 1.0
@@ -48,6 +53,9 @@ class MockMetrics:
             "mean_iota": self.mean_iota,
             "edge_rotational_transform_over_n_field_periods": self.edge_rotational_transform_over_n_field_periods,
             "mirror_ratio": self.mirror_ratio,
+            "edge_magnetic_mirror_ratio": self.edge_magnetic_mirror_ratio,
+            "average_triangularity": self.average_triangularity,
+            "vacuum_well": self.vacuum_well,
             "relative_well_depth": self.relative_well_depth,
             "beta_volume_average": self.beta_volume_average,
             "vmec_converged": self.vmec_converged,
@@ -59,6 +67,8 @@ class MockMetrics:
             "is_quasihelical": self.is_quasihelical,
             "max_dof_delta": self.max_dof_delta,
             "vmec_exit_code": self.vmec_exit_code,
+            "flux_compression_in_regions_of_bad_curvature": self.flux_compression_in_regions_of_bad_curvature,
+            "qi": self.qi,
         }
 
 
@@ -123,6 +133,9 @@ class MockPhysicsBackend(PhysicsBackend):
         from ai_scientist.forward_model import (
             EvaluationResult,
             compute_design_hash,
+            compute_constraint_margins,
+            compute_objective,
+            max_violation,
         )
 
         # Track the call
@@ -162,29 +175,13 @@ class MockPhysicsBackend(PhysicsBackend):
                 mirror_ratio=0.15 + variation * 0.05,
             )
 
-        # Compute objective with variation
-        objective = self.default_objective + (seed % 100) * 0.001
-
-        # Compute feasibility (some seeds are infeasible for variety)
-        feasibility = self.default_feasibility
-        if seed % 10 == 0:  # 10% are slightly infeasible
-            feasibility = 0.01
-
-        # Compute constraints (all satisfied by default)
-        constraints = [0.0] * 5
-        if seed % 20 == 0:  # 5% have a constraint violation
-            constraints[0] = 0.1
-
-        # Compute constraint names (mock constraint names)
-        constraint_names = [
-            "aspect_ratio",
-            "max_elongation",
-            "mirror_ratio",
-            "qi_margin",
-            "well_depth",
-        ]
-
-        # Compute is_feasible
+        problem = getattr(settings, "problem", "p3")
+        stage = getattr(settings, "stage", "high")
+        margins = compute_constraint_margins(metrics, problem, stage=stage)
+        feasibility = max_violation(margins)
+        objective = compute_objective(metrics, problem)
+        constraint_names = list(margins.keys())
+        constraints = list(margins.values())
         is_feasible = feasibility <= 1e-2
 
         # Compute evaluation time (mock - instant)

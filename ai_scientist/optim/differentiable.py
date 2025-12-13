@@ -260,6 +260,18 @@ def gradient_descent_on_inputs(
     return optimized_candidates
 
 
+# Problem-dependent QI thresholds (raw values)
+QI_THRESHOLD_P2 = 1e-4  # log10(qi) <= -4.0
+QI_THRESHOLD_P3 = 3.16e-4  # log10(qi) <= -3.5
+QI_EPS = 1e-12  # Small epsilon for numerical stability
+
+
+def _get_qi_threshold(problem: str) -> float:
+    if problem.lower().startswith("p2"):
+        return QI_THRESHOLD_P2
+    return QI_THRESHOLD_P3
+
+
 def optimize_alm_inner_loop(
     x_initial: np.ndarray,
     scale: np.ndarray,
@@ -267,6 +279,7 @@ def optimize_alm_inner_loop(
     alm_state: Mapping[str, Any],
     *,
     n_field_periods_val: int,
+    problem: str = "p3",
     steps: int = 10,
     lr: float = 1e-2,
     device: str = "cpu",
@@ -307,7 +320,7 @@ def optimize_alm_inner_loop(
 
     optimizer = torch.optim.Adam([x_torch], lr=lr)
 
-    FEASIBILITY_CUTOFF = 1e-2
+    qi_threshold = _get_qi_threshold(problem)
     beta = 0.1  # Uncertainty penalty factor
 
     for _ in range(steps):
@@ -358,9 +371,23 @@ def optimize_alm_inner_loop(
         s_qi = std_qi.squeeze()
         s_elo = std_elo.squeeze()
 
+        # Objective term (pessimistic for both directions)
+        if problem.lower().startswith("p2"):
+            # P2: MAXIMIZE gradient -> minimize -gradient
+            # LCB: mean - beta*std (pessimistic for maximization)
+            obj_term = -(pred_obj.squeeze() - beta * std_obj.squeeze())
+        else:
+            # P1/P3: MINIMIZE objective
+            # Pessimistic: mean + beta*std
+            obj_term = obj
+
+        # QI positivity with scale preservation (abs() + eps instead of softplus)
+        # This keeps raw QI values in correct order of magnitude
+        qi_positive = qi.abs() + QI_EPS
+
         # Constraints (Pessimistic)
         c1 = torch.relu(-(mhd - beta * s_mhd))
-        c2 = torch.relu((qi + beta * s_qi) - FEASIBILITY_CUTOFF)
+        c2 = torch.relu((qi_positive + beta * s_qi) - qi_threshold)
         c3 = torch.relu((elo + beta * s_elo) - MAX_ELONGATION)
 
         constraints = torch.stack([c1, c2, c3])
@@ -374,7 +401,7 @@ def optimize_alm_inner_loop(
             )
         )
 
-        loss = obj + torch.sum(augmented_term)
+        loss = obj_term + torch.sum(augmented_term)
 
         loss.backward()
         optimizer.step()

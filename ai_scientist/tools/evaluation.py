@@ -248,8 +248,10 @@ def make_boundary_from_params(params: Mapping[str, Any] | BoundaryParams) -> Any
     return centralized_fm.make_boundary_from_params(params_map)
 
 
-def compute_constraint_margins(metrics: Any, problem: str) -> Dict[str, float]:
-    return centralized_fm.compute_constraint_margins(metrics, problem)
+def compute_constraint_margins(
+    metrics: Any, problem: str, *, stage: str = "high"
+) -> Dict[str, float]:
+    return centralized_fm.compute_constraint_margins(metrics, problem, stage=stage)
 
 
 def _max_violation(margins: Mapping[str, float]) -> float:

@@ -1372,6 +1372,7 @@ class CycleExecutor:
                     surrogate=surrogate_model,
                     alm_state=alm_state_dict,
                     n_field_periods_val=initial_params_map.get("n_field_periods", 1),
+                    problem=self.config.problem,
                     steps=budget_per_step,
                 )
                 x_new = jnp.array(x_new_np)
@@ -1392,7 +1393,9 @@ class CycleExecutor:
                     "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
                 }
                 if metrics:
-                    p3_margins = tools.compute_constraint_margins(metrics, "p3")
+                    p3_margins = tools.compute_constraint_margins(
+                        metrics, self.config.problem, stage=fm_settings.stage
+                    )
                     max_viol = tools._max_violation(p3_margins)
                 else:
                     max_viol = float(jnp.max(constr_new))
@@ -1451,7 +1454,9 @@ class CycleExecutor:
                     }
 
                     if metrics:
-                        p3_margins = tools.compute_constraint_margins(metrics, "p3")
+                        p3_margins = tools.compute_constraint_margins(
+                            metrics, self.config.problem, stage=fm_settings.stage
+                        )
                         max_viol = tools._max_violation(p3_margins)
                     else:
                         max_viol = float(jnp.max(constr))
@@ -1699,10 +1704,18 @@ def _objective_constraints(
         else:
             if problem_type.lower().startswith("p1"):
                 objective = jnp.array(metrics.max_elongation)
+            elif problem_type.lower().startswith("p2"):
+                # P2: maximize gradient scale length
+                objective = jnp.array(
+                    metrics.minimum_normalized_magnetic_gradient_scale_length
+                )
             else:
+                # P3: minimize aspect ratio
                 objective = jnp.array(metrics.aspect_ratio)
 
-            margins = tools.compute_constraint_margins(metrics, problem_type)
+            margins = tools.compute_constraint_margins(
+                metrics, problem_type, stage="high"
+            )
             constraints = jnp.array(list(margins.values()))
 
         return ((objective, constraints), metrics)

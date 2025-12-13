@@ -100,9 +100,15 @@ class RealPhysicsBackend(PhysicsBackend):
 
         # Run real physics
         try:
+            constellaration_settings = settings.constellaration_settings
+            if constellaration_settings is None:
+                constellaration_settings = (
+                    constellaration_forward.ConstellarationSettings()
+                )
+
             metrics, _ = constellaration_forward.forward_model(
                 boundary=surf,
-                settings=settings.constellaration_settings,
+                settings=constellaration_settings,
             )
         except Exception as e:
             logger.error(f"Physics evaluation failed: {e}")
@@ -110,7 +116,9 @@ class RealPhysicsBackend(PhysicsBackend):
 
         # Compute derived values
         objective = compute_objective(metrics, settings.problem)
-        constraints_map = compute_constraint_margins(metrics, settings.problem)
+        constraints_map = compute_constraint_margins(
+            metrics, settings.problem, stage=settings.stage
+        )
         feasibility = max_violation(constraints_map)
         is_feasible = feasibility <= 1e-2
 

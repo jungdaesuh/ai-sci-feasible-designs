@@ -511,17 +511,40 @@ class SurrogateBundle(BaseSurrogate):
         elongations = preds_dict.get("elongation", np.zeros(len(candidates)))
 
         ranked: list[SurrogatePrediction] = []
+
+        # Gate objective weight on actual regressor existence
+        # self._regressors is dict[str, RandomForestRegressor]
+        objective_regressor_trained = (
+            self._trained and self._regressors.get("objective") is not None
+        )
+
+        if objective_regressor_trained:
+            training_size = self._last_fit_count
+            MIN_SAMPLES_FOR_OBJ = 32
+            obj_weight = min(1.0, training_size / (MIN_SAMPLES_FOR_OBJ * 2))
+        else:
+            obj_weight = 0.0
+
         for i, candidate in enumerate(candidates):
             pf = prob[i]
             obj = objs[i]
 
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
+
+            # Classifier entropy (binary classification uncertainty proxy)
             uncertainty = float(pf * (1.0 - pf))
+
+            # Expected value: feasibility-weighted objective
             base_score = self._expected_value(pf, obj, minimize_objective)
-            score = (float(pf) - constraint_distance) + exploration_weight * uncertainty
-            # Preserve expected_value semantics for downstream consumers.
-            score = score if self._trained else base_score
+
+            # Composite score with ramped objective contribution
+            score = (
+                obj_weight * base_score
+                + (1.0 - obj_weight) * float(pf)
+                - constraint_distance
+                + exploration_weight * uncertainty
+            )
             ranked.append(
                 SurrogatePrediction(
                     expected_value=score,

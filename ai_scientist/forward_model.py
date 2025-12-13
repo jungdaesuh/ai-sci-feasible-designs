@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -14,24 +15,28 @@ from typing import Any, Dict, List, Mapping
 import numpy as np
 import pydantic
 
+# Re-export ConstellarationSettings for backwards compatibility.
+# Many callers (tools/evaluation.py, cycle_executor.py, etc.) reference
+# forward_model.ConstellarationSettings.
+try:
+    from constellaration.forward_model import ConstellarationSettings
+except ImportError:
+    # Provide a stub if constellaration is not installed
+    # This allows the module to load without constellaration,
+    # but callers will get a clear error if they try to use it
+    ConstellarationSettings = None  # type: ignore[misc, assignment]
+
 from ai_scientist.backends.base import PhysicsBackend
 
-# Type-only imports for static analysis
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    pass
+def _is_constellaration_available() -> bool:
+    """Return True if the real constellaration backend is importable.
 
-# Runtime imports - may fail if constellaration not installed
-try:
-    from constellaration.geometry import surface_rz_fourier
-    from constellaration import forward_model as constellaration_forward
-
-    _CONSTELLARATION_AVAILABLE = True
-except ImportError:
-    surface_rz_fourier = None  # type: ignore[assignment]
-    constellaration_forward = None  # type: ignore[assignment]
-    _CONSTELLARATION_AVAILABLE = False
+    This uses `importlib.util.find_spec` to avoid importing constellaration at
+    module import time (which can trigger native builds of vmecpp on some
+    machines).
+    """
+    return importlib.util.find_spec("constellaration.forward_model") is not None
 
 
 logger = logging.getLogger(__name__)
@@ -138,7 +143,7 @@ def _auto_select_backend() -> "PhysicsBackend":
             from ai_scientist.backends.real import RealPhysicsBackend
 
             backend = RealPhysicsBackend()
-            if backend.is_available():
+            if _is_constellaration_available() and backend.is_available():
                 logger.debug("Auto-selected real physics backend")
                 return backend
         except ImportError:
@@ -171,13 +176,7 @@ class ForwardModelSettings(pydantic.BaseModel):
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
-    constellaration_settings: Any = pydantic.Field(
-        default_factory=lambda: (
-            constellaration_forward.ConstellarationSettings()
-            if constellaration_forward
-            else None
-        )
-    )
+    constellaration_settings: Any = None
     problem: str = "p3"  # p1, p2, p3, etc.
     stage: str = "unknown"
     calculate_gradients: bool = False
@@ -312,6 +311,8 @@ def make_boundary_from_params(
     params: Mapping[str, Any],
 ) -> Any:
     """Construct a SurfaceRZFourier boundary from a parameter dictionary."""
+    from constellaration.geometry import surface_rz_fourier
+
     payload: dict[str, Any] = {
         "r_cos": np.asarray(params["r_cos"], dtype=float),
         "z_sin": np.asarray(params["z_sin"], dtype=float),
@@ -341,15 +342,25 @@ def _log10_or_large(value: float | None) -> float:
 def compute_constraint_margins(
     metrics: Any,
     problem: str,
+    *,
+    stage: str = "high",
 ) -> Dict[str, float]:
     """Compute margins for constraints based on the problem definition.
 
     Positive margin indicates violation.
+
+    Args:
+        metrics: Metrics object or dict
+        problem: Problem type (p1, p2, p3)
+        stage: Fidelity stage. Low-fidelity stages skip expensive constraints.
+               Valid values: "screen", "low", "default" (low fidelity)
+                            "promote", "high", "p2", "p3" (high fidelity)
     """
     metrics_map = (
         metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
     )
     problem_key = problem.lower()
+    is_low_fidelity = stage.lower() in ("screen", "low", "default", "promote")
 
     def _log10_margin(target: float) -> float:
         return _log10_or_large(metrics_map.get("qi")) - target
@@ -371,6 +382,7 @@ def compute_constraint_margins(
             ),
         }
     elif problem_key.startswith("p2"):
+        # Geometric constraints (always required)
         margins = {
             "aspect_ratio": float(metrics_map.get("aspect_ratio", float("nan"))) - 10.0,
             "edge_rotational_transform": 0.25
@@ -385,11 +397,12 @@ def compute_constraint_margins(
             - 0.2,
             "max_elongation": float(metrics_map.get("max_elongation", float("nan")))
             - 5.0,
-            "qi_log10": _log10_margin(-4.0),
         }
+        # Physics constraints (only at high fidelity)
+        if not is_low_fidelity:
+            margins["qi_log10"] = _log10_margin(-4.0)
     else:  # Default to P3 logic
-        flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
-        flux_margin = float(flux_value) - 0.9 if flux_value is not None else 0.0
+        # Geometric constraints (always required)
         margins = {
             "edge_rotational_transform": 0.25
             - float(
@@ -401,10 +414,18 @@ def compute_constraint_margins(
                 metrics_map.get("edge_magnetic_mirror_ratio", float("nan"))
             )
             - 0.25,
-            "vacuum_well": -float(metrics_map.get("vacuum_well", float("nan"))),
-            "flux_compression": flux_margin,
-            "qi_log10": _log10_margin(-3.5),
         }
+        # Physics constraints (only at high fidelity)
+        if not is_low_fidelity:
+            well = metrics_map.get("vacuum_well")
+            margins["vacuum_well"] = -float(well) if well is not None else float("inf")
+
+            flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
+            margins["flux_compression"] = (
+                float(flux_value) - 0.9 if flux_value is not None else float("inf")
+            )
+
+            margins["qi_log10"] = _log10_margin(-3.5)
 
     return margins
 
@@ -425,9 +446,17 @@ def compute_objective(
 
 
 def max_violation(margins: Mapping[str, float]) -> float:
+    """Return maximum constraint violation.
+
+    If any margin is non-finite (NaN/inf), returns inf (conservative infeasibility).
+    """
     if not margins:
         return float("inf")
-    return float(max(0.0, *[max(0.0, value) for value in margins.values()]))
+    # If ANY margin is non-finite, entire feasibility is undefined → infeasible
+    for value in margins.values():
+        if not math.isfinite(value):
+            return float("inf")
+    return float(max(0.0, max(margins.values())))
 
 
 # --- Main Orchestrator ---
@@ -533,33 +562,15 @@ def forward_model_batch(
                 # But EvaluationResult requires metrics.
 
                 # Create dummy metrics with penalized values
-                # Use MockMetrics when constellaration is unavailable
-                if constellaration_forward is not None:
-                    dummy_metrics = constellaration_forward.ConstellarationMetrics(
-                        aspect_ratio=float("inf"),
-                        aspect_ratio_over_edge_rotational_transform=float("inf"),
-                        max_elongation=float("inf"),
-                        axis_rotational_transform_over_n_field_periods=0.0,
-                        edge_rotational_transform_over_n_field_periods=0.0,
-                        axis_magnetic_mirror_ratio=float("inf"),
-                        edge_magnetic_mirror_ratio=float("inf"),
-                        average_triangularity=0.0,
-                        vacuum_well=-float("inf"),
-                        minimum_normalized_magnetic_gradient_scale_length=0.0,
-                        qi=None,
-                        flux_compression_in_regions_of_bad_curvature=None,
-                    )
-                else:
-                    # Fallback to MockMetrics when constellaration unavailable
-                    from ai_scientist.backends.mock import MockMetrics
+                from ai_scientist.backends.mock import MockMetrics
 
-                    dummy_metrics = MockMetrics(
-                        aspect_ratio=float("inf"),
-                        max_elongation=float("inf"),
-                        minimum_normalized_magnetic_gradient_scale_length=0.0,
-                        mirror_ratio=float("inf"),
-                        vmec_converged=False,
-                    )
+                dummy_metrics = MockMetrics(
+                    aspect_ratio=float("inf"),
+                    max_elongation=float("inf"),
+                    minimum_normalized_magnetic_gradient_scale_length=0.0,
+                    mirror_ratio=float("inf"),
+                    vmec_converged=False,
+                )
 
                 # Determine penalty direction based on problem
                 # This duplicates logic from _penalized_result in tools/evaluation.py
