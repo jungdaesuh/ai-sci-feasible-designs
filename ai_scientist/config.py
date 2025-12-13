@@ -203,7 +203,7 @@ class GenerativeConfig:
     latent_dim: int = 16
     learning_rate: float = 1e-3
     epochs: int = 100
-    kl_weight: float = 0.001
+    kl_weight: float = 0.1  # AoT Fix: Higher default with warmup annealing
 
     # StellarForge / Paper Specs (Padidar et al.)
     checkpoint_path: Path | None = None
@@ -658,7 +658,7 @@ def _generative_config_from_dict(
         latent_dim=int(config.get("latent_dim", 16)),
         learning_rate=float(config.get("learning_rate", 1e-3)),
         epochs=int(config.get("epochs", 100)),
-        kl_weight=float(config.get("kl_weight", 0.001)),
+        kl_weight=float(config.get("kl_weight", 0.1)),
         # StellarForge / Paper Specs (Padidar et al.)
         checkpoint_path=checkpoint_path,
         device=str(config.get("device", "cpu")),

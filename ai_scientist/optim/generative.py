@@ -1271,6 +1271,13 @@ class GenerativeDesignModel:
         half_size = grid_size  # for one channel in flattened vector
 
         for epoch in range(self._epochs):
+            # AoT Fix 1: Cyclical KL annealing - warmup over first 20 epochs
+            # Prevents posterior collapse (Higgins et al., 2017: β-VAE)
+            warmup_epochs = 20
+            kl_weight_effective = min(
+                self._kl_weight, self._kl_weight * (epoch + 1) / warmup_epochs
+            )
+
             epoch_loss = 0.0
             epoch_recon = 0.0
             epoch_kl = 0.0
@@ -1298,11 +1305,14 @@ class GenerativeDesignModel:
 
                 # KLD: -0.5 * mean(1 + log(sigma^2) - mu^2 - sigma^2)
                 # Using mean over both batch and latent dims for consistent scaling
-                kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                # AoT Fix 2: Clamp logvar to prevent exp() overflow (float32 max ≈ 3.4e38)
+                logvar_clamped = torch.clamp(logvar, min=-20.0, max=20.0)
+                kld_loss = -0.5 * torch.mean(
+                    1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp()
+                )
 
-                # With proper normalization, kl_weight should be ~1.0
-                # But we keep user-specified weight for backward compatibility
-                loss = recon_loss + self._kl_weight * kld_loss
+                # AoT Fix 1: Use warmed-up KL weight to prevent posterior collapse
+                loss = recon_loss + kl_weight_effective * kld_loss
 
                 loss.backward()
                 self._optimizer.step()
