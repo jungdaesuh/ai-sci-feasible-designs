@@ -26,6 +26,22 @@ class ProblemEvaluator(Protocol):
 
 @dataclass
 class CycleSummary:
+    """Summary of a single optimization cycle.
+
+    A5.4 FIX: Documented field semantics to prevent confusion.
+
+    Attributes:
+        cycle: Cycle number (1-indexed).
+        objective: Physics objective value. Direction varies by problem:
+                   P1/P3: minimize (lower is better)
+                   P2: maximize (higher is better)
+                   See ai_scientist.objective_types for full semantics.
+        feasibility: Max constraint violation (0 = feasible, >0 = infeasible).
+        hv: Hypervolume score (P3 Pareto front metric). For single-objective
+            problems (P1/P2), this may store gradient_proxy instead.
+        stage: Fidelity stage used for evaluation (e.g., "screen", "promote", "p3").
+    """
+
     cycle: int
     objective: float | None
     feasibility: float | None
@@ -103,15 +119,33 @@ def _crowding_distance(
 
 
 def _relative_objective_improvement(
-    history: list[CycleSummary], lookback: int
+    history: list[CycleSummary], lookback: int, *, minimize: bool = True
 ) -> float:
+    """Compute relative improvement in objective over recent history.
+
+    A5.3 FIX: Added `minimize` parameter to handle objective directionality.
+    For P2 (maximize gradient), pass minimize=False to invert the comparison.
+
+    Args:
+        history: List of cycle summaries.
+        lookback: Number of cycles to look back.
+        minimize: If True, lower objective is better (P1/P3).
+                  If False, higher objective is better (P2).
+
+    Returns:
+        Relative improvement as a fraction (positive = improvement).
+    """
     if len(history) <= lookback:
         return 0.0
     earlier = history[-lookback - 1].objective
     latest = history[-1].objective
     if earlier is None or latest is None:
         return 0.0
+    # diff > 0 means improvement for minimize=True (lower is better)
     diff = earlier - latest
+    if not minimize:
+        # A5.3 FIX: For maximize objectives (P2), invert the comparison
+        diff = -diff
     denom = abs(earlier) if abs(earlier) > 1e-6 else 1.0
     return float(diff / denom)
 
@@ -367,8 +401,11 @@ class FidelityController:
             )
             if triggered:
                 return True
+        # A5.3 FIX: Pass objective direction based on problem type
+        # P1/P3: minimize=True (lower is better), P2: minimize=False (higher is better)
+        minimize_objective = not self.config.problem.lower().startswith("p2")
         improvement = _relative_objective_improvement(
-            history, gate_cfg.s1_to_s2_lookback_cycles
+            history, gate_cfg.s1_to_s2_lookback_cycles, minimize=minimize_objective
         )
         triggered_improvement = improvement >= gate_cfg.s1_to_s2_objective_improvement
         print(

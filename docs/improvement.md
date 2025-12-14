@@ -120,3 +120,27 @@ Section 4: Surrogate & Data Correctness - FIXED ✅
    - `surrogate_v2.py:354-360`: Added `problem` arg to `__init__`
    - `surrogate_v2.py:703-710`: Extracts `_stage` and maps to fidelity tensor
    - `surrogate_v2.py:989-994`: Conditional vacuum_well check based on problem bounds
+
+## A5: Constraints, Feasibility, and Scoring - FIXED ✅
+
+ A5.1: Constraint formulas vs ConStellaration benchmark - VERIFIED ✅
+   Constraint bounds in `forward_model.compute_constraint_margins()` match
+   `constellaration/problems.py` including P1 triangularity ≤ -0.5 (correct per benchmark).
+
+ A5.3: Objective-direction bug in stage-gating - FIXED ✅
+   Original issue: `_relative_objective_improvement()` assumed lower-is-better,
+   inverting improvement signal for P2 (maximize gradient).
+   **Fix Applied**:
+   - `fidelity_controller.py:105-130`: A5.3 FIX - Added `minimize` parameter
+   - `fidelity_controller.py:383-388`: Caller passes correct direction per problem
+
+ A5.2: Stage-dependent constraint gating brittleness - FIXED ✅
+   Original issue: "promote" stage skips QI constraint, risking false positive feasibility.
+   **Fix Applied**:
+   - `forward_model.py:562-568`: A5.2 FIX - Warning log when promote used with P2/P3
+
+ A5.4: CycleSummary semantic confusion - FIXED ✅
+   Original issue: `CycleSummary.objective` direction was undocumented.
+   **Fix Applied**:
+   - `fidelity_controller.py:27-44`: A5.4 FIX - Added comprehensive docstring
+   - `objective_types.py:58-59`: Removed legacy HV alias (pre-launch, no legacy data)

@@ -56,8 +56,7 @@ class TargetKind(str, Enum):
     """
 
     OBJECTIVE = "objective"
-    GRADIENT_PROXY = "gradient_proxy"  # H2 FIX: Per-candidate proxy, NOT hypervolume
-    HV = "gradient_proxy"  # Backward compat alias
+    GRADIENT_PROXY = "gradient_proxy"  # Per-candidate proxy, NOT hypervolume
 
 
 def get_training_target(problem: str) -> TargetKind:

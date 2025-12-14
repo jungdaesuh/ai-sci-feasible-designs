@@ -559,6 +559,14 @@ def compute_constraint_margins(
     include_vmec_constraints = stage_key not in ("screen", "low", "default")
     include_qi_constraint = stage_key not in ("screen", "low", "default", "promote")
 
+    # A5.2 FIX: Warn when 'promote' stage skips QI for problems that require it
+    if stage_key == "promote" and problem_key in ("p2", "p3"):
+        logger.warning(
+            "Stage 'promote' skips QI constraint - feasibility check incomplete for %s. "
+            "Use stage 'p2' or 'p3' for full constraint evaluation.",
+            problem_key.upper(),
+        )
+
     def _log10_margin(target: float) -> float:
         denom = abs(target) if abs(target) > 0.0 else 1.0
         return (_log10_or_large(metrics_map.get("qi")) - target) / denom
