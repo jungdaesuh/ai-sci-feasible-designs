@@ -22,6 +22,25 @@ test = [
     "pytest-cov>=4.0.0",
     "hypothesis>=6.0.0",
 ]
+ml = [
+    "scikit-learn>=1.0.0",
+    "pandas>=2.0.0",
+    "joblib>=1.2.0",
+]
+optimization = [
+    "pymoo>=0.6.0",
+    "nevergrad>=0.5.0",
+]
+datasets = [
+    "datasets>=2.0.0",
+]
+rl = [
+    "gymnasium>=0.29.0",
+]
+full = [
+    "ai_scientist[test,ml,optimization,datasets,rl]",
+    "PyYAML>=6.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

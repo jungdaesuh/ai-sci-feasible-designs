@@ -133,14 +133,10 @@ def test_coordinator_rebuilt_with_overrides(MockCoordinator, mock_config):
     )
     mock_fidelity_controller = MagicMock()
 
-    # Pass an initial coordinator to simulate the "reuse" scenario (which we are preventing)
-    initial_coordinator = MagicMock()
-
     executor = CycleExecutor(
         config=mock_config,
         world_model=mock_world_model,
         planner=MagicMock(),
-        coordinator=initial_coordinator,
         budget_controller=mock_budget_controller,
         fidelity_controller=mock_fidelity_controller,
     )
@@ -210,7 +206,6 @@ def test_generative_model_fit_called_once(MockCoordinator, mock_config):
         config=mock_config,
         world_model=mock_world_model,
         planner=MagicMock(),
-        coordinator=None,
         budget_controller=mock_budget_controller,
         fidelity_controller=mock_fidelity_controller,
     )
