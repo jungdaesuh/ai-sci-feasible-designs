@@ -220,20 +220,36 @@ class P3Problem(Problem):
         return violations
 
     def get_objective(self, metrics: Dict[str, Any]) -> float:
-        """Return primary objective (aspect_ratio) for single-objective optimization.
+        """Return scalarized objective for single-objective optimization.
 
         P3 is inherently multi-objective (minimize aspect_ratio AND maximize
-        L_grad_B for Pareto trade-off). This method returns only aspect_ratio
-        for compatibility with single-objective optimizers and benchmark scoring.
+        L_grad_B for Pareto trade-off). This method returns a scalarized
+        objective that balances both metrics for single-objective optimizers.
+
+        The ratio L_∇B / AR is used because:
+        - It naturally traces along the Pareto front
+        - Encourages both lower AR and higher L_∇B simultaneously
+        - Is scale-invariant and captures the efficiency trade-off
 
         For full multi-objective optimization, use:
             - forward_model.compute_p3_objectives() -> (aspect_ratio, -L_grad_B)
             - NSGA-II or similar Pareto-based algorithms
 
         Returns:
-            aspect_ratio: Lower is better (more compact reactor).
+            Negative ratio (-L_∇B / AR): Lower is better (minimization convention).
         """
-        return metrics.get("aspect_ratio", float("inf"))
+        import math
+
+        ar = metrics.get("aspect_ratio", float("inf"))
+        l_grad_b = metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+
+        # Handle invalid configurations
+        if ar <= 0 or not math.isfinite(ar):
+            return float("inf")
+
+        # Scalarized objective: maximize L_∇B / AR
+        # Return negative for minimization convention
+        return -l_grad_b / ar
 
 
 def get_problem(name: str) -> Problem:
