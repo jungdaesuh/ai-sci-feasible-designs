@@ -124,7 +124,7 @@ class PPOEngine:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_coef: float = 0.2,
-        ent_coef: float = 0.0,
+        ent_coef: float = 0.01,  # M5 FIX: Enable exploration regularization (was 0.0)
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         target_kl: float | None = None,

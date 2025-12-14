@@ -293,6 +293,17 @@ class StellaratorEnv(gym.Env):
         ar_deviation = abs(computed_ar - ar_target)
         cost += 1.0 * ar_deviation
 
+        # M2 FIX: Add explicit AR bounds enforcement for P3 multi-objective optimization
+        # P3 is a Pareto problem (min AR, max gradient) with implicit bounds from
+        # the reference Pareto front: AR ∈ [6.0, 12.0] for feasible solutions.
+        # Penalize designs that push toward AR extremes outside this range.
+        if self.problem.startswith("p3"):
+            ar_lower = self.target_metrics.get("aspect_ratio_lower", 6.0)
+            ar_upper = self.target_metrics.get("aspect_ratio_upper", 12.0)
+            ar_lower_violation = max(0.0, ar_lower - computed_ar)
+            ar_upper_violation = max(0.0, computed_ar - ar_upper)
+            cost += 2.0 * (ar_lower_violation + ar_upper_violation)
+
         # Reward is negative cost (Max Reward = Min Cost)
         return -cost
 
