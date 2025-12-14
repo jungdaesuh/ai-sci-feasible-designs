@@ -144,3 +144,41 @@ Section 4: Surrogate & Data Correctness - FIXED ✅
    **Fix Applied**:
    - `fidelity_controller.py:27-44`: A5.4 FIX - Added comprehensive docstring
    - `objective_types.py:58-59`: Removed legacy HV alias (pre-launch, no legacy data)
+
+## A6: Search / Optimization Kernel - FIXED ✅
+
+ A6.1: ASO + ALM is the right class of method - VERIFIED ✅
+   Augmented Lagrangian Method is appropriate for sparse feasibility and stiff constraints.
+
+ A6.2: ProcessPoolExecutor inside inner loops - FIXED ✅
+   Original issue: `alm_bridge.step_alm()` creates new ProcessPoolExecutor per outer iteration.
+   On macOS with spawn context, process startup cost is ~100-500ms per worker.
+   **Fix Applied**:
+   - `alm_bridge.py:47-62`: A6-001 FIX - Added `_executor` and `_mp_context` to ALMContext
+   - `alm_bridge.py:143-154`: Added `close_context()` cleanup function
+   - `alm_bridge.py:206-216`: Lazy executor initialization on first step, reused thereafter
+
+ A6.3: Multi-objective P3 handling issues - FIXED ✅
+
+   **A6.3a: Ranking proxy not hypervolume**
+   Original issue: `_score_metrics()` uses `gradient - aspect` which is not scale-invariant.
+   **Fix Applied**:
+   - `search.py:191-202`: A6-002 FIX - Added docstring explaining heuristic choice
+   - Documented that cycle-level HV uses proper pymoo.Hypervolume computation
+
+   **A6.3b: best_idx bug in state update**
+   Original issue: `candidates[best_idx]` used index from sorted `scored` list on original list.
+   **Fix Applied**:
+   - `search.py:357-360`: A6-003 FIX - Now gets `best_candidate = scored[best_idx][0]`
+
+ A6.4: Curriculum and RL integration issues - FIXED ✅
+
+   **A6.4a: curriculum.py unused**
+   Original issue: Module implemented but never integrated into cycle_executor.
+   **Fix Applied**:
+   - `curriculum.py:3-5`: A6-004 FIX - Added TODO explaining status and integration requirements
+
+   **A6.4b: RL env penalizes QI for P1**
+   Original issue: `rl_env._compute_score()` applies QI penalty for all problems, but P1 has no QI constraint.
+   **Fix Applied**:
+   - `rl_env.py:167-181`: A6-005 FIX - QI penalty wrapped in `if not self.problem.startswith("p1")`

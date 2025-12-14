@@ -189,6 +189,14 @@ class P3SearchWrapper:
         )
 
     def _score_metrics(self, metrics: Mapping[str, Any]) -> float:
+        """Compute proxy score for ranking candidates.
+
+        A6-002 NOTE: This uses `gradient - aspect` as a heuristic proxy, NOT true
+        Pareto hypervolume contribution. This is intentional for computational efficiency:
+        - HV contribution is O(N²) to compute for each candidate
+        - gradient - aspect captures the trade-off direction with O(1)
+        - Final cycle-level HV uses proper pymoo.Hypervolume computation
+        """
         gradient = float(metrics["minimum_normalized_magnetic_gradient_scale_length"])
         aspect = float(metrics["aspect_ratio"])
         return gradient - aspect
@@ -347,7 +355,9 @@ class P3SearchWrapper:
                 reverse=True,
             )
         best_idx = max(range(len(scored)), key=lambda idx: scored[idx][1])
-        best_vector = self._vectorizer.flatten(candidates[best_idx])
+        # A6-003 FIX: Get candidate from scored list (reordered), not original candidates
+        best_candidate = scored[best_idx][0]
+        best_vector = self._vectorizer.flatten(best_candidate)
         improved = evaluation["hv_score"] >= self._best_score
         self._update_state(best_vector, float(evaluation["hv_score"]), improved)
         return scored

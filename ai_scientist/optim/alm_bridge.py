@@ -45,7 +45,11 @@ class ALMStepResult:
 
 @dataclass
 class ALMContext:
-    """Context for ALM optimization (created once, reused across steps)."""
+    """Context for ALM optimization (created once, reused across steps).
+
+    A6-001: The executor is created lazily on first step_alm() call and reused
+    across all subsequent steps. Use close_context() when done to clean up.
+    """
 
     scale: jnp.ndarray
     unravel_fn: Callable[[jnp.ndarray], rz_fourier.SurfaceRZFourier]
@@ -53,6 +57,10 @@ class ALMContext:
     forward_settings: forward_model.ConstellarationSettings
     alm_settings: AugmentedLagrangianMethodSettings
     aspect_ratio_upper_bound: Optional[float]
+    # A6-001 FIX: Executor managed at context level, not per-step
+    num_workers: int = 4
+    _executor: Optional[futures.ProcessPoolExecutor] = None
+    _mp_context: Optional[Any] = None
 
 
 def create_alm_context(
@@ -127,9 +135,21 @@ def create_alm_context(
         forward_settings=settings.forward_model_settings,
         alm_settings=alm_settings,
         aspect_ratio_upper_bound=aspect_ratio_upper_bound,
+        num_workers=settings.optimizer_settings.oracle_settings.num_workers,
     )
 
     return context, state
+
+
+def close_context(context: ALMContext) -> None:
+    """Clean up ALM context resources (A6-001).
+
+    Call this when done with optimization to shut down the executor pool.
+    """
+    if context._executor is not None:
+        context._executor.shutdown(wait=True)
+        # Use object.__setattr__ to modify frozen-ish dataclass
+        object.__setattr__(context, "_executor", None)
 
 
 def step_alm(
@@ -183,50 +203,53 @@ def step_alm(
 
     n_evals = 0
 
-    # Use 'spawn' context for cross-platform portability (macOS, Windows, Linux)
-    # Note: 'forkserver' is only available on Linux and can cause issues with
-    # JAX/PyTorch GPU memory when forking.
-    mp_context = multiprocessing.get_context("spawn")
+    # A6-001 FIX: Reuse executor from context instead of creating per-step
+    # Lazy initialization on first call
+    if context._executor is None:
+        mp_context = multiprocessing.get_context("spawn")
+        executor = futures.ProcessPoolExecutor(
+            max_workers=context.num_workers, mp_context=mp_context
+        )
+        object.__setattr__(context, "_mp_context", mp_context)
+        object.__setattr__(context, "_executor", executor)
 
-    with futures.ProcessPoolExecutor(
-        max_workers=num_workers, mp_context=mp_context
-    ) as executor:
-        running: list[Tuple[futures.Future, Any]] = []
-        rest_budget = budget
+    executor = context._executor
+    running: list[Tuple[futures.Future, Any]] = []
+    rest_budget = budget
 
-        while rest_budget or running:
-            # Submit new evaluations
-            while len(running) < min(num_workers, rest_budget):
-                candidate = oracle.ask()
-                future = executor.submit(
-                    objective_constraints,
-                    jnp.array(candidate.value),
-                    context.scale,
-                    context.problem,
-                    context.unravel_fn,
-                    context.forward_settings,
-                    context.aspect_ratio_upper_bound,
-                )
-                running.append((future, candidate))
-                rest_budget -= 1
-
-            # Wait for completions
-            completed, _ = futures.wait(
-                [f for f, _ in running],
-                return_when=futures.FIRST_COMPLETED,
+    while rest_budget or running:
+        # Submit new evaluations
+        while len(running) < min(num_workers, rest_budget):
+            candidate = oracle.ask()
+            future = executor.submit(
+                objective_constraints,
+                jnp.array(candidate.value),
+                context.scale,
+                context.problem,
+                context.unravel_fn,
+                context.forward_settings,
+                context.aspect_ratio_upper_bound,
             )
+            running.append((future, candidate))
+            rest_budget -= 1
 
-            for future, candidate in running:
-                if future in completed:
-                    n_evals += 1
-                    (obj, cons), metrics = future.result()
+        # Wait for completions
+        completed, _ = futures.wait(
+            [f for f, _ in running],
+            return_when=futures.FIRST_COMPLETED,
+        )
 
-                    oracle.tell(
-                        candidate,
-                        augmented_lagrangian_function(obj, cons, state).item(),
-                    )
+        for future, candidate in running:
+            if future in completed:
+                n_evals += 1
+                (obj, cons), metrics = future.result()
 
-            running = [(f, c) for f, c in running if f not in completed]
+                oracle.tell(
+                    candidate,
+                    augmented_lagrangian_function(obj, cons, state).item(),
+                )
+
+        running = [(f, c) for f, c in running if f not in completed]
 
     # Get final recommendation
     recommendation = oracle.provide_recommendation()

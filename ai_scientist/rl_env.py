@@ -164,19 +164,21 @@ class StellaratorEnv(gym.Env):
         cost = 0.0
 
         # 1. QI in log scale (consistent with benchmark constraints)
-        QI_CLAMP_FLOOR = 1e-10
-        # QI residual is non-negative by definition; guard against surrogate sign flips.
-        qi_positive = abs(qi_val)
-        qi_clamped = max(QI_CLAMP_FLOOR, qi_positive)
-        log_qi = np.log10(qi_clamped)
-        qi_target = self.target_metrics.get("log10_qi_threshold", -4.0)
+        # A6-005 FIX: P1 benchmark has NO QI constraint, only P2/P3 do
+        if not self.problem.startswith("p1"):
+            QI_CLAMP_FLOOR = 1e-10
+            # QI residual is non-negative by definition; guard against surrogate sign flips.
+            qi_positive = abs(qi_val)
+            qi_clamped = max(QI_CLAMP_FLOOR, qi_positive)
+            log_qi = np.log10(qi_clamped)
+            qi_target = self.target_metrics.get("log10_qi_threshold", -4.0)
 
-        # Strong feasibility penalty + mild continuous improvement
-        qi_feasibility_penalty = max(0.0, log_qi - qi_target)
-        qi_continuous = log_qi - qi_target  # Can be negative (good)
+            # Strong feasibility penalty + mild continuous improvement
+            qi_feasibility_penalty = max(0.0, log_qi - qi_target)
+            qi_continuous = log_qi - qi_target  # Can be negative (good)
 
-        cost += 10.0 * qi_feasibility_penalty  # Strong feasibility push
-        cost += 0.5 * qi_continuous  # Mild improvement push
+            cost += 10.0 * qi_feasibility_penalty  # Strong feasibility push
+            cost += 0.5 * qi_continuous  # Mild improvement push
 
         # 2. MHD Stability (Vacuum Well) - want > 0
         # B3 FIX: Only penalize for P3 problems (vacuum_well is a P3-only constraint!)

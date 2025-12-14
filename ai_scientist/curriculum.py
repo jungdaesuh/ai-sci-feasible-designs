@@ -1,5 +1,9 @@
 """Curriculum learning scheduler for progressive constraint satisfaction (Issue #12).
 
+TODO (A6-004): This module is implemented but not yet integrated into cycle_executor.
+Integration requires design decision on when/how to trigger stage advancement.
+Current status: Feature-complete but disabled by default (CurriculumConfig.enabled=False).
+
 Curriculum learning starts with easier problems and progressively adds constraints:
 - P1 (Warm-up): Geometry optimization only (minimize elongation)
 - P2 (Intermediate): Add QI + vacuum well constraints
