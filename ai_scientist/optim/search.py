@@ -227,36 +227,62 @@ class P3SearchWrapper:
     def _nondominated_fronts(
         self, objectives: list[tuple[float, float]], feasibilities: list[float]
     ) -> list[list[int]]:
+        """Fast Non-Dominated Sort with O(MN²) complexity.
+
+        Reference: Deb et al., "A Fast and Elitist Multiobjective Genetic
+        Algorithm: NSGA-II", IEEE Transactions on Evolutionary Computation, 2002.
+
+        For M=2 objectives, this reduces to O(N²) which is a significant
+        improvement over the naive O(N³) approach.
+        """
+        n = len(objectives)
         feasible_idx = [
             idx
             for idx, feas in enumerate(feasibilities)
             if feas <= tools._DEFAULT_RELATIVE_TOLERANCE
         ]
+
         if not feasible_idx:
-            return [list(range(len(objectives)))]
+            return [list(range(n))]
+
+        # domination_count[i] = number of solutions that dominate i
+        domination_count: dict[int, int] = {i: 0 for i in feasible_idx}
+        # dominated_set[i] = list of solutions that i dominates
+        dominated_set: dict[int, list[int]] = {i: [] for i in feasible_idx}
+
+        # Single pass to compute all domination relationships: O(N²)
+        for i, idx_i in enumerate(feasible_idx):
+            for idx_j in feasible_idx[i + 1 :]:
+                g_i, a_i = objectives[idx_i]
+                g_j, a_j = objectives[idx_j]
+
+                # i dominates j if: higher gradient AND lower aspect ratio
+                # (with at least one strict inequality)
+                i_dom_j = (g_i >= g_j and a_i <= a_j) and (g_i > g_j or a_i < a_j)
+                j_dom_i = (g_j >= g_i and a_j <= a_i) and (g_j > g_i or a_j < a_i)
+
+                if i_dom_j:
+                    dominated_set[idx_i].append(idx_j)
+                    domination_count[idx_j] += 1
+                elif j_dom_i:
+                    dominated_set[idx_j].append(idx_i)
+                    domination_count[idx_i] += 1
+
+        # Extract fronts by iteratively removing non-dominated solutions
         fronts: list[list[int]] = []
-        remaining = set(feasible_idx)
-        while remaining:
-            front: list[int] = []
-            for idx in list(remaining):
-                dominated = False
-                for other in list(remaining):
-                    if idx == other:
-                        continue
-                    grad, aspect = objectives[idx]
-                    o_grad, o_aspect = objectives[other]
-                    if (o_grad >= grad and o_aspect <= aspect) and (
-                        o_grad > grad or o_aspect < aspect
-                    ):
-                        dominated = True
-                        break
-                if not dominated:
-                    front.append(idx)
-            if not front:
-                break
-            fronts.append(front)
-            remaining -= set(front)
-        return fronts if fronts else [list(range(len(objectives)))]
+        current_front = [i for i in feasible_idx if domination_count[i] == 0]
+
+        while current_front:
+            fronts.append(current_front)
+            next_front: list[int] = []
+            for i in current_front:
+                for j in dominated_set[i]:
+                    domination_count[j] -= 1
+                    if domination_count[j] == 0:
+                        next_front.append(j)
+            current_front = next_front
+
+        return fronts if fronts else [list(range(n))]
 
     def _update_state(
         self, best_vector: np.ndarray, hv_score: float, improved: bool
