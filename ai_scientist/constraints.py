@@ -260,7 +260,21 @@ def get_r00_target() -> float:
 
 
 def get_hv_reference_point() -> Tuple[float, float]:
-    """Get P3 hypervolume reference point in MINIMIZATION form (H2 Fix).
+    """Get P3 hypervolume reference point in MINIMIZATION form (H1/H2 Fix).
+
+    CONVENTION EQUIVALENCE (H1 Fix):
+    The benchmark (constellaration/problems.py) uses:
+        X = [(-1.0 * gradient), (+1.0 * aspect_ratio)]
+        reference_point = [1.0, 20.0]
+
+    This function returns:
+        reference_point = (-1.0, 20.0) in minimization form
+
+    These are mathematically equivalent because:
+        -gradient > -1.0  iff  gradient < 1.0
+
+    Both filter out points where gradient < 1.0 (poor performing designs).
+    The sign difference is just a convention for minimization-form storage.
 
     The reference point can be overridden via environment variables:
     - HV_REF_GRADIENT: gradient threshold in natural units (default 1.0)

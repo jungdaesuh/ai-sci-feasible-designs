@@ -1214,7 +1214,13 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             # - exploration_bonus: Adds value for uncertain predictions to encourage exploration (UCB).
             # - constraint_distance: Penalty for geometric constraints (e.g. self-intersection).
             #   The weight 10.0 is a heuristic to strongly discourage invalid geometries.
-            score = base_score + exploration_bonus - (10.0 * constraint_distance)
+            # H4 FIX: Weight by prob_feasible to prioritize feasible candidates
+            # For rare-feasibility search (P2/P3), this ensures VMEC budget is
+            # spent on candidates likely to be feasible rather than high-objective infeasible ones.
+            # Formula: score = prob_feasible * (base_score + exploration_bonus) - constraint_penalty
+            score = prob_feasible * (base_score + exploration_bonus) - (
+                10.0 * constraint_distance
+            )
 
             predictions.append(
                 SurrogatePrediction(

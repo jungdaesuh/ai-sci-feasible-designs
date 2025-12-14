@@ -424,7 +424,10 @@ class ExperimentConfig:
                 pool_type=defaults.budgets.pool_type,
             ),
             adaptive_budgets=defaults.adaptive_budgets,
-            fidelity_ladder=defaults.fidelity_ladder,
+            # H5 FIX: Force QI computation at promote stage for P3 high fidelity
+            # Using "p3" stage instead of "promote" ensures QI is computed
+            # since _settings_for_stage("promote") calls default_high_fidelity_skip_qi()
+            fidelity_ladder=FidelityLadder(screen="screen", promote="p3"),
             boundary_template=defaults.boundary_template,
             stage_gates=defaults.stage_gates,
             governance=defaults.governance,

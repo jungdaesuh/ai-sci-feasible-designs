@@ -480,15 +480,45 @@ def gradient_descent_on_inputs(
                 (log10_qi_corrected + beta * s_log10_qi) - log10_qi_threshold
             )
 
-            # Elongation: Good if < MAX_ELONGATION
-            viol_elo = torch.relu(
-                (pred_elo.squeeze() + beta * std_elo.squeeze()) - MAX_ELONGATION
-            )
+            # Elongation: Good if < MAX_ELONGATION (P2 only - P3 has no elongation constraint)
+            # H3 FIX: Only penalize elongation for P2, not P3
+            if problem.lower().startswith("p2"):
+                viol_elo = torch.relu(
+                    (pred_elo.squeeze() + beta * std_elo.squeeze()) - MAX_ELONGATION
+                )
+            else:
+                viol_elo = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+
+            # H3 FIX: P3-specific constraints (iota, mirror ratio, flux compression)
+            # These are extracted from surrogate predictions but were previously ignored
+            viol_iota = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+            viol_mirror = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+            viol_flux = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+
+            if problem.lower().startswith("p3") or problem.lower().startswith("p2"):
+                # Iota (edge rotational transform): Good if >= 0.25
+                iota_bound = 0.25
+                viol_iota = torch.relu(iota_bound - _pred_iota.squeeze())
+
+            if problem.lower().startswith("p3"):
+                # Mirror ratio: Good if <= 0.25 (P3 bound)
+                mirror_bound = 0.25
+                viol_mirror = torch.relu(_pred_mirror.squeeze() - mirror_bound)
+                # Flux compression: Good if <= 0.9
+                flux_bound = 0.9
+                viol_flux = torch.relu(_pred_flux.squeeze() - flux_bound)
+            elif problem.lower().startswith("p2"):
+                # Mirror ratio: Good if <= 0.2 (P2 bound)
+                mirror_bound = 0.2
+                viol_mirror = torch.relu(_pred_mirror.squeeze() - mirror_bound)
 
             loss_penalty = (
                 weights.mhd * viol_mhd
                 + weights.qi * viol_qi
                 + weights.elongation * viol_elo
+                + viol_iota  # No configurable weight - use unit weight
+                + viol_mirror
+                + viol_flux
             )
 
             # Fourier decay regularization (L2 penalty weighted by mode order)
