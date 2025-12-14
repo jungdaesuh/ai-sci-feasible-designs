@@ -1046,12 +1046,29 @@ class DiffusionDesignModel:
             return []
 
         # Prepare target metrics tensor
-        # Must match _extract_metrics logic
-        # target_metrics usually comes from exploration worker which has good keys
-        iota = target_metrics.get("iota_bar", 0.0)  # check keys
-        ar = target_metrics.get("aspect_ratio", 0.0)
-        nfp = target_metrics.get("nfp", 3.0)
-        is_qh = target_metrics.get("N", 0.0)  # 0 for QA
+        # FIX A4.4: Use canonical keys from METRIC_KEYS (SSOT with _extract_metrics)
+        # Previously used wrong keys: "iota_bar", "nfp", "N" (from pseudo-code)
+        iota = target_metrics.get(
+            self.METRIC_KEYS[0]
+        )  # edge_rotational_transform_over_n_field_periods
+        ar = target_metrics.get(self.METRIC_KEYS[1])  # aspect_ratio
+        nfp = target_metrics.get(self.METRIC_KEYS[2])  # number_of_field_periods
+        is_qh = target_metrics.get(self.METRIC_KEYS[3])  # is_quasihelical
+
+        # Warn on missing required keys instead of silent fallback
+        if iota is None:
+            _LOGGER.warning(
+                "[diffusion] Missing key '%s' in target_metrics. "
+                "Defaulting iota=0.0 - conditioning may not work as intended.",
+                self.METRIC_KEYS[0],
+            )
+            iota = 0.0
+        if ar is None:
+            ar = 0.0
+        if nfp is None:
+            nfp = 3.0
+        if is_qh is None:
+            is_qh = 0.0
 
         m_vec = [iota, ar, nfp, is_qh]
 
