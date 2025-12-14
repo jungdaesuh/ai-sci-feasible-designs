@@ -69,9 +69,13 @@ class MetricsProtocol(Protocol):
         ...
 
 
-# Note: Functions below use `Any` for metrics parameter to maintain compatibility
-# with both MetricsProtocol-compliant objects and dict fallbacks. The Protocol
-# above documents the expected interface.
+# Type alias for metrics: accepts Protocol-compliant objects or dict fallback
+# This provides type safety while maintaining compatibility with different sources:
+# - constellaration.forward_model.Metrics (real physics)
+# - ai_scientist.backends.mock.MockMetrics (testing)
+# - Dict fallback (when module unavailable or from model_dump())
+# Note: dict uses Any because model_dump() returns mixed types (float, bool, etc.)
+MetricsLike = MetricsProtocol | Dict[str, Any]
 
 
 def _is_constellaration_available() -> bool:
@@ -478,7 +482,7 @@ def _log10_or_large(value: float | None) -> float:
 
 
 def compute_constraint_margins(
-    metrics: Any,
+    metrics: MetricsLike,
     problem: str,
     *,
     stage: str = "high",
@@ -594,7 +598,7 @@ def compute_constraint_margins(
 
 
 def compute_objective(
-    metrics: Any,
+    metrics: MetricsLike,
     problem: str,
 ) -> float:
     """Compute the primary PHYSICS objective function value.
@@ -630,7 +634,7 @@ def compute_objective(
 
 
 def compute_p3_objectives(
-    metrics: Any,
+    metrics: MetricsLike,
 ) -> tuple[float, float]:
     """Compute both P3 objectives for multi-objective Pareto analysis (B1 fix).
 

@@ -572,6 +572,15 @@ class PreRelaxWorker(Worker):
             Dict with:
                 - candidates: List[Dict[str, Any]] - Pre-relaxed, filtered candidates.
                 - status: str
+
+        Note on GIL and Parallelism (Issue #15):
+            Sequential mode uses ThreadPoolExecutor. Python's GIL limits true
+            parallelism for CPU-bound pure-Python code. However, _relax_single
+            calls torch/numpy C++ kernels which release the GIL, achieving
+            reasonable parallelism in practice.
+
+            For large batches (>100), use_batched=True triggers vectorized
+            tensor processing which avoids GIL entirely and is ~10× faster.
         """
         candidates = context.get("candidates", [])
         if not candidates:

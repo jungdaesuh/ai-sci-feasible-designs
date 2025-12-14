@@ -402,6 +402,9 @@ class ExperimentConfig:
     reporting: Mapping[str, Any] = field(default_factory=dict)
     run_overrides: Mapping[str, Any] = field(default_factory=dict)
     planner: str = "deterministic"
+    # H1 Fix: Enable R₀₀ (major radius) optimization with L2 regularization toward ~1.0
+    # Default False for backward compatibility with benchmark normalization convention
+    optimize_major_radius: bool = False
 
     @staticmethod
     def p3_high_fidelity() -> "ExperimentConfig":

@@ -19,6 +19,7 @@ from ai_scientist.constraints import (
     EARLY_STOPPING_MIN_IMPROVEMENT,
     EARLY_STOPPING_PATIENCE,
     LAMBDA_FOURIER_DECAY,
+    LAMBDA_R00_REGULARIZATION,
     MAX_ELONGATION,
     QI_EPS,
     get_log10_qi_threshold,
@@ -66,11 +67,23 @@ def _is_maximization_problem(problem: str, target: TargetKind) -> bool:
     return problem_lower.startswith("p2")
 
 
-def _build_local_mask(max_poloidal: int, max_toroidal: int) -> np.ndarray:
+def _build_local_mask(
+    max_poloidal: int,
+    max_toroidal: int,
+    *,
+    include_r00: bool = False,
+) -> np.ndarray:
     """Build stellarator-symmetric mask without depending on constellaration.
 
-    Returns a boolean mask of shape (mpol+1, 2*ntor+1) where True indicates
-    an active coefficient that should be optimized.
+    Args:
+        max_poloidal: Maximum poloidal mode number.
+        max_toroidal: Maximum toroidal mode number.
+        include_r00: If True, include R₀₀ (m=0, n=0) in optimization.
+                     Default False for backward compatibility.
+
+    Returns:
+        Boolean mask of shape (mpol+1, 2*ntor+1) where True indicates
+        an active coefficient that should be optimized.
     """
     grid_h = max_poloidal + 1
 
@@ -78,19 +91,33 @@ def _build_local_mask(max_poloidal: int, max_toroidal: int) -> np.ndarray:
     toroidal = np.arange(-max_toroidal, max_toroidal + 1)[None, :]
 
     # Stellarator symmetry: m=0 only has n >= 1 active, m>0 has all n
-    return (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
+    # Optionally include R₀₀ (m=0, n=0) for major radius optimization
+    if include_r00:
+        return (poloidal > 0) | ((poloidal == 0) & (toroidal >= 0))
+    else:
+        return (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
 
 
 def _extract_masked_params(
-    params: Mapping[str, Any], max_poloidal: int, max_toroidal: int
+    params: Mapping[str, Any],
+    max_poloidal: int,
+    max_toroidal: int,
+    *,
+    include_r00: bool = False,
 ) -> Tuple[np.ndarray, dict]:
     """Extract active Fourier coefficients from params as a flat vector.
+
+    Args:
+        params: Boundary parameters dict with r_cos, z_sin.
+        max_poloidal: Maximum poloidal mode number.
+        max_toroidal: Maximum toroidal mode number.
+        include_r00: If True, include R₀₀ (m=0, n=0) in optimization.
 
     Returns:
         flat_vector: 1D array of active coefficients [r_cos_masked, z_sin_masked]
         metadata: dict with n_field_periods, is_stellarator_symmetric, and shapes
     """
-    mask = _build_local_mask(max_poloidal, max_toroidal)
+    mask = _build_local_mask(max_poloidal, max_toroidal, include_r00=include_r00)
     grid_h = max_poloidal + 1
     grid_w = 2 * max_toroidal + 1
 
@@ -192,6 +219,7 @@ def _compute_index_mapping(
     *,
     dense_mpol: int | None = None,
     dense_ntor: int | None = None,
+    include_r00: bool = False,
 ) -> Tuple[torch.Tensor, int]:
     """Compute the index mapping from compact (masked) to dense (surrogate) vector.
 
@@ -199,12 +227,21 @@ def _compute_index_mapping(
 
     1. **Compact (masked)**: Elements extracted by `mask_and_ravel` from a SurfaceRZFourier
        pytree. The mask follows stellarator symmetry rules:
-       - For m=0: only n >= 1 are active
+       - For m=0: only n >= 1 are active (or n >= 0 if include_r00=True)
        - For m>0: all n in [-ntor, ntor] are active
        Order: r_cos masked elements, then z_sin masked elements (pytree leaf order).
 
     2. **Dense (structured_flatten)**: Layout is [r_cos..., z_sin...] where each matrix
        is flattened in row-major order: m=0..mpol, n=-ntor..ntor.
+
+    Args:
+        boundary_template: Template object (used for type hints only).
+        max_poloidal: Maximum poloidal mode number.
+        max_toroidal: Maximum toroidal mode number.
+        device: Torch device string.
+        dense_mpol: Target dense mpol (defaults to max_poloidal).
+        dense_ntor: Target dense ntor (defaults to max_toroidal).
+        include_r00: If True, include R₀₀ (m=0, n=0) in optimization.
 
     Returns:
         dense_indices: Tensor of shape (compact_size,) containing indices in the dense
@@ -227,26 +264,18 @@ def _compute_index_mapping(
     half_dense = dense_grid_h * dense_grid_w
     dense_size = 2 * half_dense  # r_cos + z_sin
 
-    # Build the mask the same way constellaration does (stellarator symmetric):
-    # For m=0: only n >= 1 are active (R_cos(0,0) is major radius, kept; but mask excludes n<1)
-    # Wait - looking at build_mask more carefully:
-    # (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
-    # So for m=0: n >= 1 is kept
-    # For m>0: all n are kept
+    # Build the mask with stellarator symmetry rules:
+    # - For m=0: n >= 1 (or n >= 0 if include_r00=True)
+    # - For m>0: all n are kept
     poloidal = np.arange(source_grid_h)[:, None]  # (mpol+1, 1)
     toroidal = np.arange(-max_toroidal, max_toroidal + 1)[None, :]  # (1, 2*ntor+1)
 
-    mask_array = (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
-
-    # IMPORTANT: R₀₀ (major radius) is intentionally EXCLUDED from optimization.
-    # Physics Rationale:
-    #   1. R₀₀ sets the overall scale of the stellarator (normalization).
-    #   2. The aspect ratio metric already captures compactness relative to R₀₀.
-    #   3. Optimizing R₀₀ would be redundant with aspect ratio minimization.
-    #   4. Constellaration benchmarks treat R₀₀ as a fixed scale parameter.
-    #
-    # The mask follows stellarator symmetry: (m>0) OR (m=0 AND n>=1).
-    # This excludes (m=0, n=0) and (m=0, n<0) from the optimization vector.
+    if include_r00:
+        # Include R₀₀ (m=0, n=0) for major radius optimization
+        mask_array = (poloidal > 0) | ((poloidal == 0) & (toroidal >= 0))
+    else:
+        # Default: exclude R₀₀ for backward compatibility
+        mask_array = (poloidal > 0) | ((poloidal == 0) & (toroidal >= 1))
 
     # Get (m, n_idx) pairs where mask is True, in row-major order
     # np.argwhere returns in row-major order: iterates m first, then n_idx within each m
@@ -315,6 +344,8 @@ def gradient_descent_on_inputs(
         schema = tools.FlattenSchema(mpol=int(schema.mpol), ntor=int(schema.ntor))
 
     # Precompute mapping (compact mask -> dense surrogate schema)
+    # H1 Fix: Check if major radius optimization is enabled
+    include_r00 = getattr(cfg, "optimize_major_radius", False)
     dense_indices, dense_size = _compute_index_mapping(
         template,
         max_poloidal,
@@ -322,16 +353,20 @@ def gradient_descent_on_inputs(
         device,
         dense_mpol=schema.mpol,
         dense_ntor=schema.ntor,
+        include_r00=include_r00,
     )
 
     weights = cfg.constraint_weights
     problem = getattr(cfg, "problem", "p3")
+    ntor = schema.ntor  # For R₀₀ index calculation
 
     for candidate in candidates:
         params = candidate["params"]
 
         # 1. Extract masked params using local helper (mock-safe)
-        flat_np, metadata = _extract_masked_params(params, max_poloidal, max_toroidal)
+        flat_np, metadata = _extract_masked_params(
+            params, max_poloidal, max_toroidal, include_r00=include_r00
+        )
         n_field_periods = metadata["n_field_periods"]
 
         x_torch = torch.tensor(
@@ -455,13 +490,25 @@ def gradient_descent_on_inputs(
 
             # Fourier decay regularization (L2 penalty weighted by mode order)
             m_idx = torch.arange(grid_h, device=device, dtype=x_torch.dtype)
-            n_idx = torch.arange(-ntor, ntor + 1, device=device, dtype=x_torch.dtype)
-            mode_weight = torch.sqrt(m_idx[:, None] ** 2 + n_idx[None, :] ** 2)
+            n_idx_arr = torch.arange(
+                -ntor, ntor + 1, device=device, dtype=x_torch.dtype
+            )
+            mode_weight = torch.sqrt(m_idx[:, None] ** 2 + n_idx_arr[None, :] ** 2)
             fourier_penalty = LAMBDA_FOURIER_DECAY * torch.sum(
                 mode_weight * (r_cos.squeeze() ** 2 + z_sin.squeeze() ** 2)
             )
 
-            loss = loss_obj + loss_penalty + fourier_penalty
+            # H1 Fix: R₀₀ regularization (if included in optimization)
+            # Strong regularization toward dataset mean (~1.0) prevents scale drift
+            r00_penalty = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+            if include_r00:
+                # R₀₀ is at position (0, ntor) in the r_cos coefficient matrix
+                # In the dense vector, index = 0 * dense_grid_w + ntor = ntor
+                r00_value = x_dense[ntor]
+                r00_target = 1.0
+                r00_penalty = LAMBDA_R00_REGULARIZATION * (r00_value - r00_target) ** 2
+
+            loss = loss_obj + loss_penalty + fourier_penalty + r00_penalty
 
             loss.backward()
             optimizer.step()
@@ -511,12 +558,22 @@ def optimize_alm_inner_loop(
     lr: float = 1e-2,
     device: str = "cpu",
     target: TargetKind,
+    include_r00: bool = False,
 ) -> np.ndarray:
     """Optimize the ALM inner loop using gradient descent on the surrogate.
 
     Args:
+        x_initial: Initial parameter vector (scaled).
+        scale: Scaling factors for parameters.
+        surrogate: The differentiable surrogate model.
+        alm_state: ALM state with multipliers and penalty parameters.
+        n_field_periods_val: Number of field periods.
+        problem: Problem identifier (p1, p2, p3).
+        steps: Number of optimization steps.
+        lr: Learning rate.
+        device: Device to run optimization on.
         target: Surrogate training target (TargetKind.OBJECTIVE or TargetKind.HV).
-                Use get_training_target() to obtain this from problem type.
+        include_r00: If True, include R₀₀ in optimization with regularization.
     """
 
     if surrogate._schema is None:
@@ -536,6 +593,7 @@ def optimize_alm_inner_loop(
         max_poloidal=mpol,
         max_toroidal=ntor,
         device=device,
+        include_r00=include_r00,
     )
 
     # Convert inputs to Torch
@@ -662,13 +720,20 @@ def optimize_alm_inner_loop(
 
         # Fourier decay regularization (L2 penalty weighted by mode order)
         m_idx = torch.arange(grid_h, device=device, dtype=x_torch.dtype)
-        n_idx = torch.arange(-ntor, ntor + 1, device=device, dtype=x_torch.dtype)
-        mode_weight = torch.sqrt(m_idx[:, None] ** 2 + n_idx[None, :] ** 2)
+        n_idx_arr = torch.arange(-ntor, ntor + 1, device=device, dtype=x_torch.dtype)
+        mode_weight = torch.sqrt(m_idx[:, None] ** 2 + n_idx_arr[None, :] ** 2)
         fourier_penalty = LAMBDA_FOURIER_DECAY * torch.sum(
             mode_weight * (r_cos.squeeze() ** 2 + z_sin.squeeze() ** 2)
         )
 
-        loss = obj_term + torch.sum(augmented_term) + fourier_penalty
+        # H1 Fix: R₀₀ regularization (if included in optimization)
+        r00_penalty = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+        if include_r00:
+            r00_value = x_dense[ntor]
+            r00_target = 1.0
+            r00_penalty = LAMBDA_R00_REGULARIZATION * (r00_value - r00_target) ** 2
+
+        loss = obj_term + torch.sum(augmented_term) + fourier_penalty + r00_penalty
 
         loss.backward()
         optimizer.step()

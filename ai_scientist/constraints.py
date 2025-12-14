@@ -124,6 +124,11 @@ LOG10_QI_THRESHOLDS: Dict[str, float] = {
 # Fourier decay regularization weight
 LAMBDA_FOURIER_DECAY: float = 0.01
 
+# L2 regularization weight for R₀₀ (major radius) toward dataset mean (~1.0)
+# Strong regularization (10.0) prevents scale drift while allowing optimization
+# Used when optimize_major_radius=True in ExperimentConfig
+LAMBDA_R00_REGULARIZATION: float = 10.0
+
 # Early stopping parameters for gradient descent
 EARLY_STOPPING_PATIENCE: int = 10
 EARLY_STOPPING_MIN_IMPROVEMENT: float = 1e-4
