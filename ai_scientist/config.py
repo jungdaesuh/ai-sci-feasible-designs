@@ -204,7 +204,7 @@ class GenerativeConfig:
 
     enabled: bool
     backend: str = "vae"
-    latent_dim: int = 16
+    latent_dim: int = 32  # Increased for 80+ dimensional input space
     learning_rate: float = 1e-3
     epochs: int = 100
     kl_weight: float = 0.1  # AoT Fix: Higher default with warmup annealing

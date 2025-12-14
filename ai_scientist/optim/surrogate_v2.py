@@ -628,7 +628,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         # 3. Train Loop with Early Stopping (AoT recommendation)
         # Deep Ensembles: random init + bagging for better calibration
         # (Lakshminarayanan et al., 2017: "Simple and Scalable Predictive Uncertainty")
-        criterion = nn.MSELoss()
+        criterion = nn.SmoothL1Loss()  # Huber loss for outlier robustness
         n_samples = len(dataset)
 
         # Early stopping parameters
