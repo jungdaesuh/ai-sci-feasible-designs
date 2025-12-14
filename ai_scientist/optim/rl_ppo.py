@@ -52,8 +52,9 @@ class Agent(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
-        # Clamp logstd to prevent exp underflow (-20 → ~2e-9) and explosion (+2 → ~7.4)
-        action_logstd = torch.clamp(action_logstd, min=-20.0, max=2.0)
+        # Clamp logstd to prevent exp underflow (-5 → ~0.0067) and explosion (+2 → ~7.4)
+        # Note: min=-5.0 allows reasonable exploration; min=-20.0 would collapse exploration
+        action_logstd = torch.clamp(action_logstd, min=-5.0, max=2.0)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
 
@@ -84,7 +85,12 @@ class PPOBuffer:
 
     def add(self, obs, action, logprob, reward, done, value):
         if self.ptr >= self.size:
-            return  # Overflow protection
+            _LOGGER.warning(
+                "PPOBuffer overflow: buffer full (size=%d), dropping experience. "
+                "Consider increasing buffer size or calling reset() more frequently.",
+                self.size,
+            )
+            return
         self.obs[self.ptr] = torch.tensor(obs).to(self.device)
         self.actions[self.ptr] = action
         self.logprobs[self.ptr] = logprob

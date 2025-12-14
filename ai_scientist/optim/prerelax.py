@@ -14,6 +14,16 @@ from ai_scientist.optim import geometry
 
 _LOGGER = logging.getLogger(__name__)
 
+# Geometric Energy Loss Weights
+# These weights control the relative importance of each term in the geometric energy function.
+# Rationale:
+#   - WEIGHT_CURVATURE (1.0): Primary term for smoothness; penalizes sharp edges/high curvature.
+#   - WEIGHT_ASPECT_RATIO (0.5): Secondary term to maintain design intent (target A≈8).
+#   - WEIGHT_ELONGATION (10.0): Hard constraint to avoid pinching; high weight ensures elongation < 10.
+WEIGHT_CURVATURE: float = 1.0
+WEIGHT_ASPECT_RATIO: float = 0.5
+WEIGHT_ELONGATION: float = 10.0
+
 
 def geometric_energy(
     r_cos: torch.Tensor,
@@ -51,9 +61,12 @@ def geometric_energy(
     elo = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
     elo_penalty = torch.relu(elo - 10.0) ** 2
 
-    # Total Energy
-    # Weights tuning: Curvature is primary (~1.0), AR maintenance (~0.5), Elongation is hard constraint (~10.0)
-    loss = 1.0 * H_mean + 0.5 * ar_loss + 10.0 * elo_penalty
+    # Total Energy (using module-level weight constants)
+    loss = (
+        WEIGHT_CURVATURE * H_mean
+        + WEIGHT_ASPECT_RATIO * ar_loss
+        + WEIGHT_ELONGATION * elo_penalty
+    )
     return loss
 
 
