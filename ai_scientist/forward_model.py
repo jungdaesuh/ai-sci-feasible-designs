@@ -395,18 +395,19 @@ class EvaluationResult(pydantic.BaseModel):
         return (self.objective, self.feasibility)
 
     def dominates(self, other: "EvaluationResult") -> bool:
-        """
-        Check if this result dominates another.
+        """Pareto dominance check (not implemented).
 
-        Assumes minimization for feasibility (0 is best).
-        For objective, direction depends on problem, so this checks
-        feasibility dominance only and equality on objective.
+        Raises:
+            NotImplementedError: Pareto dominance requires knowing
+                objective direction (minimize/maximize), which is
+                problem-dependent. Use tools.hypervolume for Pareto
+                analysis instead.
         """
-        if self.feasibility > other.feasibility:
-            return False
-        # This is incomplete without objective direction,
-        # strictly returning False to avoid incorrect optimization.
-        return False
+        raise NotImplementedError(
+            "EvaluationResult.dominates() requires objective direction context. "
+            "Use ai_scientist.tools.hypervolume.summarize_p3_candidates() for "
+            "Pareto front analysis."
+        )
 
 
 # --- Helper Functions (Hashing & Boundary) ---

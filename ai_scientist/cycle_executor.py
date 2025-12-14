@@ -162,14 +162,12 @@ class CycleExecutor:
         config: ai_config.ExperimentConfig,
         world_model: memory.WorldModel,
         planner: Any,  # ai_planner.PlanningAgent or similar
-        coordinator: Coordinator | None,
         budget_controller: BudgetController,
         fidelity_controller: FidelityController,
     ):
         self.config = config
         self.world_model = world_model
         self.planner = planner
-        self.coordinator = coordinator
         self.budget_controller = budget_controller
         self.fidelity_controller = fidelity_controller
         self.prefilter = FeasibilityPrefilter()
@@ -737,7 +735,23 @@ class CycleExecutor:
             summary=p3_summary,
         )
 
-        best_entry = min(latest_by_design.values(), key=_oriented_objective)
+        # M3 FIX: Prefer feasible candidates for best selection (scientific correctness)
+        feasible_entries = [
+            e
+            for e in latest_by_design.values()
+            if e.get("evaluation", {}).get("is_feasible", False)
+        ]
+        if feasible_entries:
+            best_entry = min(feasible_entries, key=_oriented_objective)
+        else:
+            # Fallback: use lowest max_violation if no feasible candidates
+            best_entry = min(
+                latest_by_design.values(),
+                key=lambda e: (
+                    e.get("evaluation", {}).get("max_violation", float("inf")),
+                    _oriented_objective(e),
+                ),
+            )
         best_eval: dict[str, Any] = dict(best_entry["evaluation"])
         metrics_payload = best_eval.setdefault("metrics", {})
         metrics_payload["cycle_hv"] = p3_summary.hv_score
@@ -908,6 +922,7 @@ class CycleExecutor:
                 "import json, sqlite3\n"
                 "from ai_scientist import tools\n"
                 f"conn = sqlite3.connect('{self.config.memory_db}')\n"
+                "row = conn.execute(\n"
                 '    "SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1",\n'
                 f"    ('{replay_entry.design_hash}',),\n"
                 ").fetchone()\n"
