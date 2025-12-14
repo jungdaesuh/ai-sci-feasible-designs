@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import RobustScaler
+
+logger = logging.getLogger(__name__)
 
 # Import from constellaration
 try:
@@ -57,10 +61,10 @@ def load_constellaration_dataset(
     """
     Load the Constellaration dataset, unflatten metrics, and optionally filter by geometry validity.
     """
-    print("Loading source datasets (this may take a moment)...")
+    logger.info("Loading source datasets (this may take a moment)...")
     df = load_source_datasets_with_no_errors()
 
-    print("Unflattening metrics...")
+    logger.info("Unflattening metrics...")
     df = _unflatten_metrics_and_concatenate(df)
 
     # Clean column names (remove "metrics." prefix)
@@ -71,11 +75,11 @@ def load_constellaration_dataset(
     # Remove duplicate columns resulting from renaming
     df = df.loc[:, ~df.columns.duplicated()]
 
-    print("Unserializing surfaces...")
+    logger.info("Unserializing surfaces...")
     df = _unserialize_surface(df)
 
     if filter_geometry:
-        print("Filtering geometric validity...")
+        logger.info("Filtering geometric validity...")
         df = _filter_geometric_validity(df)
 
     return df
@@ -105,7 +109,7 @@ def _filter_geometric_validity(df: pd.DataFrame) -> pd.DataFrame:
         df = df[df["max_elongation"] >= 1.0]
         df = df[df["max_elongation"] < 50.0]
 
-    print(f"Filtered {initial_len - len(df)} rows based on geometric bounds.")
+    logger.info(f"Filtered {initial_len - len(df)} rows based on geometric bounds.")
     return df
 
 

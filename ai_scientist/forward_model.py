@@ -28,6 +28,7 @@ except ImportError:
     ConstellarationSettings = None  # type: ignore[misc, assignment]
 
 from ai_scientist.backends.base import PhysicsBackend
+from ai_scientist.constraints import get_constraint_bounds
 
 
 # --- Type Protocol for Metrics ---
@@ -619,13 +620,20 @@ def compute_constraint_margins(
         if include_vmec_constraints:
             well = metrics_map.get("vacuum_well")
             well_value = float(well) if well is not None else float("nan")
+            # M4 FIX: Source normalization from CONSTRAINT_BOUNDS for SSOT
             # Normalize like constellaration.problems.MHDStableQIStellarator:
-            # denom = max(1e-1, vacuum_well_lower_bound) where lower bound is 0.0.
-            margins["vacuum_well"] = _lower_bound_margin(well_value, 0.0) / 0.1
+            # denom = max(1e-1, vacuum_well_lower_bound)
+            p3_bounds = get_constraint_bounds("p3")
+            well_lower = p3_bounds.get("vacuum_well_lower", 0.0)
+            well_denom = max(0.1, abs(well_lower))
+            margins["vacuum_well"] = (
+                _lower_bound_margin(well_value, well_lower) / well_denom
+            )
 
             flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
             flux = float(flux_value) if flux_value is not None else float("nan")
-            margins["flux_compression"] = _upper_bound_margin(flux, 0.9)
+            flux_upper = p3_bounds.get("flux_compression_upper", 0.9)
+            margins["flux_compression"] = _upper_bound_margin(flux, flux_upper)
 
         if include_qi_constraint:
             margins["qi"] = _log10_margin(-3.5)
@@ -734,9 +742,22 @@ def forward_model(
     # We'll construct a cache key that includes relevant settings.
 
     # For now, we use a simplified key strategy: hash + problem + settings_hash
-    settings_dict = settings.model_dump()
+    # L1 FIX: Only include deterministic fields in cache key to avoid cache misses
+    # from non-deterministic data in constellaration_settings (which is typed as Any
+    # and may contain timestamps, random identifiers, or objects with unstable serialization)
+    deterministic_settings = {
+        "problem": settings.problem,
+        "stage": settings.stage,
+        "calculate_gradients": settings.calculate_gradients,
+        "fidelity": settings.fidelity,
+        "prerelax": settings.prerelax,
+        "prerelax_steps": settings.prerelax_steps,
+        "prerelax_lr": settings.prerelax_lr,
+    }
     # Canonicalize to handle numpy arrays and floats
-    canonical_settings = _canonicalize_value(settings_dict, precision=_DEFAULT_ROUNDING)
+    canonical_settings = _canonicalize_value(
+        deterministic_settings, precision=_DEFAULT_ROUNDING
+    )
     settings_json = json.dumps(
         canonical_settings, sort_keys=True, separators=(",", ":")
     )

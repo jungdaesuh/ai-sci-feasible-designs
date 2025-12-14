@@ -641,8 +641,19 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
             # P1 FIX: Bootstrap sampling (bagging) for each ensemble member
             # This improves uncertainty calibration by introducing data diversity
+            # L2 FIX: Include global run seed to ensure different runs produce different
+            # bootstrap samples. Uses AI_SCIENTIST_RUN_SEED env var if set, otherwise
+            # uses time-based entropy for run-to-run variability.
+            import os
+            import time
+
+            global_run_seed = int(
+                os.environ.get("AI_SCIENTIST_RUN_SEED", int(time.time()) % (2**31))
+            )
             rng = torch.Generator()
-            rng.manual_seed(42 + idx)  # Reproducible but different per model
+            rng.manual_seed(
+                global_run_seed + idx
+            )  # Reproducible within run, different across runs
             bootstrap_indices = torch.randint(0, n_samples, (n_samples,), generator=rng)
             bootstrap_dataset = torch.utils.data.Subset(
                 dataset, bootstrap_indices.tolist()
@@ -865,8 +876,17 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             qi_log_std = qi_std_norm * self._y_qi_log_std
             # Convert log10(qi) back to raw qi: qi = 10^(log10_qi)
             qi_mean = torch.pow(10.0, qi_log_mean)
-            # For std, use delta method: std(10^x) ≈ 10^x * ln(10) * std(x)
-            qi_std = qi_mean * 2.302585 * qi_log_std
+            # M1 FIX: Improved delta method with second-order correction for uncertainty
+            # First-order: std(10^x) ≈ 10^x * ln(10) * std(x)
+            # Second-order correction: adds 0.5 * (ln(10))^2 * std(x)^2 term
+            # This prevents underestimation of uncertainty for high-variance cases
+            # near constraint boundaries where accurate confidence is critical.
+            ln10 = 2.302585  # ln(10)
+            first_order = qi_mean * ln10 * qi_log_std
+            # Second-order variance correction: Var(10^x) ≈ μ² * (ln10)² * σ² * (1 + 0.5*(ln10*σ)²)
+            # For high σ (> 0.3), this can add 10-20% to the uncertainty estimate
+            second_order_factor = 1.0 + 0.5 * (ln10 * qi_log_std) ** 2
+            qi_std = first_order * torch.sqrt(second_order_factor)
             iota_mean = iota_mean_norm * self._y_iota_std + self._y_iota_mean
             iota_std = iota_std_norm * self._y_iota_std
             # P3 constraint denormalization (Issue #1 fix)
