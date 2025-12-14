@@ -462,14 +462,16 @@ def gradient_descent_on_inputs(
             log10_qi = torch.log10(qi_positive)
             s_qi = std_qi.squeeze()
 
-            # Uncertainty propagation with second-order bias correction (AoT fix)
-            # First-order: σ_log10 ≈ σ_qi / (qi × ln(10))
-            # Second-order bias: E[log10(x)] ≈ log10(μ) - σ²/(2μ²×ln(10))
-            # This reduces error from ~5% to ~1% near constraint boundaries
+            # Uncertainty propagation with fourth-order bias correction
+            # Taylor expansion of E[log(X)] for X ~ N(μ, σ²):
+            #   E[log(X)] ≈ log(μ) - σ²/(2μ²) - 3σ⁴/(4μ⁴) + O(σ⁶)
+            # Converting to log₁₀ by dividing by ln(10):
+            #   E[log₁₀(X)] ≈ log₁₀(μ) - σ²/(2μ²ln10) - 3σ⁴/(4μ⁴ln10)
             ln10 = 2.302585
             s_log10_qi = s_qi / (qi_positive * ln10)
-            # Add conservative bias correction (shifts threshold down slightly)
-            bias_correction = (s_qi**2) / (2 * qi_positive**2 * ln10)
+            # Second-order + fourth-order bias correction
+            cv_squared = (s_qi / qi_positive) ** 2  # (σ/μ)²
+            bias_correction = cv_squared / (2 * ln10) + 3 * cv_squared**2 / (4 * ln10)
             log10_qi_corrected = log10_qi - bias_correction
 
             log10_qi_threshold = get_log10_qi_threshold(problem)
@@ -691,12 +693,13 @@ def optimize_alm_inner_loop(
         qi_positive = qi_raw.abs() + QI_EPS
         log10_qi = torch.log10(qi_positive)
 
-        # Uncertainty propagation with second-order bias correction (AoT fix)
-        # First-order: σ_log10 ≈ σ_qi / (qi × ln(10))
-        # Second-order bias: E[log10(x)] ≈ log10(μ) - σ²/(2μ²×ln(10))
+        # Uncertainty propagation with fourth-order bias correction
+        # Taylor expansion: E[log₁₀(X)] ≈ log₁₀(μ) - σ²/(2μ²ln10) - 3σ⁴/(4μ⁴ln10)
         ln10 = 2.302585
         s_log10_qi = s_qi / (qi_positive * ln10)
-        bias_correction = (s_qi**2) / (2 * qi_positive**2 * ln10)
+        # Second-order + fourth-order bias correction
+        cv_squared = (s_qi / qi_positive) ** 2  # (σ/μ)²
+        bias_correction = cv_squared / (2 * ln10) + 3 * cv_squared**2 / (4 * ln10)
         log10_qi_corrected = log10_qi - bias_correction
 
         # Constraints (Pessimistic)
