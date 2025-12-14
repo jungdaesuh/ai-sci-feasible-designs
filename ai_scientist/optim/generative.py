@@ -1067,9 +1067,10 @@ class DiffusionDesignModel:
         rng.manual_seed(seed)
 
         with torch.no_grad():
+            # Use latent dim from PCA or FourierAutoencoder (both use _pca_components)
             latent_dim = (
                 self._pca_components
-                if self.pca
+                if self.pca or self.fourier_autoencoder
                 else (self._schema.mpol * self._schema.ntor * 2)
             )
 
@@ -1452,6 +1453,8 @@ class GenerativeDesignModel:
             vec = flattened[i]
             try:
                 params = tools.structured_unflatten(vec, self._schema)
+                # M1 FIX: Add n_field_periods (standard for benchmarks per AGENTS.md)
+                params["n_field_periods"] = 3
                 # Add design hash and source
                 candidates.append(
                     {

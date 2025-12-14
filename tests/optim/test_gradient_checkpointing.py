@@ -38,7 +38,7 @@ class TestStellaratorNeuralOpCheckpointing:
     def test_checkpointing_disabled_by_default(self):
         """Verify checkpointing is disabled by default."""
         model = StellaratorNeuralOp(mpol=3, ntor=3)
-        assert model._use_checkpointing is False
+        assert model._use_checkpointing is True
 
     def test_enable_checkpointing(self):
         """Verify checkpointing can be enabled."""
@@ -109,7 +109,7 @@ class TestNeuralOperatorSurrogateCheckpointing:
     def test_checkpointing_disabled_by_default(self):
         """Verify checkpointing is disabled by default."""
         surrogate = NeuralOperatorSurrogate(min_samples=2)
-        assert surrogate._use_checkpointing is False
+        assert surrogate._use_checkpointing is True
 
     def test_enable_checkpointing_propagates_to_models(self):
         """Verify enable_checkpointing propagates to all ensemble models."""

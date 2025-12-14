@@ -112,8 +112,9 @@ class StellaratorNeuralOp(nn.Module):
         self.head_mirror_ratio = nn.Linear(hidden_dim, 1)
         self.head_flux_compression = nn.Linear(hidden_dim, 1)
 
-        # Gradient checkpointing flag (Issue #9) - disabled by default
-        self._use_checkpointing = False
+        # Gradient checkpointing flag (Issue #9) - enabled by default for training
+        # Reduces peak memory ~30-50% by recomputing activations during backward pass
+        self._use_checkpointing = True
 
     def enable_checkpointing(self, enabled: bool = True) -> None:
         """Enable/disable gradient checkpointing for memory efficiency (Issue #9).
@@ -374,8 +375,8 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         self._optimizers: list[optim.Optimizer] = []
         self._schema: tools.FlattenSchema | None = None
 
-        # Gradient checkpointing flag (Issue #9)
-        self._use_checkpointing = False
+        # Gradient checkpointing flag (Issue #9) - enabled by default for training
+        self._use_checkpointing = True
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Load model state from a checkpoint file (Task 3.2)."""
