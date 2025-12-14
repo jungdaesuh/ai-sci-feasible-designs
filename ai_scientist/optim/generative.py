@@ -398,6 +398,9 @@ class DiffusionDesignModel:
         log_interval: int = 10,
         # PCA out-of-distribution detection threshold
         pca_ood_threshold: float = 0.1,
+        # Issue #7: Use learned FourierAutoencoder instead of PCA
+        use_fourier_encoder: bool = False,
+        fourier_encoder_epochs: int = 50,
     ) -> None:
         self._min_samples = min_samples
         self._lr = learning_rate
@@ -417,11 +420,14 @@ class DiffusionDesignModel:
         self._pca_components = pca_components
         self._log_interval = log_interval
         self._pca_ood_threshold = pca_ood_threshold
+        self._use_fourier_encoder = use_fourier_encoder
+        self._fourier_encoder_epochs = fourier_encoder_epochs
 
         self.__model: StellaratorDiffusion | None = None  # Use property for access
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
         self.pca: PCA | None = None
+        self.fourier_autoencoder: FourierAutoencoder | None = None
 
         self._trained = False
         self.m_mean: torch.Tensor | None = None
@@ -681,12 +687,69 @@ class DiffusionDesignModel:
         # Convert to numpy for PCA
         X_np = np.vstack(vectors)
 
-        # Fit PCA
-        if self._pca_components > 0:
+        # Issue #7 Fix: Use FourierAutoencoder or PCA for latent space projection
+        if self._use_fourier_encoder and self._schema is not None:
+            _LOGGER.info(
+                "[diffusion] Training FourierAutoencoder (mpol=%d, ntor=%d, latent=%d)...",
+                self._schema.mpol,
+                self._schema.ntor,
+                self._pca_components,
+            )
+            self.fourier_autoencoder = FourierAutoencoder(
+                mpol=self._schema.mpol,
+                ntor=self._schema.ntor,
+                latent_dim=self._pca_components,
+            ).to(self._device)
+            ae = self.fourier_autoencoder  # Local ref for pyright
+            assert ae is not None  # Narrowing for pyright
+
+            # Train autoencoder
+            X_tensor = torch.tensor(X_np, dtype=torch.float32, device=self._device)
+            ae_dataset = TensorDataset(X_tensor)
+            ae_loader = DataLoader(
+                ae_dataset, batch_size=self._batch_size, shuffle=True
+            )
+            ae_optimizer = optim.Adam(ae.parameters(), lr=self._lr)
+
+            ae.train()
+            for ae_epoch in range(self._fourier_encoder_epochs):
+                ae_loss = 0.0
+                for (batch,) in ae_loader:
+                    ae_optimizer.zero_grad()
+                    recon, _ = ae(batch)
+                    loss = F.mse_loss(recon, batch)
+                    loss.backward()
+                    ae_optimizer.step()
+                    ae_loss += loss.item()
+
+                if self._log_interval > 0 and ae_epoch % self._log_interval == 0:
+                    _LOGGER.info(
+                        f"[autoencoder] Epoch {ae_epoch}/{self._fourier_encoder_epochs}: "
+                        f"loss={ae_loss:.4f}"
+                    )
+
+            ae.eval()
+            with torch.no_grad():
+                X_latent = ae.encode(X_tensor).cpu().numpy()
+            self.pca = None  # Ensure PCA is not used
+
+        elif self._pca_components > 0:
+            # Standard PCA path with variance warning
             self.pca = PCA(n_components=self._pca_components)
             X_latent = self.pca.fit_transform(X_np)
+
+            # Issue #7 Fix: Warn if PCA discards too much variance
+            explained = sum(self.pca.explained_variance_ratio_)
+            if explained < 0.95:
+                _LOGGER.warning(
+                    f"PCA with {self._pca_components} components explains only "
+                    f"{explained:.1%} variance. Consider use_fourier_encoder=True "
+                    f"or increasing pca_components."
+                )
+            self.fourier_autoencoder = None
         else:
             self.pca = None
+            self.fourier_autoencoder = None
             X_latent = X_np
 
         X = torch.tensor(X_latent, dtype=torch.float32).to(self._device)
@@ -892,6 +955,13 @@ class DiffusionDesignModel:
             "m_mean": self._tensor_to_list(self.m_mean),
             "m_std": self._tensor_to_list(self.m_std),
             "pca": self.pca,  # Pickled PCA object
+            # Issue #7: Save FourierAutoencoder state
+            "fourier_autoencoder_state": (
+                self.fourier_autoencoder.state_dict()
+                if self.fourier_autoencoder is not None
+                else None
+            ),
+            "use_fourier_encoder": self._use_fourier_encoder,
             "configs": {
                 "hidden_dim": self._hidden_dim,
                 "n_layers": self._n_layers,
@@ -908,6 +978,20 @@ class DiffusionDesignModel:
         self.pca = checkpoint.get("pca")
         if self.pca:
             self._pca_components = self.pca.n_components_
+
+        # Issue #7: Load FourierAutoencoder if present
+        self._use_fourier_encoder = checkpoint.get("use_fourier_encoder", False)
+        ae_state = checkpoint.get("fourier_autoencoder_state")
+        if ae_state is not None and self._schema is not None:
+            self.fourier_autoencoder = FourierAutoencoder(
+                mpol=self._schema.mpol,
+                ntor=self._schema.ntor,
+                latent_dim=self._pca_components,
+            ).to(self._device)
+            self.fourier_autoencoder.load_state_dict(ae_state)
+            self.fourier_autoencoder.eval()
+        else:
+            self.fourier_autoencoder = None
 
         # Load configs if present
         configs = checkpoint.get("configs", {})
@@ -1024,8 +1108,13 @@ class DiffusionDesignModel:
             # Move to CPU
             latent_samples = x.cpu().numpy()
 
-            # Inverse PCA
-            if self.pca:
+            # Inverse transform: FourierAutoencoder or PCA
+            if self.fourier_autoencoder is not None:
+                latent_tensor = torch.tensor(
+                    latent_samples, dtype=torch.float32, device=self._device
+                )
+                flattened = self.fourier_autoencoder.decode(latent_tensor).cpu().numpy()
+            elif self.pca:
                 flattened = self.pca.inverse_transform(latent_samples)
             else:
                 flattened = latent_samples
