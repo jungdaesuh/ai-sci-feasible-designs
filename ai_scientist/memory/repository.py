@@ -507,9 +507,16 @@ class WorldModel:
         )
         candidate_id = cursor.lastrowid
         assert candidate_id is not None
+        # H3 FIX: Merge constraint_margins into metrics payload so recent_failures()
+        # can access constraint violation data for the "learning from failures" loop.
+        # Previously only evaluation["metrics"] was stored, but recent_failures()
+        # expects constraint_margins to be inside raw_json.
+        metrics_payload = dict(evaluation.get("metrics", {}))
+        if "constraint_margins" in evaluation:
+            metrics_payload["constraint_margins"] = evaluation["constraint_margins"]
         metrics_id = self.log_metrics(
             candidate_id,
-            evaluation.get("metrics", {}),
+            metrics_payload,
             feasibility=float(evaluation.get("feasibility", 0.0)),
             objective=evaluation.get("objective"),
             hv=evaluation.get(
