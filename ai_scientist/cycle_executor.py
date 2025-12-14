@@ -10,6 +10,7 @@ Handles the core orchestration of a single governance cycle:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import platform
@@ -1591,6 +1592,49 @@ class CycleExecutor:
 # --- Helpers moved from runner.py ---
 
 
+def _expand_matrix_to_mode(
+    matrix: np.ndarray,
+    max_poloidal_mode: int,
+    max_toroidal_mode: int,
+) -> np.ndarray:
+    """Expand or validate Fourier coefficient matrix to target mode numbers.
+
+    Canonicalization Fix: Zero-pads if smaller, logs warning if larger.
+    The center column (n=0) is preserved during expansion.
+    """
+    target_rows = max_poloidal_mode + 1
+    target_cols = 2 * max_toroidal_mode + 1
+
+    if matrix.shape == (target_rows, target_cols):
+        return matrix
+
+    logging.info(
+        "[canonicalization] Expanding seed matrix from (%d, %d) to (%d, %d)",
+        matrix.shape[0],
+        matrix.shape[1],
+        target_rows,
+        target_cols,
+    )
+
+    expanded = np.zeros((target_rows, target_cols), dtype=float)
+
+    # Copy existing values, centering the toroidal modes
+    seed_ntor = (matrix.shape[1] - 1) // 2
+    target_ntor = max_toroidal_mode
+    col_offset = target_ntor - seed_ntor
+
+    rows_to_copy = min(matrix.shape[0], target_rows)
+    cols_to_copy = min(matrix.shape[1], target_cols)
+
+    for m in range(rows_to_copy):
+        for n_idx in range(cols_to_copy):
+            target_col = n_idx + col_offset
+            if 0 <= target_col < target_cols:
+                expanded[m, target_col] = matrix[m, n_idx]
+
+    return expanded
+
+
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
     resolved = path.resolve()
     cached = _BOUNDARY_SEED_CACHE.get(resolved)
@@ -1757,12 +1801,34 @@ def _generate_candidate_params(
 
     if seed_path is not None:
         seed_data = _load_seed_boundary(seed_path)
-        r_cos = seed_data["r_cos"]
-        z_sin = seed_data["z_sin"]
+        # Canonicalization Fix: Expand seed matrices to template's max modes
+        r_cos = _expand_matrix_to_mode(
+            seed_data["r_cos"],
+            template.max_poloidal_mode,
+            template.max_toroidal_mode,
+        )
+        z_sin = _expand_matrix_to_mode(
+            seed_data["z_sin"],
+            template.max_poloidal_mode,
+            template.max_toroidal_mode,
+        )
         r_sin = seed_data["r_sin"]
+        if r_sin is not None:
+            r_sin = _expand_matrix_to_mode(
+                r_sin,
+                template.max_poloidal_mode,
+                template.max_toroidal_mode,
+            )
         z_cos = seed_data["z_cos"]
+        if z_cos is not None:
+            z_cos = _expand_matrix_to_mode(
+                z_cos,
+                template.max_poloidal_mode,
+                template.max_toroidal_mode,
+            )
         n_field_periods = int(seed_data["n_field_periods"])
         is_stellarator_symmetric = bool(seed_data["is_stellarator_symmetric"])
+
     else:
         base_surface = generate_rotating_ellipse(
             aspect_ratio=4.0,

@@ -251,6 +251,13 @@ class SurrogateBundle(BaseSurrogate):
         vector, schema = tools.structured_flatten(params, schema=self._schema)
         if self._schema is None:
             self._schema = schema
+            # Canonicalization Warning: Schema derived from first candidate
+            logging.warning(
+                "[surrogate] Schema derived from first candidate: mpol=%d, ntor=%d. "
+                "Mixing shapes may cause silent truncation/zero-padding.",
+                schema.mpol,
+                schema.ntor,
+            )
         return vector
 
     def _feature_matrix(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:

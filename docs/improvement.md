@@ -77,3 +77,20 @@ Low Severity Claims - VERIFIED
    This is a naming/documentation issue, not a code bug.
    "Stage" semantically overloaded: governance stage (S1/S2/S3) vs fidelity stage (screen/promote/p3).
    No code fix applied - would require refactoring and renaming throughout.
+
+## Canonicalization Issues - FIXED ✅
+
+ C1: Seed not expanded to template max modes - FIXED ✅
+   Original issue: `_generate_candidate_params` uses seed matrix as-is without expanding to template's max modes.
+   Seed file `rotating_ellipse_p3.json` has shape (2×3) = (mpol=1, ntor=1) but template may define larger.
+   **Fix Applied**:
+   - `cycle_executor.py:1594-1636`: Added `_expand_matrix_to_mode` helper function
+   - `cycle_executor.py:1802-1830`: Updated seed loading to expand all matrices (r_cos, z_sin, r_sin, z_cos)
+   - Logs info message when expansion occurs for visibility
+
+ C2: Surrogate schema derived without warning - FIXED ✅
+   Original issue: `SurrogateBundle._vectorize` derives schema from first params silently,
+   causing implicit truncation/zero-padding when mixing shapes.
+   **Fix Applied**:
+   - `surrogate.py:250-262`: Added warning log when schema is first derived
+   - Alerts developers about potential shape mixing issues
