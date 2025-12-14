@@ -452,9 +452,13 @@ def gradient_descent_on_inputs(
                 # Minimize: use UCB (pessimistic for minimization)
                 loss_obj = pred_obj.squeeze() + beta * std_obj.squeeze()
 
-            # Constraints (Penalty Method) with Pessimistic Bounds
-            # MHD: Good if > 0. Pessimistic: mean - beta*std
-            viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
+            # H3 FIX: Constraints (Penalty Method) with Pessimistic Bounds
+            # MHD Vacuum Well is P3-ONLY constraint (constraints.py:40-46)
+            # P2 does NOT include vacuum_well in its constraint set
+            viol_mhd = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+            if problem.lower().startswith("p3"):
+                # MHD: Good if > 0. Pessimistic: mean - beta*std
+                viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
 
             # QI constraint: log10(qi) <= threshold (problem-dependent)
             # Surrogate predicts raw QI, so we convert to log10 for comparison
@@ -489,6 +493,17 @@ def gradient_descent_on_inputs(
             else:
                 viol_elo = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
+            # H3 FIX: P2 Aspect Ratio constraint
+            # P2 requires aspect_ratio <= 10.0 (constraints.py:91, P2_CONSTRAINT_NAMES)
+            # P1 requires aspect_ratio <= 4.0
+            viol_aspect = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+            if problem.lower().startswith("p2") or problem.lower().startswith("p1"):
+                # Compute aspect ratio analytically (differentiable, same as elongation)
+                pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
+                # Determine bound based on problem
+                aspect_bound = 10.0 if problem.lower().startswith("p2") else 4.0
+                viol_aspect = torch.relu(pred_aspect.squeeze() - aspect_bound)
+
             # H3 FIX: P3-specific constraints (iota, mirror ratio, flux compression)
             # These are extracted from surrogate predictions but were previously ignored
             viol_iota = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
@@ -516,6 +531,7 @@ def gradient_descent_on_inputs(
                 weights.mhd * viol_mhd
                 + weights.qi * viol_qi
                 + weights.elongation * viol_elo
+                + viol_aspect  # H3 FIX: aspect ratio penalty for P1/P2
                 + viol_iota  # No configurable weight - use unit weight
                 + viol_mirror
                 + viol_flux
@@ -734,14 +750,29 @@ def optimize_alm_inner_loop(
         log10_qi_corrected = log10_qi - bias_correction
 
         # Constraints (Pessimistic)
-        # MHD: Good if > 0. Pessimistic: mean - beta*std (lower confidence bound)
-        c1 = torch.relu(-(mhd - beta * s_mhd))
+        # H3 FIX: MHD Vacuum Well is P3-ONLY constraint (constraints.py:40-46)
+        c1 = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+        if problem.lower().startswith("p3"):
+            # MHD: Good if > 0. Pessimistic: mean - beta*std (lower confidence bound)
+            c1 = torch.relu(-(mhd - beta * s_mhd))
+
         # QI: Good if log10(qi) < threshold. Pessimistic: mean + beta*std (upper confidence bound)
         c2 = torch.relu((log10_qi_corrected + beta * s_log10_qi) - log10_qi_threshold)
         # Elongation: Good if < MAX_ELONGATION. Pessimistic: mean + beta*std
         c3 = torch.relu((elo + beta * s_elo) - MAX_ELONGATION)
 
-        constraints = torch.stack([c1, c2, c3])
+        # H3 FIX: P2 Aspect Ratio constraint
+        # P2 requires aspect_ratio <= 10.0 (constraints.py:91, P2_CONSTRAINT_NAMES)
+        # P1 requires aspect_ratio <= 4.0
+        c4 = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+        if problem.lower().startswith("p2") or problem.lower().startswith("p1"):
+            # Compute aspect ratio analytically (differentiable, same as elongation)
+            pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
+            # Determine bound based on problem
+            aspect_bound = 10.0 if problem.lower().startswith("p2") else 4.0
+            c4 = torch.relu(pred_aspect.squeeze() - aspect_bound)
+
+        constraints = torch.stack([c1, c2, c3, c4])
 
         augmented_term = (
             0.5
