@@ -1255,7 +1255,9 @@ class CycleExecutor:
             # Use SSOT function to determine target (avoids semantic drift).
             target_column = get_training_target(self.config.problem).value
             history = self.world_model.surrogate_training_data(
-                target=target_column, problem=self.config.problem
+                target=target_column,
+                problem=self.config.problem,
+                experiment_id=experiment_id,
             )
             metrics_list: tuple[Mapping[str, Any], ...] = ()
             target_values: tuple[float, ...] = ()

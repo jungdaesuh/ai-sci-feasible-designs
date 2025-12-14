@@ -10,6 +10,7 @@ forward.
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
@@ -41,9 +42,14 @@ def _flatten_boundary_params(params: Mapping[str, Any]) -> np.ndarray:
 
 def _params_feature_vector(params: Mapping[str, Any]) -> np.ndarray:
     flattened = _flatten_boundary_params(params)
+    nfp = float(params.get("n_field_periods") or params.get("nfp") or 1.0)
     if flattened.size == 0:
-        return np.zeros((2,), dtype=float)
-    return np.array([float(np.sum(flattened)), float(flattened.size)], dtype=float)
+        vec = np.array([0.0, 0.0, nfp], dtype=float)
+    else:
+        vec = np.array(
+            [float(np.sum(flattened)), float(flattened.size), nfp], dtype=float
+        )
+    return vec
 
 
 @dataclass(frozen=True)
@@ -102,17 +108,26 @@ class SimpleSurrogateRanker:
     def fit_from_world_model(
         self,
         world_model: memory.WorldModel,
-        *,
-        target_column: str = "gradient_proxy",  # H2 FIX: Renamed from "hv"
-        problem: str | None = None,
+        problem: str,
+        target_column: str = "hv",
+        cycle: int = 0,
+        experiment_id: int | None = None,
     ) -> None:
+        """Fetch history from WorldModel and fit the ranker."""
         history = world_model.surrogate_training_data(
-            target=target_column, problem=problem
+            target=target_column, problem=problem, experiment_id=experiment_id
         )
         if not history:
-            raise ValueError("insufficient history for surrogate training")
-        metrics_list, targets = zip(*history)
-        self.fit(metrics_list, targets)
+            return
+
+        metrics_list, target_values = zip(*history)
+        minimize_obj = problem.lower().startswith("p1")
+        self.fit(
+            metrics_list,
+            target_values,
+            minimize_objective=minimize_obj,
+            cycle=cycle,
+        )
 
     def _ensure_trained(self) -> None:
         if self._feature_weights is None:
@@ -240,8 +255,12 @@ class SurrogateBundle(BaseSurrogate):
         """
         executor = ThreadPoolExecutor(max_workers=1)
         try:
+            print(f"DEBUG: submitting {func}")
             future = executor.submit(func)
-            return future.result(timeout=self._timeout_seconds)
+            print("DEBUG: waiting for result")
+            res = future.result(timeout=self._timeout_seconds)
+            print("DEBUG: result received")
+            return res
         finally:
             # Non-blocking shutdown: prevents deadlock if worker is stuck
             # cancel_futures=True prevents queued tasks from starting (Python 3.9+)
@@ -258,7 +277,8 @@ class SurrogateBundle(BaseSurrogate):
                 schema.mpol,
                 schema.ntor,
             )
-        return vector
+        nfp = float(params.get("n_field_periods") or params.get("nfp") or 1.0)
+        return np.append(vector, nfp)
 
     def _feature_matrix(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
         vectors: list[np.ndarray] = []
@@ -321,18 +341,22 @@ class SurrogateBundle(BaseSurrogate):
             # Handle nested metrics structure if present, or direct keys
             m_payload = metrics.get("metrics", metrics)
 
-            # MHD: vacuum_well (>=0 is good). We often want to predict violation or raw value.
-            # Let's predict the raw value.
+            # MHD: vacuum_well
             vacuum_well = m_payload.get("vacuum_well")
             aux_targets["mhd"].append(
                 float(vacuum_well) if vacuum_well is not None else -1.0
             )
 
-            # QI: qi (lower is better)
+            # QI: qi
             qi_val = m_payload.get("qi")
-            aux_targets["qi"].append(float(qi_val) if qi_val is not None else 1.0)
+            # A4.2 FIX: Use log10 scale for QI
+            if qi_val is not None:
+                val = float(qi_val)
+                aux_targets["qi"].append(math.log10(max(val, 1e-12)))
+            else:
+                aux_targets["qi"].append(0.0)
 
-            # Elongation: max_elongation (lower is better)
+            # Elongation: max_elongation
             elongation = m_payload.get("max_elongation")
             aux_targets["elongation"].append(
                 float(elongation) if elongation is not None else 10.0
@@ -344,18 +368,16 @@ class SurrogateBundle(BaseSurrogate):
 
         feasible_mask = feasibility_labels == 1
 
-        # Align classifier features to all rows; regressor uses features_reg.
+        # We must define the training function here to capture local variables
         def _train_bundle() -> None:
             scaler = StandardScaler()
             scaled_class = scaler.fit_transform(features)
+
             clf = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=12,
-                random_state=0,
-                n_jobs=1,
+                n_estimators=100, max_depth=12, random_state=0, n_jobs=1
             )
 
-            # Validate training data has both classes (fixes silent degradation)
+            # Validate training data
             unique_classes = np.unique(feasibility_labels)
             if len(unique_classes) < 2:
                 logging.warning(
@@ -363,8 +385,6 @@ class SurrogateBundle(BaseSurrogate):
                     "- skipping classifier training, using constant fallback"
                 )
                 self._single_class_fallback = int(unique_classes[0])
-                # Skip training entirely - the fallback path handles prediction
-                # This saves ~100ms of wasted computation on a useless model
                 clf = None
             else:
                 self._single_class_fallback = None
@@ -372,7 +392,7 @@ class SurrogateBundle(BaseSurrogate):
 
             regressors = {}
 
-            # Train primary objective regressor (on feasible data only if enough samples)
+            # Primary Regressor
             primary_reg = RandomForestRegressor(
                 n_estimators=100, max_depth=12, random_state=0, n_jobs=1
             )
@@ -385,23 +405,11 @@ class SurrogateBundle(BaseSurrogate):
                 primary_reg.fit(scaled_class, primary_targets)
             regressors["objective"] = primary_reg
 
-            # Train auxiliary regressors (using all data or feasible? Physics metrics usually valid even if not fully feasible?)
-            # The prompt implies we want to predict violation "Instead of Infeasible (0.0), tell it MHD Violation = 0.5".
-            # VMEC usually returns metrics even if it's not a "good" stellarator, unless it crashed.
-            # If it crashed, we might have default bad values.
-            # Let's train on all data for aux metrics to learn from failures too, if data exists.
-            # But wait, if VMEC crashed, metrics are mostly junk.
-            # However, `runner.py` fills defaults on exception.
-            # Let's stick to the same logic: if we have enough feasible, use them.
-            # BUT for "restoration", we need to guide FROM infeasible TO feasible.
-            # So we MUST train on infeasible data if it has valid metrics.
-            # Assuming `metrics_list` contains valid VMEC outputs.
-
+            # Aux Regressors
             for name, targets in aux_target_arrays.items():
                 reg = RandomForestRegressor(
                     n_estimators=100, max_depth=12, random_state=0, n_jobs=1
                 )
-                # Train on all data to capture the landscape including bad regions
                 reg.fit(scaled_class, targets)
                 regressors[name] = reg
 
@@ -525,6 +533,8 @@ class SurrogateBundle(BaseSurrogate):
         objs = preds_dict.get("objective", np.zeros(len(candidates)))
         mhds = preds_dict.get("mhd", np.zeros(len(candidates)))
         qis = preds_dict.get("qi", np.zeros(len(candidates)))
+        # A4.2 FIX: Denormalize QI from log10 to linear scale
+        qis = 10.0**qis
         elongations = preds_dict.get("elongation", np.zeros(len(candidates)))
 
         ranked: list[SurrogatePrediction] = []

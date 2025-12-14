@@ -1087,6 +1087,7 @@ class WorldModel:
         *,
         target: str = "hv",
         problem: str | None = None,
+        experiment_id: int | None = None,
     ) -> list[tuple[Mapping[str, Any], float]]:
         """Return cached metrics + target values usable by the surrogate ranker."""
 
@@ -1095,18 +1096,25 @@ class WorldModel:
         target_column = "hv" if target in {"hv", "gradient_proxy"} else target
         allowed_columns = {"hv", "objective", "feasibility"}
         target_column = target_column if target_column in allowed_columns else "hv"
-        rows = self._conn.execute(
-            """
-            SELECT c.problem, c.params_json, m.raw_json, m.hv, m.objective, m.feasibility
+
+        query = """
+            SELECT c.problem, c.params_json, c.status, m.raw_json, m.hv, m.objective, m.feasibility,
+                   c.experiment_id
             FROM metrics m
             JOIN candidates c ON m.candidate_id = c.id
             ORDER BY m.id ASC
             """
-        ).fetchall()
+        rows = self._conn.execute(query).fetchall()
+
         history: list[tuple[Mapping[str, Any], float]] = []
         for row in rows:
             if problem is not None and row["problem"] != problem:
                 continue
+
+            # A3 FIX: Filter by experiment_id if provided
+            if experiment_id is not None and row["experiment_id"] != experiment_id:
+                continue
+
             value = row[target_column]
             if value is None:
                 continue
@@ -1117,8 +1125,14 @@ class WorldModel:
                 params_payload = None
             if params_payload is not None:
                 metrics_payload["candidate_params"] = params_payload
+
             # Inject feasibility so runner's restoration logic sees it (P1 fix)
             if row["feasibility"] is not None:
                 metrics_payload["feasibility"] = float(row["feasibility"])
+
+            # A4.3 FIX Helper: Inject stage/status so surrogate knows fidelity
+            if row["status"] is not None:
+                metrics_payload["_stage"] = row["status"]
+
             history.append((metrics_payload, float(value)))
         return history

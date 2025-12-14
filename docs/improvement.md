@@ -78,7 +78,7 @@ Low Severity Claims - VERIFIED
    "Stage" semantically overloaded: governance stage (S1/S2/S3) vs fidelity stage (screen/promote/p3).
    No code fix applied - would require refactoring and renaming throughout.
 
-## Canonicalization Issues - FIXED ✅
+Canonicalization Issues - FIXED ✅
 
  C1: Seed not expanded to template max modes - FIXED ✅
    Original issue: `_generate_candidate_params` uses seed matrix as-is without expanding to template's max modes.
@@ -94,3 +94,29 @@ Low Severity Claims - VERIFIED
    **Fix Applied**:
    - `surrogate.py:250-262`: Added warning log when schema is first derived
    - Alerts developers about potential shape mixing issues
+
+Section 4: Surrogate & Data Correctness - FIXED ✅
+
+ A3: Surrogate Training Data Mixes Experiments - FIXED ✅
+   Original issue: `surrogate_training_data` selects from `metrics` without filtering by `experiment_id`.
+   **Fix Applied**:
+   - `repository.py:1085-1124`: Added `experiment_id` parameter, filters by `c.experiment_id`
+   - `surrogate.py:168-183`: Updated `fit_from_world_model` to pass `experiment_id`
+   - `cycle_executor.py:1256-1259`: Updated caller to provide `experiment_id`
+
+ A4.2: SurrogateBundle (RF) Weaknesses - FIXED ✅
+   1. Feature vector ignored `n_field_periods` (Nfp).
+   2. Auxiliary targets (QI) used raw scales instead of log10.
+   **Fix Applied**:
+   - `surrogate.py:43-52`: `_params_feature_vector` includes Nfp
+   - `surrogate.py:268-277`: `_vectorize` appends Nfp to flattened params
+   - `surrogate.py:350-356`: QI targets log-scaled in `fit()`
+   - `surrogate.py:543`: QI predictions denormalized (10^x) in `rank_candidates`
+
+ A4.3: NeuralOperatorSurrogate Weaknesses - FIXED ✅
+   1. Fidelity conditioning unused (defaults to high fidelity).
+   2. Soft feasibility used universal constraints for all problems.
+   **Fix Applied**:
+   - `surrogate_v2.py:354-360`: Added `problem` arg to `__init__`
+   - `surrogate_v2.py:703-710`: Extracts `_stage` and maps to fidelity tensor
+   - `surrogate_v2.py:989-994`: Conditional vacuum_well check based on problem bounds

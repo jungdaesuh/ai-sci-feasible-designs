@@ -352,11 +352,13 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         batch_size: int = 32,
         n_ensembles: int = 5,
         hidden_dim: int = 64,
+        problem: str | None = None,
     ) -> None:
         self._min_samples = min_samples
         self._points_cadence = points_cadence
         self._cycle_cadence = cycle_cadence
         self._device = "cpu"
+        self._problem = problem
         if device == "cuda" and torch.cuda.is_available():
             self._device = "cuda"
         elif device == "mps" and torch.backends.mps.is_available():
@@ -518,7 +520,18 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         # Auxiliary targets
         y_mhd_list, y_qi_list, y_iota_list = [], [], []
         y_mirror_ratio_list, y_flux_compression_list = [], []
+        # A4.3 FIX: Extract fidelity from stage info
+        y_fidelity_list = []
         for metrics in metrics_list:
+            # Default to high fidelity (1) if stage not found or if it's "promote"/"p3"
+            # "screen" -> low fidelity (0)
+            stage = metrics.get("_stage", "promote")
+            if stage == "screen":
+                fid_val = 0
+            else:
+                fid_val = 1
+            y_fidelity_list.append(fid_val)
+
             m_payload = metrics.get("metrics", metrics)
             y_mhd_list.append(float(m_payload.get("vacuum_well", -1.0)))
             y_qi_list.append(float(m_payload.get("qi", 1.0)))
@@ -546,6 +559,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
         y_flux_compression = torch.tensor(
             y_flux_compression_list, dtype=torch.float32
         ).to(self._device)
+        y_fidelity = torch.tensor(y_fidelity_list, dtype=torch.long).to(self._device)
 
         # Normalize targets for balanced multi-task learning
         # This ensures each loss term contributes proportionally regardless of scale
@@ -588,6 +602,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             y_iota_norm,
             y_mirror_ratio_norm,
             y_flux_compression_norm,
+            y_fidelity,
         )
 
         # 2. Initialize Models if needed or if schema changed
@@ -698,6 +713,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                     yb_iota,
                     yb_mirror,
                     yb_flux,
+                    fidelity_batch,
                 ) in train_loader:
                     optimizer.zero_grad()
                     (
@@ -707,7 +723,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                         pred_iota,
                         pred_mirror,
                         pred_flux,
-                    ) = model(xb)
+                    ) = model(xb, fidelity=fidelity_batch)
 
                     # With normalized targets, all losses are on same scale
                     # Equal weighting is now appropriate
@@ -737,6 +753,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                             yb_iota,
                             yb_mirror,
                             yb_flux,
+                            fidelity_batch,
                         ) in val_loader:
                             (
                                 pred_obj,
@@ -745,7 +762,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
                                 pred_iota,
                                 pred_mirror,
                                 pred_flux,
-                            ) = model(xb)
+                            ) = model(xb, fidelity=fidelity_batch)
                             val_loss = (
                                 criterion(pred_obj, yb_obj)
                                 + criterion(pred_mhd, yb_mhd)
@@ -970,9 +987,11 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             return min(excess / max(abs(bound), 0.1), 2.0)  # Cap at 2x violation
 
         # 1. Vacuum well (MHD stability) - P3 constraint, but good for all problems
-        well_bound = bounds.get("vacuum_well_lower", 0.0)
-        violations += soft_violation(mhd_val, well_bound, is_upper=False)
-        total_checks += 1.0
+        # A4.3 FIX: Only check if constraint exists for this problem
+        if "vacuum_well_lower" in bounds:
+            well_bound = bounds.get("vacuum_well_lower", 0.0)
+            violations += soft_violation(mhd_val, well_bound, is_upper=False)
+            total_checks += 1.0
 
         # 2. QI residual (log10 scale)
         qi_log = float(np.log10(max(qi_val, 1e-12)))
