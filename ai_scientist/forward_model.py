@@ -183,7 +183,7 @@ class _LRUCache:
 _EVALUATION_CACHE: _LRUCache = _LRUCache(_get_cache_max_size())
 _CACHE_STATS: Dict[str, int] = defaultdict(int)
 _CANONICAL_PRECISION = 1e-8
-_DEFAULT_ROUNDING = 1e-6
+_DEFAULT_ROUNDING = 1e-9
 _DEFAULT_SCHEMA_VERSION = 1
 
 # --- Backend Registry ---
@@ -443,10 +443,20 @@ def compute_design_hash(
     *,
     schema_version: int = _DEFAULT_SCHEMA_VERSION,
     rounding: float = _DEFAULT_ROUNDING,
+    exact: bool = False,
 ) -> str:
-    """Compute a canonical hash for the design parameters."""
-    # Simplify params to ensure consistent hashing
-    # We focus on the geometric coefficients
+    """Compute a canonical hash for the design parameters.
+
+    Args:
+        params: Design parameters dictionary with r_cos, z_sin, etc.
+        schema_version: Hash schema version for compatibility.
+        rounding: Precision for coefficient quantization (default 1e-9).
+        exact: If True, use no rounding (exact bytes) for optimization paths
+               where even tiny differences must produce different hashes.
+    """
+    # For exact hashing (e.g., gradient optimization), disable rounding
+    if exact:
+        rounding = 0.0
 
     r_cos = np.asarray(params.get("r_cos", []), dtype=float)
     z_sin = np.asarray(params.get("z_sin", []), dtype=float)

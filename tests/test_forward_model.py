@@ -104,10 +104,21 @@ def test_design_hash_stability():
 
     assert h1 == h2
 
-    params3 = {"r_cos": [[1.000000001]], "z_sin": [[0.0]]}  # Within rounding tolerance?
-    # Default rounding is 1e-6
+    # With 1e-9 rounding precision, 1e-10 difference should still hash the same
+    params3 = {
+        "r_cos": [[1.0000000001]],
+        "z_sin": [[0.0]],
+    }  # 1e-10 diff, within tolerance
     h3 = compute_design_hash(params3)
     assert h1 == h3
+
+    # But 1e-8 difference should produce different hash (Issue #8 fix)
+    params3b = {
+        "r_cos": [[1.00000001]],
+        "z_sin": [[0.0]],
+    }  # 1e-8 diff, beyond tolerance
+    h3b = compute_design_hash(params3b)
+    assert h1 != h3b  # This is the fix for gradient optimization collisions
 
     params4 = {"r_cos": [[1.1]], "z_sin": [[0.0]]}
     h4 = compute_design_hash(params4)

@@ -38,7 +38,7 @@ class StellaratorEnv(gym.Env):
         initial_params: Dict[str, Any],
         target_metrics: Dict[str, float],
         max_steps: int = 20,
-        action_scale: float = 1e-3,
+        action_scale: float = 1e-2,
         device: str = "cpu",
         problem: str = "p3",
     ):
@@ -50,7 +50,8 @@ class StellaratorEnv(gym.Env):
             initial_params: Dictionary of initial boundary parameters.
             target_metrics: Target performance metrics (e.g. aspect_ratio=8.0).
             max_steps: Maximum steps per episode.
-            action_scale: Scaling factor for actions (deltas).
+            action_scale: Scaling factor for actions (deltas). Default 1e-2 allows
+                         20% coefficient range traversal in 20 steps.
             device: Compute device for surrogate calls.
             problem: Problem type ("p1", "p2", "p3"). Controls which constraints
                      are penalized in the reward function. Default "p3".
@@ -60,6 +61,7 @@ class StellaratorEnv(gym.Env):
         self.target_metrics = target_metrics
         self.max_steps = max_steps
         self.action_scale = action_scale
+        self.adaptive_action_scale = target_metrics.get("adaptive_action_scale", False)
         self.device = device
         self.problem = problem.lower()  # Store problem type for reward shaping
 
@@ -90,6 +92,18 @@ class StellaratorEnv(gym.Env):
         # Initial score
         self.initial_score = self._compute_score(self.current_vec)
         self.current_score = self.initial_score
+
+    def _get_action_scale(self, step: int) -> float:
+        """Get action scale, optionally annealed based on step.
+
+        When adaptive_action_scale is enabled, uses exponential decay:
+        - Early steps: larger exploration (base scale)
+        - Late steps: smaller refinement (base * 0.9^(step/5))
+        """
+        if not self.adaptive_action_scale:
+            return self.action_scale
+        decay = 0.9 ** (step / 5)  # Halve roughly every ~3.5 steps
+        return self.action_scale * decay
 
     def _compute_score(self, vec: np.ndarray) -> float:
         """Compute reward score using surrogate predictions.
@@ -310,7 +324,7 @@ class StellaratorEnv(gym.Env):
         # Apply action
         # Clip action to range [-1, 1] just in case
         act = np.clip(action, -1.0, 1.0)
-        delta = act * self.action_scale
+        delta = act * self._get_action_scale(self.current_step)
 
         self.current_vec += delta
 
