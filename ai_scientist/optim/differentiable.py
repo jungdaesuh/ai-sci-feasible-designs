@@ -440,6 +440,10 @@ def gradient_descent_on_inputs(
             pred_elo = geometry.elongation_isoperimetric(r_cos, z_sin, x_input[-1])
             std_elo = torch.zeros_like(pred_elo)
 
+            # H3 FIX: Compute aspect ratio for P2 constraint enforcement
+            # Aspect ratio is deterministic (computed from geometry), no uncertainty
+            pred_ar = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
+
             # Loss Formulation (Risk-Averse: Penalize Uncertainty)
             # Direction depends on problem and target:
             # - P1: MINIMIZE elongation -> UCB (mean + beta*std)
@@ -457,10 +461,11 @@ def gradient_descent_on_inputs(
             # H3 FIX: Constraints (Penalty Method) with Pessimistic Bounds
             # MHD Vacuum Well is P3-ONLY constraint (constraints.py:40-46)
             # P2 does NOT include vacuum_well in its constraint set
-            viol_mhd = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
             if problem.lower().startswith("p3"):
                 # MHD: Good if > 0. Pessimistic: mean - beta*std
                 viol_mhd = torch.relu(-(pred_mhd.squeeze() - beta * std_mhd.squeeze()))
+            else:
+                viol_mhd = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
             # QI constraint: log10(qi) <= threshold (problem-dependent)
             # Surrogate predicts raw QI, so we convert to log10 for comparison
@@ -495,16 +500,13 @@ def gradient_descent_on_inputs(
             else:
                 viol_elo = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
-            # H3 FIX: P2 Aspect Ratio constraint
-            # P2 requires aspect_ratio <= 10.0 (constraints.py:91, P2_CONSTRAINT_NAMES)
-            # P1 requires aspect_ratio <= 4.0
-            viol_aspect = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
-            if problem.lower().startswith("p2") or problem.lower().startswith("p1"):
-                # Compute aspect ratio analytically (differentiable, same as elongation)
-                pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
-                # Determine bound based on problem
-                aspect_bound = 10.0 if problem.lower().startswith("p2") else 4.0
-                viol_aspect = torch.relu(pred_aspect.squeeze() - aspect_bound)
+            # H3 FIX: P2 Aspect Ratio constraint (AR <= 10.0 per benchmark)
+            # Aspect ratio is deterministic, so std=0 and we use exact penalty
+            if problem.lower().startswith("p2"):
+                aspect_ratio_bound = 10.0
+                viol_ar = torch.relu(pred_ar.squeeze() - aspect_ratio_bound)
+            else:
+                viol_ar = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
             # H3 FIX: P3-specific constraints (iota, mirror ratio, flux compression)
             # These are extracted from surrogate predictions but were previously ignored
@@ -542,7 +544,7 @@ def gradient_descent_on_inputs(
                 weights.mhd * viol_mhd
                 + weights.qi * viol_qi
                 + weights.elongation * viol_elo
-                + viol_aspect  # H3 FIX: aspect ratio penalty for P1/P2
+                + viol_ar  # H3 FIX: P2 aspect ratio constraint
                 + viol_iota  # No configurable weight - use unit weight
                 + viol_mirror
                 + viol_flux
