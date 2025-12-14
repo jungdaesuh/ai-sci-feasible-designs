@@ -78,6 +78,34 @@ class MetricsProtocol(Protocol):
 MetricsLike = MetricsProtocol | Dict[str, Any]
 
 
+def _metrics_to_dict(metrics: MetricsLike) -> Dict[str, Any]:
+    """Convert metrics to dict in a type-safe way.
+
+    Handles both pydantic models (with model_dump()) and plain dicts.
+    This helper resolves pyright errors when using Protocol | dict unions.
+    """
+    if isinstance(metrics, dict):
+        return metrics
+    if hasattr(metrics, "model_dump"):
+        return metrics.model_dump()  # type: ignore[union-attr]
+    # Fallback: try to extract known attributes
+    result: Dict[str, Any] = {}
+    for attr in (
+        "aspect_ratio",
+        "max_elongation",
+        "minimum_normalized_magnetic_gradient_scale_length",
+        "edge_magnetic_mirror_ratio",
+        "edge_rotational_transform_over_n_field_periods",
+        "average_triangularity",
+        "vacuum_well",
+        "flux_compression_in_regions_of_bad_curvature",
+        "qi",
+    ):
+        if hasattr(metrics, attr):
+            result[attr] = getattr(metrics, attr)
+    return result
+
+
 def _is_constellaration_available() -> bool:
     """Return True if the real constellaration backend is importable.
 
@@ -508,9 +536,7 @@ def compute_constraint_margins(
                Note: "promote" is intended to run high-fidelity VMEC but may
                skip Boozer/QI (see tools.evaluation._settings_for_stage).
     """
-    metrics_map = (
-        metrics.model_dump() if hasattr(metrics, "model_dump") else dict(metrics)
-    )
+    metrics_map = _metrics_to_dict(metrics)
     problem_key = problem.lower()
     stage_key = stage.lower()
 
