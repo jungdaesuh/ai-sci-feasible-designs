@@ -56,7 +56,8 @@ class TargetKind(str, Enum):
     """
 
     OBJECTIVE = "objective"
-    HV = "hv"
+    GRADIENT_PROXY = "gradient_proxy"  # H2 FIX: Per-candidate proxy, NOT hypervolume
+    HV = "gradient_proxy"  # Backward compat alias
 
 
 def get_training_target(problem: str) -> TargetKind:
@@ -66,7 +67,7 @@ def get_training_target(problem: str) -> TargetKind:
     Any change to this policy automatically propagates to all callers.
 
     Policy:
-        P3 (multi-objective): Uses HV as surrogate target for Pareto optimization.
+        P3 (multi-objective): Uses gradient_proxy as surrogate target for Pareto optimization.
         P1/P2 (single-objective): Uses physics objective directly.
 
     Args:
@@ -75,7 +76,12 @@ def get_training_target(problem: str) -> TargetKind:
     Returns:
         TargetKind enum value.
     """
-    return TargetKind.HV if problem.lower().startswith("p3") else TargetKind.OBJECTIVE
+    # H2 FIX: Use GRADIENT_PROXY (the canonical name) instead of HV
+    return (
+        TargetKind.GRADIENT_PROXY
+        if problem.lower().startswith("p3")
+        else TargetKind.OBJECTIVE
+    )
 
 
 @dataclass(frozen=True)

@@ -512,7 +512,9 @@ class WorldModel:
             evaluation.get("metrics", {}),
             feasibility=float(evaluation.get("feasibility", 0.0)),
             objective=evaluation.get("objective"),
-            hv=evaluation.get("hv"),
+            hv=evaluation.get(
+                "gradient_proxy", evaluation.get("hv")
+            ),  # H2 FIX: Use gradient_proxy with fallback
             commit=False,
         )
         if commit:
@@ -1081,8 +1083,11 @@ class WorldModel:
     ) -> list[tuple[Mapping[str, Any], float]]:
         """Return cached metrics + target values usable by the surrogate ranker."""
 
-        allowed_targets = {"hv", "objective", "feasibility"}
-        target_column = target if target in allowed_targets else "hv"
+        # H2 FIX: Accept "gradient_proxy" as alias for DB column "hv"
+        # The DB column remains "hv" for backward compat with existing data
+        target_column = "hv" if target in {"hv", "gradient_proxy"} else target
+        allowed_columns = {"hv", "objective", "feasibility"}
+        target_column = target_column if target_column in allowed_columns else "hv"
         rows = self._conn.execute(
             """
             SELECT c.problem, c.params_json, m.raw_json, m.hv, m.objective, m.feasibility

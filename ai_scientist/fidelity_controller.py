@@ -267,7 +267,6 @@ class FidelityController:
                     # This is a per-candidate proxy score = max(0, gradient - 1)
                     # True hypervolume is computed at cycle level from the Pareto front
                     eval_dict["gradient_proxy"] = max(0.0, grad - 1.0)
-                    eval_dict["hv"] = eval_dict["gradient_proxy"]  # Backward compat
                 else:  # p3
                     grad = float(
                         metrics_dict.get(
@@ -276,7 +275,6 @@ class FidelityController:
                     )
                     # H2 FIX: See comment above
                     eval_dict["gradient_proxy"] = max(0.0, grad - 1.0)
-                    eval_dict["hv"] = eval_dict["gradient_proxy"]  # Backward compat
 
             if result.error_message:
                 eval_dict["error"] = result.error_message
