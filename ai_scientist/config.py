@@ -145,13 +145,33 @@ class FidelityLadder:
 
 @dataclass(frozen=True)
 class BoundaryTemplateConfig:
-    n_poloidal_modes: int
-    n_toroidal_modes: int
+    n_poloidal_modes: int  # Treated as max_poloidal_mode (mpol)
+    n_toroidal_modes: int  # Treated as max_toroidal_mode (ntor)
     n_field_periods: int
     base_major_radius: float
     base_minor_radius: float
     perturbation_scale: float
     seed_path: Path | None = None
+
+    @property
+    def max_poloidal_mode(self) -> int:
+        """Maximum poloidal mode index (mpol). Same as n_poloidal_modes."""
+        return self.n_poloidal_modes
+
+    @property
+    def max_toroidal_mode(self) -> int:
+        """Maximum toroidal mode index (ntor). Same as n_toroidal_modes."""
+        return self.n_toroidal_modes
+
+    @property
+    def n_poloidal_coefficients(self) -> int:
+        """Number of rows in r_cos/z_sin arrays = mpol + 1."""
+        return self.n_poloidal_modes + 1
+
+    @property
+    def n_toroidal_coefficients(self) -> int:
+        """Number of columns in r_cos/z_sin arrays = 2*ntor + 1 (always odd)."""
+        return 2 * self.n_toroidal_modes + 1
 
 
 @dataclass(frozen=True)

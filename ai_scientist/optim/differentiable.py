@@ -333,8 +333,8 @@ def gradient_descent_on_inputs(
 
     # Determine masking parameters from template
     template = cfg.boundary_template
-    max_poloidal = max(1, template.n_poloidal_modes - 1)
-    max_toroidal = max(1, (template.n_toroidal_modes - 1) // 2)
+    max_poloidal = max(1, template.max_poloidal_mode)
+    max_toroidal = max(1, template.max_toroidal_mode)
 
     if surrogate._schema is None:
         raise RuntimeError(

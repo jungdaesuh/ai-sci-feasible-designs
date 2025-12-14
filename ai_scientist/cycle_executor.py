@@ -1624,9 +1624,9 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
 def _build_template_params_for_alm(
     template: ai_config.BoundaryTemplateConfig,
 ) -> Mapping[str, Any]:
-    n_poloidal = template.n_poloidal_modes
-    n_toroidal = template.n_toroidal_modes
-    center_idx = n_toroidal // 2
+    n_poloidal = template.n_poloidal_coefficients  # mpol + 1
+    n_toroidal = template.n_toroidal_coefficients  # 2*ntor + 1 (odd)
+    center_idx = template.max_toroidal_mode  # ntor
     r_cos = []
     z_sin = []
     for pol in range(n_poloidal):
@@ -1666,8 +1666,8 @@ def _generate_nae_candidate_params(
         rotational_transform=rotational_transform,
         mirror_ratio=mirror_ratio,
         n_field_periods=template.n_field_periods,
-        max_poloidal_mode=template.n_poloidal_modes - 1,
-        max_toroidal_mode=template.n_toroidal_modes - 1,
+        max_poloidal_mode=template.max_poloidal_mode,
+        max_toroidal_mode=template.max_toroidal_mode,
     )
     return {
         "r_cos": np.asarray(nae_boundary.r_cos).tolist(),
@@ -1770,8 +1770,8 @@ def _generate_candidate_params(
             rotational_transform=1.2,
             n_field_periods=template.n_field_periods,
         )
-        max_poloidal = max(1, template.n_poloidal_modes - 1)
-        max_toroidal = max(1, (template.n_toroidal_modes - 1) // 2)
+        max_poloidal = max(1, template.max_poloidal_mode)
+        max_toroidal = max(1, template.max_toroidal_mode)
         expanded = surface_module.set_max_mode_numbers(
             base_surface,
             max_poloidal_mode=max_poloidal,

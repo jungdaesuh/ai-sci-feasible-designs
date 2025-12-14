@@ -1019,8 +1019,8 @@ class Coordinator:
         fm_settings = ConstellarationSettings.default_high_fidelity()
 
         return OptimizationSettings(
-            max_poloidal_mode=config.boundary_template.n_poloidal_modes,
-            max_toroidal_mode=config.boundary_template.n_toroidal_modes,
+            max_poloidal_mode=config.boundary_template.max_poloidal_mode,
+            max_toroidal_mode=config.boundary_template.max_toroidal_mode,
             infinity_norm_spectrum_scaling=0.0,
             forward_model_settings=fm_settings,
             optimizer_settings=AugmentedLagrangianMethodSettings(
