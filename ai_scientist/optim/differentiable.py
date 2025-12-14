@@ -23,6 +23,7 @@ from ai_scientist.constraints import (
     MAX_ELONGATION,
     QI_EPS,
     get_log10_qi_threshold,
+    get_r00_target,
 )
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
@@ -507,7 +508,7 @@ def gradient_descent_on_inputs(
                 # R₀₀ is at position (0, ntor) in the r_cos coefficient matrix
                 # In the dense vector, index = 0 * dense_grid_w + ntor = ntor
                 r00_value = x_dense[ntor]
-                r00_target = 1.0
+                r00_target = get_r00_target()
                 r00_penalty = LAMBDA_R00_REGULARIZATION * (r00_value - r00_target) ** 2
 
             loss = loss_obj + loss_penalty + fourier_penalty + r00_penalty
@@ -733,7 +734,7 @@ def optimize_alm_inner_loop(
         r00_penalty = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
         if include_r00:
             r00_value = x_dense[ntor]
-            r00_target = 1.0
+            r00_target = get_r00_target()
             r00_penalty = LAMBDA_R00_REGULARIZATION * (r00_value - r00_target) ** 2
 
         loss = obj_term + torch.sum(augmented_term) + fourier_penalty + r00_penalty

@@ -24,10 +24,13 @@ from typing import Any, Mapping, Sequence, Tuple
 import numpy as np
 from pymoo.indicators import hv as pymoo_hv
 
+from ai_scientist.constraints import get_hv_reference_point
+
 # Reference point for hypervolume in MINIMIZATION form: (-gradient, aspect_ratio)
+# H2 Fix: Now configurable via get_hv_reference_point() or env vars
 # Since we negate gradient, ref=-1.0 means natural gradient=1.0 is the threshold.
 # Points with gradient < 1.0 (minimization form > -1.0) won't contribute hypervolume.
-_P3_REFERENCE_POINT: Tuple[float, float] = (-1.0, 20.0)
+_P3_REFERENCE_POINT: Tuple[float, float] = get_hv_reference_point()
 
 
 @dataclass(frozen=True)

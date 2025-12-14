@@ -13,7 +13,8 @@ The canonical names here match the constellaration benchmark definitions.
 
 from __future__ import annotations
 
-from typing import Dict, List
+import os
+from typing import Dict, List, Tuple
 
 # =============================================================================
 # CANONICAL CONSTRAINT NAMES
@@ -129,6 +130,16 @@ LAMBDA_FOURIER_DECAY: float = 0.01
 # Used when optimize_major_radius=True in ExperimentConfig
 LAMBDA_R00_REGULARIZATION: float = 10.0
 
+# H1 Fix: Default R₀₀ regularization target (dataset mean ~1.0)
+# Override via R00_TARGET env var or by calling get_r00_target(custom_value)
+R00_REGULARIZATION_TARGET: float = 1.0
+
+# H2 Fix: P3 Hypervolume reference point thresholds (natural units)
+# Points with gradient < HV_REFERENCE_GRADIENT contribute zero hypervolume
+# Override via HV_REF_GRADIENT / HV_REF_ASPECT env vars
+HV_REFERENCE_GRADIENT: float = 1.0  # Natural units (positive)
+HV_REFERENCE_ASPECT_RATIO: float = 20.0
+
 # Early stopping parameters for gradient descent
 EARLY_STOPPING_PATIENCE: int = 10
 EARLY_STOPPING_MIN_IMPROVEMENT: float = 1e-4
@@ -231,3 +242,34 @@ def get_log10_qi_threshold(problem: str) -> float:
     if key.startswith("p2"):
         return LOG10_QI_THRESHOLDS["p2"]
     return LOG10_QI_THRESHOLDS["p3"]
+
+
+def get_r00_target() -> float:
+    """Get R₀₀ regularization target (H1 Fix).
+
+    The target can be overridden via the R00_TARGET environment variable
+    to match dataset statistics when the mean R₀₀ differs from 1.0.
+
+    Returns:
+        R₀₀ target value for regularization (default 1.0).
+    """
+    env_val = os.environ.get("R00_TARGET")
+    if env_val is not None:
+        return float(env_val)
+    return R00_REGULARIZATION_TARGET
+
+
+def get_hv_reference_point() -> Tuple[float, float]:
+    """Get P3 hypervolume reference point in MINIMIZATION form (H2 Fix).
+
+    The reference point can be overridden via environment variables:
+    - HV_REF_GRADIENT: gradient threshold in natural units (default 1.0)
+    - HV_REF_ASPECT: aspect ratio threshold (default 20.0)
+
+    Returns:
+        Tuple of (-gradient, aspect_ratio) in minimization form.
+        Points with gradient < threshold contribute zero hypervolume.
+    """
+    grad = float(os.environ.get("HV_REF_GRADIENT", HV_REFERENCE_GRADIENT))
+    aspect = float(os.environ.get("HV_REF_ASPECT", HV_REFERENCE_ASPECT_RATIO))
+    return (-grad, aspect)  # Minimization form: negate gradient
