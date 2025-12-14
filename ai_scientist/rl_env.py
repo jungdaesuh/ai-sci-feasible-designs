@@ -182,7 +182,9 @@ class StellaratorEnv(gym.Env):
         # B3 FIX: Only penalize for P3 problems (vacuum_well is a P3-only constraint!)
         if self.problem.startswith("p3"):
             mhd_violation = max(0.0, -mhd_val)
-            mhd_continuous = -mhd_val
+            mhd_continuous = max(
+                0.0, -mhd_val
+            )  # H1 FIX: Only penalize in infeasible region
 
             cost += 5.0 * mhd_violation  # Strong MHD feasibility push
             cost += 0.3 * mhd_continuous  # Mild MHD improvement
