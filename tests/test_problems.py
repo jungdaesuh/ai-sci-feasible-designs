@@ -177,7 +177,9 @@ class TestP3Problem:
             "minimum_normalized_magnetic_gradient_scale_length": 2.0,
         }
         assert p.is_feasible(metrics)
-        assert p.get_objective(metrics) == 8.0  # Returns aspect_ratio
+        assert p.get_objective(metrics) == pytest.approx(
+            -0.25
+        )  # Scalarized: -L_∇B / AR = -2.0 / 8.0
 
         # Infeasible case (vacuum well)
         metrics_bad = metrics.copy()

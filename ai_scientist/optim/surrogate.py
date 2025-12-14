@@ -69,9 +69,14 @@ class SimpleSurrogateRanker:
         gradient = float(
             metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
         )
-        aspect = float(metrics.get("aspect_ratio", 0.0))
-        hv = float(metrics.get("hv", gradient - aspect))
-        return np.array([gradient, aspect, hv, gradient - aspect], dtype=float)
+        aspect = float(metrics.get("aspect_ratio", 1.0))
+        # H2 FIX: Use gradient_proxy (with hv fallback for legacy data)
+        gradient_proxy = float(
+            metrics.get("gradient_proxy", metrics.get("hv", gradient - aspect))
+        )
+        return np.array(
+            [gradient, aspect, gradient_proxy, gradient - aspect], dtype=float
+        )
 
     def fit(
         self,
@@ -98,7 +103,7 @@ class SimpleSurrogateRanker:
         self,
         world_model: memory.WorldModel,
         *,
-        target_column: str = "hv",
+        target_column: str = "gradient_proxy",  # H2 FIX: Renamed from "hv"
         problem: str | None = None,
     ) -> None:
         history = world_model.surrogate_training_data(

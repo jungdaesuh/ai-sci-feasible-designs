@@ -144,5 +144,6 @@ def test_evaluation_result_structure(mock_backend):
     assert pareto[0] == result.objective
     assert pareto[1] == result.feasibility
 
-    # Check dominates (basic check)
-    assert result.dominates(result) is False  # Cannot dominate itself
+    # Check dominates raises NotImplementedError (requires objective direction context)
+    with pytest.raises(NotImplementedError):
+        result.dominates(result)
