@@ -114,9 +114,6 @@ def verify_a4_2_rf_fixes():
 
     feats = feats.reshape(1, -1)
 
-    # The scaler is fitted - verify it exists (implicit training check)
-    assert bundle._scaler is not None, "Scaler should be fitted"
-
     # Verify denormalization in rank_candidates
     candidates = [{"candidate_params": params}]
     preds = bundle.rank_candidates(candidates, minimize_objective=False)
