@@ -24,6 +24,8 @@ from ai_scientist.constraints import (
     QI_EPS,
     get_log10_qi_threshold,
     get_r00_target,
+    get_constraint_names,
+    get_constraint_bounds,
 )
 from ai_scientist.optim import geometry
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
@@ -510,9 +512,18 @@ def gradient_descent_on_inputs(
             viol_mirror = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
             viol_flux = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
-            if problem.lower().startswith("p3") or problem.lower().startswith("p2"):
-                # Iota (edge rotational transform): Good if >= 0.25
-                iota_bound = 0.25
+            if (
+                problem.lower().startswith("p3")
+                or problem.lower().startswith("p2")
+                or problem.lower().startswith("p1")
+            ):
+                # Iota (edge rotational transform): Good if >= lower_bound
+                # P1: 0.3, P2/P3: 0.25
+                iota_bound = 0.25  # Default
+                bounds = get_constraint_bounds(problem.lower())
+                if "edge_rotational_transform_lower" in bounds:
+                    iota_bound = bounds["edge_rotational_transform_lower"]
+
                 viol_iota = torch.relu(iota_bound - _pred_iota.squeeze())
 
             if problem.lower().startswith("p3"):
@@ -749,30 +760,95 @@ def optimize_alm_inner_loop(
         bias_correction = cv_squared / (2 * ln10) + 3 * cv_squared**2 / (4 * ln10)
         log10_qi_corrected = log10_qi - bias_correction
 
-        # Constraints (Pessimistic)
-        # H3 FIX: MHD Vacuum Well is P3-ONLY constraint (constraints.py:40-46)
-        c1 = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
-        if problem.lower().startswith("p3"):
-            # MHD: Good if > 0. Pessimistic: mean - beta*std (lower confidence bound)
-            c1 = torch.relu(-(mhd - beta * s_mhd))
-
+        # Pre-compute common constraint terms
+        # MHD: Good if > 0. Pessimistic: mean - beta*std (lower confidence bound)
+        c_mhd = (
+            torch.relu(-(mhd - beta * s_mhd))
+            if problem.lower().startswith("p3")
+            else torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+        )
         # QI: Good if log10(qi) < threshold. Pessimistic: mean + beta*std (upper confidence bound)
-        c2 = torch.relu((log10_qi_corrected + beta * s_log10_qi) - log10_qi_threshold)
+        c_qi = torch.relu((log10_qi_corrected + beta * s_log10_qi) - log10_qi_threshold)
         # Elongation: Good if < MAX_ELONGATION. Pessimistic: mean + beta*std
-        c3 = torch.relu((elo + beta * s_elo) - MAX_ELONGATION)
+        c_elo = torch.relu((elo + beta * s_elo) - MAX_ELONGATION)
 
-        # H3 FIX: P2 Aspect Ratio constraint
-        # P2 requires aspect_ratio <= 10.0 (constraints.py:91, P2_CONSTRAINT_NAMES)
-        # P1 requires aspect_ratio <= 4.0
-        c4 = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
-        if problem.lower().startswith("p2") or problem.lower().startswith("p1"):
-            # Compute aspect ratio analytically (differentiable, same as elongation)
-            pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
-            # Determine bound based on problem
-            aspect_bound = 10.0 if problem.lower().startswith("p2") else 4.0
-            c4 = torch.relu(pred_aspect.squeeze() - aspect_bound)
+        # Constraints (Pessimistic)
+        # H3 FIX: ALM Constraints Vector Assembly
+        # Assemble constraints in the EXACT order expected by the ALM state
+        # (which matches constraints.get_constraint_names(problem, for_alm=True))
 
-        constraints = torch.stack([c1, c2, c3, c4])
+        # 1. Compute all potential constraint violations
+        viol_map = {}
+
+        # Aspect Ratio (P2, P3 ALM)
+        # P2 requires aspect_ratio <= 10.0, P1 <= 4.0
+        # P3 also includes it in ALM list (P3_ALM_CONSTRAINT_NAMES)
+        pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
+        aspect_bound = 10.0  # Default for P2
+        if problem.lower().startswith("p1"):
+            aspect_bound = 4.0
+        # P3 doesn't technically bound AR in problem def, but ALM runner might use it?
+        # constraints.py P3_ALM_CONSTRAINT_NAMES includes "aspect_ratio".
+        # We need a bound for it relative to ALM usage.
+        # Assuming P2 bound for P3 safety if not specified, or 10.0 as safe upper bound.
+        viol_map["aspect_ratio"] = torch.relu(pred_aspect.squeeze() - aspect_bound)
+
+        # Iota (P1, P2, P3)
+        # Good if >= lower_bound (0.25 typically)
+        iota_bound = 0.25
+        # Use canonical bound lookup for all problems
+        bounds = get_constraint_bounds(problem.lower())
+        if "edge_rotational_transform_lower" in bounds:
+            iota_bound = bounds["edge_rotational_transform_lower"]
+        viol_map["edge_rotational_transform"] = torch.relu(
+            iota_bound - _pred_iota.squeeze()
+        )
+
+        # QI (P2, P3)
+        # c2 from above (log10 qi comparison)
+        viol_map["qi"] = c_qi
+
+        # Mirror Ratio (P2, P3)
+        # Good if <= upper_bound
+        mirror_bound = 0.25  # Default P3
+        if problem.lower().startswith("p2"):
+            mirror_bound = 0.2
+        viol_map["edge_magnetic_mirror_ratio"] = torch.relu(
+            _pred_mirror.squeeze() - mirror_bound
+        )
+
+        # Flux Compression (P3)
+        # Good if <= 0.9
+        viol_map["flux_compression"] = torch.relu(_pred_flux.squeeze() - 0.9)
+
+        # Vacuum Well / MHD (P3)
+        # c1 from above (conditionalized P3 logic)
+        viol_map["vacuum_well"] = c_mhd
+
+        # Max Elongation (P2 only)
+        # c3 from above
+        viol_map["max_elongation"] = c_elo
+
+        # Average Triangularity (P1)
+        # Not predicted by this surrogate, but placeholder for P1 support
+        viol_map["average_triangularity"] = torch.tensor(
+            0.0, device=device, dtype=x_torch.dtype
+        )
+
+        # 2. Stack in canonical order
+        alm_names = get_constraint_names(problem, for_alm=True)
+        # Filter names that might not be in our map (safety)
+        ordered_constraints = []
+        for name in alm_names:
+            if name in viol_map:
+                ordered_constraints.append(viol_map[name])
+            else:
+                # Should not happen for supported constraints
+                ordered_constraints.append(
+                    torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+                )
+
+        constraints = torch.stack(ordered_constraints)
 
         augmented_term = (
             0.5

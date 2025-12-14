@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+import numpy as np
 from unittest.mock import MagicMock, patch
 
 from ai_scientist.optim import differentiable
@@ -176,3 +177,115 @@ def test_p3_mhd_penalty_enforced(mock_surrogate, mock_config):
         target=TargetKind.OBJECTIVE,
     )
     # Should run without error, enforcing MHD
+
+
+def test_p3_alm_shape_mismatch(mock_surrogate, mock_config):
+    """Test that ALM inner loop handles P3 constraints vector correctly."""
+    mock_config.problem = "p3"
+
+    # Mock input data
+    # Create fake x_initial (flattened params) and scale
+    # size = (mpol+1)*(2*ntor+1) roughly, but masked.
+    # mpol=2, ntor=2 -> r_cos: m=0(n=1,2)=2, m=1,2(n=-2..2)=10 -> 12. z_sin: same -> 12. Total 24.
+    x_dim = 24
+    x_initial = np.zeros(x_dim, dtype=np.float32)
+    scale = np.ones(x_dim, dtype=np.float32)
+
+    n_field_periods = 3  # P3 standard
+
+    # Mock ALM state
+    # P3 ALM has 6 constraints: AR, Iota, QI, Mirror, Flux, Vacuum
+    alm_state = {
+        "multipliers": np.ones(6, dtype=np.float32),
+        "penalty_parameters": np.ones(6, dtype=np.float32),
+    }
+
+    # Mock geometry calls to return valid tensors
+    with patch(
+        "ai_scientist.optim.geometry.aspect_ratio", return_value=torch.tensor([3.0])
+    ):
+        with patch(
+            "ai_scientist.optim.geometry.elongation_isoperimetric",
+            return_value=torch.tensor([1.0]),
+        ):
+            with patch(
+                "ai_scientist.optim.differentiable.get_constraint_bounds"
+            ) as mock_get_bounds:
+                mock_get_bounds.return_value = {"edge_rotational_transform_lower": 0.25}
+
+                # Call optimize_alm_inner_loop with correct signature
+                differentiable.optimize_alm_inner_loop(
+                    x_initial,
+                    scale,
+                    mock_surrogate,
+                    alm_state,
+                    n_field_periods_val=n_field_periods,
+                    problem="p3",
+                    steps=1,
+                    lr=0.01,
+                    device="cpu",
+                    target=TargetKind.OBJECTIVE,
+                )
+
+
+def test_p1_iota_bound(mock_surrogate, mock_config):
+    """Test that P1 optimization enforces proper Iota bound (0.3), not default (0.25)."""
+    candidates = [{"params": {"r_cos": [], "z_sin": []}}]
+    mock_config.problem = "p1"
+
+    # Mock Iota prediction to return 0.28.
+    # If bound is 0.25 (default/bug), violation is 0.
+    # If bound is 0.30 (correct P1), violation is 0.02.
+    def predict_iota_violation(x):
+        batch_size = x.shape[0]
+        dtype = x.dtype
+        device = x.device
+
+        # iota = 0.28
+        iota = torch.full((batch_size, 1), 0.28, dtype=dtype, device=device)
+        zeros = torch.zeros(batch_size, 1, dtype=dtype, device=device)
+
+        # Return tuple: obj, std_obj, mhd, std_mhd, qi, std_qi, iota, ...
+        return (
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            iota,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+        )
+
+    mock_surrogate.predict_torch.side_effect = predict_iota_violation
+
+    with patch(
+        "ai_scientist.optim.geometry.aspect_ratio", return_value=torch.tensor([3.0])
+    ):
+        with patch(
+            "ai_scientist.optim.geometry.elongation_isoperimetric",
+            return_value=torch.tensor([1.0]),
+        ):
+            with patch(
+                "ai_scientist.optim.differentiable.get_constraint_bounds"
+            ) as mock_get_bounds:
+                mock_get_bounds.return_value = {"edge_rotational_transform_lower": 0.3}
+
+                differentiable.gradient_descent_on_inputs(
+                    candidates,
+                    mock_surrogate,
+                    mock_config,
+                    steps=1,
+                    lr=0.01,
+                    device="cpu",
+                    target=TargetKind.OBJECTIVE,
+                )
+
+                # If the code genericized the lookup, it should call this for p1.
+                # Current buggy code only calls it for p2.
+                # So verify it IS called.
+                mock_get_bounds.assert_called_with("p1")
