@@ -243,6 +243,15 @@ class StellaratorEnv(gym.Env):
             except Exception:
                 pass  # Skip elongation penalty if computation fails
 
+            # P2 Objective: Maximize L_∇B (magnetic gradient scale length)
+            # B5 FIX: P2 reward had no signal for the objective function!
+            # Once constraints are satisfied (violations ≈ 0), agent needs gradient
+            # toward higher L_∇B values. obj_m is the surrogate's L_∇B prediction.
+            l_grad_b_pred = float(obj_m.item())
+            # Subtract from cost (higher L_∇B = lower cost = higher reward)
+            # Scale factor 2.0 balances with constraint penalties (QI=10, elong=3)
+            cost -= 2.0 * l_grad_b_pred
+
         # 5. Aspect Ratio Target (v3.2 FIX: compute from params, NOT obj_val)
         # After retraining change, obj_val becomes score (grad/aspect), not AR
         # NOTE: For P1, AR is already penalized above with stricter bounds
