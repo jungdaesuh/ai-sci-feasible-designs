@@ -116,6 +116,62 @@ def test_model_forward_shape():
     assert flux.shape == (batch_size,)
 
 
+def test_load_checkpoint_full_object_restores_normalization_stats(tmp_path):
+    """Full-object checkpoints must restore normalization stats for meaningful inference.
+
+    `scripts/train_offline.py` saves the entire NeuralOperatorSurrogate via torch.save().
+    load_checkpoint() should restore the normalization tensors (_y_* stats) so that
+    predict_torch() returns values in the original physical units (not z-scored space).
+    """
+    surrogate = NeuralOperatorSurrogate(
+        min_samples=4,
+        epochs=1,
+        batch_size=2,
+        learning_rate=0.01,
+        n_ensembles=1,
+        device="cpu",
+    )
+    metrics, targets = _training_history(8)
+    surrogate.fit(metrics, targets, minimize_objective=False, cycle=1)
+
+    checkpoint_path = tmp_path / "surrogate_full_object.pt"
+    torch.save(surrogate, checkpoint_path)
+
+    loaded = NeuralOperatorSurrogate(
+        min_samples=2, epochs=1, n_ensembles=1, device="cpu"
+    )
+    loaded.load_checkpoint(checkpoint_path)
+
+    stats_names = (
+        "_y_obj_mean",
+        "_y_obj_std",
+        "_y_mhd_mean",
+        "_y_mhd_std",
+        "_y_qi_log_mean",
+        "_y_qi_log_std",
+        "_y_iota_mean",
+        "_y_iota_std",
+        "_y_mirror_ratio_mean",
+        "_y_mirror_ratio_std",
+        "_y_flux_compression_mean",
+        "_y_flux_compression_std",
+    )
+
+    for name in stats_names:
+        assert hasattr(loaded, name), f"Missing normalization stat after load: {name}"
+        assert hasattr(surrogate, name), f"Test setup missing expected stat: {name}"
+        loaded_val = getattr(loaded, name)
+        orig_val = getattr(surrogate, name)
+        assert isinstance(loaded_val, torch.Tensor)
+        assert isinstance(orig_val, torch.Tensor)
+        assert torch.allclose(loaded_val.cpu(), orig_val.cpu())
+        assert loaded_val.device == torch.device(loaded._device)
+
+    assert loaded._trained
+    assert len(loaded._models) == len(surrogate._models)
+    assert all(not model.training for model in loaded._models)
+
+
 class TestMultiConstraintFeasibility:
     """Tests for B7 fix: multi-constraint feasibility check."""
 

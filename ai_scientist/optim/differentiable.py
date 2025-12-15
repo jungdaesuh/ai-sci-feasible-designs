@@ -809,21 +809,14 @@ def optimize_alm_inner_loop(
         # Aspect Ratio (P1, P2 have explicit bounds; P3 uses AR as objective)
         # Read bounds from SSOT (constraints.py) for consistency
         pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
-        aspect_bound: float | None = None
+        # P3: aspect_ratio is an OBJECTIVE, not a constraint
         if problem.lower().startswith("p1"):
-            aspect_bound = bounds.get("aspect_ratio_upper", 4.0)
-        elif problem.lower().startswith("p2"):
-            aspect_bound = bounds.get("aspect_ratio_upper", 10.0)
-        # P3: aspect_ratio is an OBJECTIVE, not a constraint in the problem definition.
-        # The ALM outer loop may include it as a soft constraint, but the inner loop
-        # should NOT double-penalize it—the outer ALM state handles AR penalty evolution.
-
-        if aspect_bound is not None:
-            viol_map["aspect_ratio"] = torch.relu(pred_aspect.squeeze() - aspect_bound)
+            aspect_bound = 4.0
         else:
-            viol_map["aspect_ratio"] = torch.tensor(
-                0.0, device=device, dtype=x_torch.dtype
-            )
+            # Check for configured bound (e.g. 20.0 for P3), default to 10.0 (P2 standard)
+            bounds = get_constraint_bounds(problem.lower())
+            aspect_bound = float(bounds.get("aspect_ratio_upper", 10.0))
+        viol_map["aspect_ratio"] = torch.relu(pred_aspect.squeeze() - aspect_bound)
 
         # Iota (P1, P2, P3)
         # Good if >= lower_bound (0.25 typically)

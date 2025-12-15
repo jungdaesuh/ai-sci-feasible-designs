@@ -408,9 +408,36 @@ class NeuralOperatorSurrogate(BaseSurrogate):
             self._hidden_dim = checkpoint._hidden_dim
             self._trained = checkpoint._trained
 
-            # Ensure models are on the correct device
+            # Restore normalization statistics (required for meaningful inference).
+            # Without these, `predict_torch()` falls back to normalized-space outputs,
+            # which breaks constraint checks and ranking (e.g., log10(qi) thresholds).
+            stats_names = (
+                "_y_obj_mean",
+                "_y_obj_std",
+                "_y_mhd_mean",
+                "_y_mhd_std",
+                "_y_qi_mean",
+                "_y_qi_std",
+                "_y_qi_log_mean",
+                "_y_qi_log_std",
+                "_y_iota_mean",
+                "_y_iota_std",
+                "_y_mirror_ratio_mean",
+                "_y_mirror_ratio_std",
+                "_y_flux_compression_mean",
+                "_y_flux_compression_std",
+            )
+            for name in stats_names:
+                if hasattr(checkpoint, name):
+                    value = getattr(checkpoint, name)
+                    if isinstance(value, torch.Tensor):
+                        value = value.to(self._device)
+                    setattr(self, name, value)
+
+            # Ensure models are on the correct device and in eval mode (inference default).
             for model in self._models:
                 model.to(self._device)
+                model.eval()
             return
 
         # Load Schema
