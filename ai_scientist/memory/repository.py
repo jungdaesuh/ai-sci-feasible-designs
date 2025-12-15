@@ -1089,7 +1089,11 @@ class WorldModel:
         problem: str | None = None,
         experiment_id: int | None = None,
     ) -> list[tuple[Mapping[str, Any], float]]:
-        """Return cached metrics + target values usable by the surrogate ranker."""
+        """Return cached metrics + target values usable by the surrogate ranker.
+
+        A7 FIX: Query now applies WHERE filters in SQL to avoid fetching
+        the entire metrics table, preventing OOM for large experiment history.
+        """
 
         # H2 FIX: Accept "gradient_proxy" as alias for DB column "hv"
         # The DB column remains "hv" for backward compat with existing data
@@ -1097,24 +1101,31 @@ class WorldModel:
         allowed_columns = {"hv", "objective", "feasibility"}
         target_column = target_column if target_column in allowed_columns else "hv"
 
-        query = """
+        # A7 FIX: Build query with SQL-side filtering instead of Python-side
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        if problem is not None:
+            where_clauses.append("c.problem = ?")
+            params.append(problem)
+
+        if experiment_id is not None:
+            where_clauses.append("c.experiment_id = ?")
+            params.append(experiment_id)
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        query = f"""
             SELECT c.problem, c.params_json, c.status, m.raw_json, m.hv, m.objective, m.feasibility,
                    c.experiment_id
             FROM metrics m
-            JOIN candidates c ON m.candidate_id = c.id
+            JOIN candidates c ON m.candidate_id = c.id{where_sql}
             ORDER BY m.id ASC
             """
-        rows = self._conn.execute(query).fetchall()
+        rows = self._conn.execute(query, params).fetchall()
 
         history: list[tuple[Mapping[str, Any], float]] = []
         for row in rows:
-            if problem is not None and row["problem"] != problem:
-                continue
-
-            # A3 FIX: Filter by experiment_id if provided
-            if experiment_id is not None and row["experiment_id"] != experiment_id:
-                continue
-
             value = row[target_column]
             if value is None:
                 continue

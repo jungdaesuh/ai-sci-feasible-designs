@@ -191,6 +191,14 @@ _DEFAULT_SCHEMA_VERSION = 1
 
 _BACKEND: PhysicsBackend | None = None
 
+# --- Batch Executor Singleton (Issue A7 Fix) ---
+# Avoids re-creating ProcessPoolExecutor on every batch call, which incurs
+# ~100-500ms spawn overhead on macOS. The executor is lazily initialized.
+
+_BATCH_EXECUTOR: concurrent.futures.Executor | None = None
+_BATCH_EXECUTOR_LOCK = threading.Lock()
+_BATCH_EXECUTOR_CONFIG: Dict[str, Any] = {}  # Stores n_workers, pool_type
+
 
 def get_backend() -> "PhysicsBackend":
     """Get the current physics backend, auto-selecting if needed.
@@ -807,6 +815,60 @@ def evaluate_boundary(
     return forward_model(boundary, settings, use_cache=use_cache)
 
 
+def _get_batch_executor(n_workers: int, pool_type: str) -> concurrent.futures.Executor:
+    """Get or create the batch executor singleton.
+
+    A7 Fix: Reuses executor across batch calls to avoid process spawn overhead.
+    If config changes (n_workers/pool_type), shuts down old executor first.
+    """
+    global _BATCH_EXECUTOR, _BATCH_EXECUTOR_CONFIG
+
+    with _BATCH_EXECUTOR_LOCK:
+        current_cfg = {"n_workers": n_workers, "pool_type": pool_type}
+
+        # If config changed, shutdown existing executor
+        if _BATCH_EXECUTOR is not None and _BATCH_EXECUTOR_CONFIG != current_cfg:
+            logger.info(
+                "[batch_executor] Config changed, recreating executor: %s",
+                current_cfg,
+            )
+            _BATCH_EXECUTOR.shutdown(wait=True)
+            _BATCH_EXECUTOR = None
+
+        if _BATCH_EXECUTOR is None:
+            executor_cls = (
+                concurrent.futures.ThreadPoolExecutor
+                if pool_type == "thread"
+                else concurrent.futures.ProcessPoolExecutor
+            )
+            executor_kwargs: Dict[str, Any] = {"max_workers": n_workers}
+            if executor_cls is concurrent.futures.ProcessPoolExecutor:
+                executor_kwargs["initializer"] = _process_worker_initializer
+
+            _BATCH_EXECUTOR = executor_cls(**executor_kwargs)
+            _BATCH_EXECUTOR_CONFIG = current_cfg
+            logger.info(
+                "[batch_executor] Created new %s with %d workers",
+                pool_type,
+                n_workers,
+            )
+
+        return _BATCH_EXECUTOR
+
+
+def shutdown_batch_executor() -> None:
+    """Gracefully shutdown the batch executor singleton.
+
+    Call this during application shutdown or when changing executor config.
+    """
+    global _BATCH_EXECUTOR
+    with _BATCH_EXECUTOR_LOCK:
+        if _BATCH_EXECUTOR is not None:
+            logger.info("[batch_executor] Shutting down batch executor...")
+            _BATCH_EXECUTOR.shutdown(wait=True)
+            _BATCH_EXECUTOR = None
+
+
 def forward_model_batch(
     boundaries: List[Mapping[str, Any]],
     settings: ForwardModelSettings,
@@ -816,6 +878,9 @@ def forward_model_batch(
     use_cache: bool = True,
 ) -> List[EvaluationResult]:
     """Parallel batch evaluation of multiple boundary configurations.
+
+    A7 Fix: Now uses a persistent executor singleton to avoid per-call
+    process spawn overhead (~100-500ms on macOS).
 
     Args:
         boundaries: List of boundary parameter dictionaries.
@@ -846,68 +911,59 @@ def forward_model_batch(
     """
     results: List[EvaluationResult | None] = [None] * len(boundaries)
 
-    executor_cls = (
-        concurrent.futures.ThreadPoolExecutor
-        if pool_type == "thread"
-        else concurrent.futures.ProcessPoolExecutor
-    )
+    # A7 FIX: Use persistent executor singleton instead of per-call creation
+    executor = _get_batch_executor(n_workers, pool_type)
+    future_to_idx = {
+        executor.submit(
+            forward_model, boundary=b, settings=settings, use_cache=use_cache
+        ): i
+        for i, b in enumerate(boundaries)
+    }
 
-    executor_kwargs: Dict[str, Any] = {"max_workers": n_workers}
-    if executor_cls is concurrent.futures.ProcessPoolExecutor:
-        executor_kwargs["initializer"] = _process_worker_initializer
+    for future in concurrent.futures.as_completed(future_to_idx):
+        idx = future_to_idx[future]
+        try:
+            results[idx] = future.result()
+        except Exception as exc:
+            logger.error(f"Batch evaluation failed for index {idx}: {exc}")
+            # Return a penalized result instead of raising
+            # We need to construct a "failed" EvaluationResult
+            # We'll use a helper or manual construction
+            # Since we don't have the boundary here easily (it's in boundaries[idx]),
+            # we can use a placeholder hash or recompute it if needed.
+            # But EvaluationResult requires metrics.
 
-    with executor_cls(**executor_kwargs) as executor:
-        future_to_idx = {
-            executor.submit(
-                forward_model, boundary=b, settings=settings, use_cache=use_cache
-            ): i
-            for i, b in enumerate(boundaries)
-        }
+            # Create dummy metrics with penalized values
+            from ai_scientist.backends.mock import MockMetrics
 
-        for future in concurrent.futures.as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                results[idx] = future.result()
-            except Exception as exc:
-                logger.error(f"Batch evaluation failed for index {idx}: {exc}")
-                # Return a penalized result instead of raising
-                # We need to construct a "failed" EvaluationResult
-                # We'll use a helper or manual construction
-                # Since we don't have the boundary here easily (it's in boundaries[idx]),
-                # we can use a placeholder hash or recompute it if needed.
-                # But EvaluationResult requires metrics.
+            dummy_metrics = MockMetrics(
+                aspect_ratio=float("inf"),
+                max_elongation=float("inf"),
+                minimum_normalized_magnetic_gradient_scale_length=0.0,
+                mirror_ratio=float("inf"),
+                vmec_converged=False,
+            )
 
-                # Create dummy metrics with penalized values
-                from ai_scientist.backends.mock import MockMetrics
+            # Determine penalty direction based on problem
+            # This duplicates logic from _penalized_result in tools/evaluation.py
+            # But we are in forward_model.py now.
+            maximize = settings.problem.lower().startswith("p2")
+            penalty = -1e9 if maximize else 1e9
 
-                dummy_metrics = MockMetrics(
-                    aspect_ratio=float("inf"),
-                    max_elongation=float("inf"),
-                    minimum_normalized_magnetic_gradient_scale_length=0.0,
-                    mirror_ratio=float("inf"),
-                    vmec_converged=False,
-                )
-
-                # Determine penalty direction based on problem
-                # This duplicates logic from _penalized_result in tools/evaluation.py
-                # But we are in forward_model.py now.
-                maximize = settings.problem.lower().startswith("p2")
-                penalty = -1e9 if maximize else 1e9
-
-                results[idx] = EvaluationResult(
-                    metrics=dummy_metrics,
-                    objective=penalty,
-                    constraints=[],
-                    constraint_names=[],
-                    feasibility=float("inf"),
-                    is_feasible=False,
-                    cache_hit=False,
-                    design_hash="error",  # Placeholder
-                    evaluation_time_sec=0.0,
-                    settings=settings,
-                    fidelity=settings.fidelity,
-                    equilibrium_converged=False,
-                    error_message=str(exc),
-                )
+            results[idx] = EvaluationResult(
+                metrics=dummy_metrics,
+                objective=penalty,
+                constraints=[],
+                constraint_names=[],
+                feasibility=float("inf"),
+                is_feasible=False,
+                cache_hit=False,
+                design_hash="error",  # Placeholder
+                evaluation_time_sec=0.0,
+                settings=settings,
+                fidelity=settings.fidelity,
+                equilibrium_converged=False,
+                error_message=str(exc),
+            )
 
     return results
