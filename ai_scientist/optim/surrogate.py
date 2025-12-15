@@ -88,6 +88,9 @@ class SimpleSurrogateRanker:
         self,
         metrics_list: Sequence[Mapping[str, Any]],
         target_values: Sequence[float],
+        *,
+        minimize_objective: bool = False,  # Ignored - ridge regression is symmetric
+        cycle: int | None = None,  # Ignored - no retrain cadence logic
     ) -> None:
         if not metrics_list:
             raise ValueError("training data cannot be empty")

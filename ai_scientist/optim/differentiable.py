@@ -803,24 +803,32 @@ def optimize_alm_inner_loop(
         # 1. Compute all potential constraint violations
         viol_map = {}
 
-        # Aspect Ratio (P2, P3 ALM)
-        # P2 requires aspect_ratio <= 10.0, P1 <= 4.0
-        # P3 also includes it in ALM list (P3_ALM_CONSTRAINT_NAMES)
+        # Get constraint bounds from SSOT (used by multiple constraints below)
+        bounds = get_constraint_bounds(problem.lower())
+
+        # Aspect Ratio (P1, P2 have explicit bounds; P3 uses AR as objective)
+        # Read bounds from SSOT (constraints.py) for consistency
         pred_aspect = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
-        aspect_bound = 10.0  # Default for P2
+        aspect_bound: float | None = None
         if problem.lower().startswith("p1"):
-            aspect_bound = 4.0
-        # P3 doesn't technically bound AR in problem def, but ALM runner might use it?
-        # constraints.py P3_ALM_CONSTRAINT_NAMES includes "aspect_ratio".
-        # We need a bound for it relative to ALM usage.
-        # Assuming P2 bound for P3 safety if not specified, or 10.0 as safe upper bound.
-        viol_map["aspect_ratio"] = torch.relu(pred_aspect.squeeze() - aspect_bound)
+            aspect_bound = bounds.get("aspect_ratio_upper", 4.0)
+        elif problem.lower().startswith("p2"):
+            aspect_bound = bounds.get("aspect_ratio_upper", 10.0)
+        # P3: aspect_ratio is an OBJECTIVE, not a constraint in the problem definition.
+        # The ALM outer loop may include it as a soft constraint, but the inner loop
+        # should NOT double-penalize it—the outer ALM state handles AR penalty evolution.
+
+        if aspect_bound is not None:
+            viol_map["aspect_ratio"] = torch.relu(pred_aspect.squeeze() - aspect_bound)
+        else:
+            viol_map["aspect_ratio"] = torch.tensor(
+                0.0, device=device, dtype=x_torch.dtype
+            )
 
         # Iota (P1, P2, P3)
         # Good if >= lower_bound (0.25 typically)
         iota_bound = 0.25
         # Use canonical bound lookup for all problems
-        bounds = get_constraint_bounds(problem.lower())
         if "edge_rotational_transform_lower" in bounds:
             iota_bound = bounds["edge_rotational_transform_lower"]
         viol_map["edge_rotational_transform"] = torch.relu(
