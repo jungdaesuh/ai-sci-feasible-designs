@@ -13,7 +13,7 @@ def test_evaluate_p3_records_high_fidelity(mock_backend):
         float(result["metrics"]["aspect_ratio"])
     )
     assert result["score"] > 0
-    assert "hv" in result
+    assert "gradient_proxy" in result
     assert mock_backend.call_count == 1
 
     tools.evaluate_p3(params)

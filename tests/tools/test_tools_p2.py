@@ -12,7 +12,7 @@ def test_evaluate_p2_uses_high_fidelity_cache(mock_backend):
     assert result["objective"] == pytest.approx(
         float(result["metrics"]["minimum_normalized_magnetic_gradient_scale_length"])
     )
-    assert result["hv"] >= 0
+    assert result["gradient_proxy"] >= 0
     assert mock_backend.call_count == 1
 
     cached = tools.evaluate_p2(params)

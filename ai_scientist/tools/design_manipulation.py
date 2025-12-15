@@ -168,8 +168,14 @@ def recombine_designs(
     keys = ["r_cos", "z_sin", "r_sin", "z_cos"]
 
     for key in keys:
-        val_a = np.asarray(params_a.get(key, []), dtype=float)
-        val_b = np.asarray(params_b.get(key, []), dtype=float)
+        raw_a = params_a.get(key)
+        raw_b = params_b.get(key)
+
+        # Some serialized boundaries include optional coefficient matrices as explicit
+        # `None` values (e.g., from Pydantic dumps). Treat those as "absent" so that
+        # crossover remains defined for stellarator-symmetric inputs.
+        val_a = np.asarray([] if raw_a is None else raw_a, dtype=float)
+        val_b = np.asarray([] if raw_b is None else raw_b, dtype=float)
 
         if val_a.size == 0 and val_b.size == 0:
             continue

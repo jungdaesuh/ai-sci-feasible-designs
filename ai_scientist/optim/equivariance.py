@@ -65,7 +65,7 @@ class TNet3d(nn.Module):
 
         # Add identity to start from a stable state
         # Move identity to same device as x
-        idt = self.identity.to(x.device).repeat(bs, 1)
+        idt = self.identity.to(device=x.device, dtype=x.dtype).repeat(bs, 1)
         x = x + idt
 
         x = x.view(-1, self.input_dim, self.input_dim)

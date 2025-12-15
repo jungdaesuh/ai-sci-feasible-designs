@@ -379,7 +379,9 @@ def evaluate_p1(
         "feasibility": result.feasibility,
         "score": score,
         "metrics": metrics.model_dump(),
-        "settings": settings.constellaration_settings.model_dump(),
+        "settings": settings.constellaration_settings.model_dump()
+        if settings.constellaration_settings is not None
+        else None,
         "constraint_margins": result.constraints,
         "max_violation": result.feasibility,
         "cache_hit": result.cache_hit,
@@ -420,9 +422,11 @@ def evaluate_p2(
         "minimize_objective": False,  # P2 maximizes gradient
         "feasibility": result.feasibility,
         "score": score,
-        "hv": float(max(0.0, gradient - 1.0)),
+        "gradient_proxy": float(max(0.0, gradient - 1.0)),
         "metrics": metrics.model_dump(),
-        "settings": settings.constellaration_settings.model_dump(),
+        "settings": settings.constellaration_settings.model_dump()
+        if settings.constellaration_settings is not None
+        else None,
         "constraint_margins": result.constraints,
         "max_violation": result.feasibility,
         "cache_hit": result.cache_hit,
@@ -462,11 +466,13 @@ def evaluate_p3(
         "minimize_objective": True,
         "feasibility": result.feasibility,
         "score": score,
-        "hv": float(
+        "gradient_proxy": float(
             max(0.0, metrics.minimum_normalized_magnetic_gradient_scale_length - 1.0)
         ),
         "metrics": metrics.model_dump(),
-        "settings": settings.constellaration_settings.model_dump(),
+        "settings": settings.constellaration_settings.model_dump()
+        if settings.constellaration_settings is not None
+        else None,
         "constraint_margins": result.constraints,
         "max_violation": result.feasibility,
         "cache_hit": result.cache_hit,
