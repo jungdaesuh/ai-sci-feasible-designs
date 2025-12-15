@@ -559,13 +559,19 @@ class Coordinator:
         oracle_budget = alm.oracle_budget_initial
 
         while traj.budget_used < eval_budget and traj.status == "active":
+            # Mathematical Invariant: ALM state is mandatory for the optimization loop.
+            # While the TrajectoryState schema allows None (for initialization),
+            # the ASO loop cannot physically proceed without a defined Lagrangian state.
+            assert traj.alm_state is not None, "ASO loop requires initialized ALM state"
+            current_alm_state = traj.alm_state
+
             traj = traj.model_copy(update={"steps": traj.steps + 1})
             step_start = time.perf_counter()
 
             # 1. Execute ALM step
             result = step_alm(
                 context=alm_context,
-                state=traj.alm_state,
+                state=current_alm_state,
                 budget=min(oracle_budget, eval_budget - traj.budget_used),
                 num_workers=alm.oracle_num_workers,
             )
@@ -611,6 +617,7 @@ class Coordinator:
                 traj = traj.model_copy(update={"status": status})
                 print(f"[Coordinator] STOP: {directive.reasoning}")
                 # Extract final candidate
+                assert traj.alm_state is not None
                 candidates.append(
                     {
                         "params": state_to_boundary_params(alm_context, traj.alm_state),
@@ -627,6 +634,7 @@ class Coordinator:
                 new_seeds = self._prepare_seeds(None, cycle, 1)
                 if new_seeds:
                     # Save current best before restart
+                    assert traj.alm_state is not None
                     candidates.append(
                         {
                             "params": state_to_boundary_params(
@@ -690,6 +698,7 @@ class Coordinator:
             if traj.stagnation_count >= aso.max_stagnation_steps:
                 traj = traj.model_copy(update={"status": "stagnated"})
                 print("[Coordinator] Auto-STOP (stagnation limit)")
+                assert traj.alm_state is not None
                 candidates.append(
                     {
                         "params": state_to_boundary_params(alm_context, traj.alm_state),

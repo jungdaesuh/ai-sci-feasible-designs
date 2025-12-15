@@ -967,4 +967,13 @@ def forward_model_batch(
                 error_message=str(exc),
             )
 
-    return results
+    # Post-condition: List must be fully populated.
+    # The loop logic guarantees population for every index, even on failure.
+    if any(r is None for r in results):
+        raise RuntimeError(
+            "Batch executor invariant violated: found None in results list"
+        )
+    # Cast to strict type as verified by the check above
+    import typing
+
+    return typing.cast(List[EvaluationResult], results)
