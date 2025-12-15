@@ -1344,16 +1344,43 @@ class CycleExecutor:
 
                 if p_key.startswith("p1"):
                     predicted_alm_constraints = [0.0, 0.0, 0.0]
-                elif p_key.startswith("p2"):
-                    c_elo = max(0.0, elongation - 5.0)
-                    qi_log = math.log10(qi) if qi > 0 else 10.0
-                    c_qi = max(0.0, qi_log - (-4.0))
-                    predicted_alm_constraints = [0.0, 0.0, 0.0, c_elo, c_qi]
                 else:
-                    c_mhd = max(0.0, -mhd)
-                    qi_log = math.log10(qi) if qi > 0 else 10.0
-                    c_qi = max(0.0, qi_log - (-3.5))
-                    predicted_alm_constraints = [0.0, 0.0, c_mhd, 0.0, c_qi]
+                    # IMPORTANT: These constraints must match the canonical order from
+                    # ai_scientist.constraints.get_constraint_names(problem). They are
+                    # normalized in the same way as forward_model.compute_constraint_margins.
+                    from ai_scientist.constraints import (
+                        get_constraint_bounds,
+                        get_constraint_names,
+                    )
+
+                    bounds = get_constraint_bounds(p_key)
+                    constraint_order = get_constraint_names(p_key)
+                    margins: dict[str, float] = {name: 0.0 for name in constraint_order}
+
+                    # QI: constraint is log10(qi) <= qi_log10_upper
+                    if "qi" in margins:
+                        qi_log_upper = float(bounds.get("qi_log10_upper", -3.5))
+                        qi_log = math.log10(qi) if qi > 0 else 10.0
+                        denom = abs(qi_log_upper) if abs(qi_log_upper) > 0.0 else 1.0
+                        margins["qi"] = (qi_log - qi_log_upper) / denom
+
+                    # Max elongation (P2 only): max_elongation <= max_elongation_upper
+                    if "max_elongation" in margins:
+                        elong_upper = float(bounds.get("max_elongation_upper", 5.0))
+                        denom = abs(elong_upper) if abs(elong_upper) > 0.0 else 1.0
+                        margins["max_elongation"] = (
+                            float(elongation) - elong_upper
+                        ) / denom
+
+                    # Vacuum well (P3 only): vacuum_well >= vacuum_well_lower
+                    if "vacuum_well" in margins:
+                        well_lower = float(bounds.get("vacuum_well_lower", 0.0))
+                        denom = max(0.1, abs(well_lower))
+                        margins["vacuum_well"] = (well_lower - float(mhd)) / denom
+
+                    predicted_alm_constraints = [
+                        margins[name] for name in constraint_order
+                    ]
 
                 return float(predicted.predicted_objective), predicted_alm_constraints
 
