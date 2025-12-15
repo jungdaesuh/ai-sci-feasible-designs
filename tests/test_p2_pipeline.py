@@ -23,7 +23,7 @@ def test_p2_problem_definition():
 @patch("ai_scientist.experiment_runner.memory.WorldModel")
 @patch("ai_scientist.experiment_runner.rag.ensure_index")
 def test_p2_pipeline_execution(
-    mock_ensure_index, mock_world_model, mock_cycle_executor
+    mock_ensure_index, mock_world_model, mock_cycle_executor, tmp_path
 ):
     """Test that running with --problem p2 initializes the correct components."""
 
@@ -50,6 +50,9 @@ def test_p2_pipeline_execution(
     cfg.problem = "p2"
     cfg.cycles = 1
     cfg.random_seed = 42
+    # Prevent MagicMock from being coerced into a filesystem path like
+    # "MagicMock/mock.reporting_dir/<id>" when the runner writes artifacts.
+    cfg.reporting_dir = tmp_path / "reports"
 
     # Real dataclasses for fields that get serialized via asdict
     # We need to provide required fields for these dataclasses
