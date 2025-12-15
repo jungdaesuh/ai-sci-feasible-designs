@@ -437,17 +437,21 @@ class Coordinator:
                     if not actual_metrics:
                         continue
 
-                    # Determine training target based on problem
-                    # IMPORTANT: We always use ranking_score for surrogate training
-                    # This is NOT the same as ALM objective or physics objective!
-                    # See ai_scientist.objective_types for the full vocabulary.
+                    # Determine training target based on problem.
+                    #
+                    # IMPORTANT: We must keep `target_values` aligned with the
+                    # `minimize_objective` flag used at ranking time:
+                    # - If we train on a minimization objective (P1 max_elongation),
+                    #   we must NOT negate it here, because `rank_candidates` will
+                    #   handle the direction via `minimize_objective=True`.
+                    # - For P2/P3 we train on a "higher is better" score proxy.
+                    #
+                    # See ai_scientist.objective_types for vocabulary.
                     from ai_scientist.objective_types import compute_ranking_score
 
                     if problem.startswith("p1"):
-                        # P1: ranking_score = -max_elongation (higher is better)
+                        # P1: train on physics objective (max_elongation; lower is better)
                         target = eval_data.get("objective", cand.get("objective"))
-                        if target is not None:
-                            target = -float(target)  # Negate for "higher is better"
                     else:
                         # P2/P3: use canonical ranking score (gradient / aspect)
                         target = eval_data.get("score", cand.get("score"))
@@ -912,12 +916,13 @@ class Coordinator:
     ) -> List[Dict[str, Any]]:
         """Rank seeds using the surrogate model.
 
-        IMPORTANT: The surrogate predicts 'ranking_score', NOT 'alm_objective'!
-        - P1: ranking_score = -max_elongation (higher is better)
-        - P2/P3: ranking_score = gradient / aspect (higher is better)
+        IMPORTANT: The surrogate predicts a *ranking target* whose direction
+        depends on the problem:
+        - P1: physics objective `max_elongation` (lower is better → minimize)
+        - P2/P3: score proxy `gradient / aspect` (higher is better → maximize)
 
-        This is consistent with surrogate training in _periodic_retrain().
-        See ai_scientist.objective_types for the full semantic vocabulary.
+        This must stay consistent with `_periodic_retrain()` and the
+        `minimize_objective` flag passed into `surrogate.rank_candidates()`.
         """
         if not seeds:
             return []

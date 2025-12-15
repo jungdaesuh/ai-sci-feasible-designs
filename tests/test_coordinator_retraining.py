@@ -202,3 +202,53 @@ class TestShouldRetrain:
 
         assert should is False
         assert reason == "no_trigger"
+
+
+class TestPeriodicRetrainTargets:
+    """Regression tests for target semantics in _periodic_retrain()."""
+
+    @pytest.fixture
+    def mock_cfg(self):
+        cfg = load_experiment_config("configs/experiment.example.yaml")
+        # Ensure retraining triggers immediately for the test.
+        retraining = RetrainingConfig(enabled=True, cycle_cadence=1, min_elites=1)
+        return dataclasses.replace(cfg, retraining=retraining, problem="p1")
+
+    def test_periodic_retrain_p1_trains_on_objective_not_negated(self, mock_cfg):
+        """P1 surrogate trains on max_elongation (objective) and ranks with minimize=True.
+
+        If we negate the objective during training but still call rank_candidates with
+        minimize_objective=True, the ranking inverts and prefers *worse* elongation.
+        """
+        with (
+            patch("ai_scientist.coordinator.OptimizationWorker"),
+            patch("ai_scientist.coordinator.ExplorationWorker"),
+            patch("ai_scientist.coordinator.GeometerWorker"),
+            patch("ai_scientist.coordinator.PreRelaxWorker"),
+            patch("ai_scientist.coordinator.RLRefinementWorker"),
+        ):
+            world_model = MagicMock()
+            world_model.average_recent_hv_delta.return_value = None
+            planner = MagicMock()
+            surrogate = MagicMock()
+            coord = Coordinator(
+                cfg=mock_cfg,
+                world_model=world_model,
+                planner=planner,
+                surrogate=surrogate,
+            )
+
+            # Candidate already has a real evaluation (ASO-style path).
+            candidate = {
+                "params": {"r_cos": [[1.0]], "z_sin": [[0.0]], "n_field_periods": 3},
+                "evaluation": {
+                    "objective": 2.0,  # max_elongation in P1 (lower is better)
+                    "metrics": {"max_elongation": 2.0},
+                },
+            }
+
+            coord._periodic_retrain(cycle=1, experiment_id=1, candidates=[candidate])
+
+            assert surrogate.fit.call_count == 1
+            _metrics_list, target_values = surrogate.fit.call_args.args[:2]
+            assert target_values == [2.0]

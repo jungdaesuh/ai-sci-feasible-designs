@@ -445,8 +445,8 @@ def gradient_descent_on_inputs(
             pred_elo = geometry.elongation_isoperimetric(r_cos, z_sin, x_input[-1])
             std_elo = torch.zeros_like(pred_elo)
 
-            # H3 FIX: Compute aspect ratio for P2 constraint enforcement
-            # Aspect ratio is deterministic (computed from geometry), no uncertainty
+            # Compute aspect ratio deterministically from geometry (no uncertainty).
+            # Used for P1/P2 constraint enforcement.
             pred_ar = geometry.aspect_ratio(r_cos, z_sin, x_input[-1])
 
             # Loss Formulation (Risk-Averse: Penalize Uncertainty)
@@ -472,29 +472,34 @@ def gradient_descent_on_inputs(
             else:
                 viol_mhd = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
-            # QI constraint: log10(qi) <= threshold (problem-dependent)
-            # Surrogate predicts raw QI, so we convert to log10 for comparison
-            qi_raw = pred_qi.squeeze()
-            qi_positive = qi_raw.abs() + QI_EPS
-            log10_qi = torch.log10(qi_positive)
-            s_qi = std_qi.squeeze()
+            # QI constraint: log10(qi) <= threshold (problem-dependent).
+            # P1 has NO QI constraint.
+            if not problem.lower().startswith("p1"):
+                qi_raw = pred_qi.squeeze()
+                qi_positive = qi_raw.abs() + QI_EPS
+                log10_qi = torch.log10(qi_positive)
+                s_qi = std_qi.squeeze()
 
-            # Uncertainty propagation with fourth-order bias correction
-            # Taylor expansion of E[log(X)] for X ~ N(μ, σ²):
-            #   E[log(X)] ≈ log(μ) - σ²/(2μ²) - 3σ⁴/(4μ⁴) + O(σ⁶)
-            # Converting to log₁₀ by dividing by ln(10):
-            #   E[log₁₀(X)] ≈ log₁₀(μ) - σ²/(2μ²ln10) - 3σ⁴/(4μ⁴ln10)
-            ln10 = 2.302585
-            s_log10_qi = s_qi / (qi_positive * ln10)
-            # Second-order + fourth-order bias correction
-            cv_squared = (s_qi / qi_positive) ** 2  # (σ/μ)²
-            bias_correction = cv_squared / (2 * ln10) + 3 * cv_squared**2 / (4 * ln10)
-            log10_qi_corrected = log10_qi - bias_correction
+                # Uncertainty propagation with fourth-order bias correction
+                # Taylor expansion of E[log(X)] for X ~ N(μ, σ²):
+                #   E[log(X)] ≈ log(μ) - σ²/(2μ²) - 3σ⁴/(4μ⁴) + O(σ⁶)
+                # Converting to log₁₀ by dividing by ln(10):
+                #   E[log₁₀(X)] ≈ log₁₀(μ) - σ²/(2μ²ln10) - 3σ⁴/(4μ⁴ln10)
+                ln10 = 2.302585
+                s_log10_qi = s_qi / (qi_positive * ln10)
+                # Second-order + fourth-order bias correction
+                cv_squared = (s_qi / qi_positive) ** 2  # (σ/μ)²
+                bias_correction = cv_squared / (2 * ln10) + 3 * cv_squared**2 / (
+                    4 * ln10
+                )
+                log10_qi_corrected = log10_qi - bias_correction
 
-            log10_qi_threshold = get_log10_qi_threshold(problem)
-            viol_qi = torch.relu(
-                (log10_qi_corrected + beta * s_log10_qi) - log10_qi_threshold
-            )
+                log10_qi_threshold = get_log10_qi_threshold(problem)
+                viol_qi = torch.relu(
+                    (log10_qi_corrected + beta * s_log10_qi) - log10_qi_threshold
+                )
+            else:
+                viol_qi = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
             # Elongation: Good if < MAX_ELONGATION (P2 only - P3 has no elongation constraint)
             # H3 FIX: Only penalize elongation for P2, not P3
@@ -505,13 +510,23 @@ def gradient_descent_on_inputs(
             else:
                 viol_elo = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
-            # H3 FIX: P2 Aspect Ratio constraint (AR <= 10.0 per benchmark)
-            # Aspect ratio is deterministic, so std=0 and we use exact penalty
-            if problem.lower().startswith("p2"):
-                aspect_ratio_bound = 10.0
-                viol_ar = torch.relu(pred_ar.squeeze() - aspect_ratio_bound)
+            # Aspect ratio constraint.
+            # - P1: aspect_ratio <= 4.0
+            # - P2: aspect_ratio <= 10.0
+            # - P3: no aspect ratio constraint (it's an objective)
+            if problem.lower().startswith("p1"):
+                viol_ar = torch.relu(pred_ar.squeeze() - 4.0)
+            elif problem.lower().startswith("p2"):
+                viol_ar = torch.relu(pred_ar.squeeze() - 10.0)
             else:
                 viol_ar = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
+
+            # P1 triangularity constraint: average_triangularity <= -0.5.
+            if problem.lower().startswith("p1"):
+                pred_tri = geometry.average_triangularity(r_cos, z_sin, x_input[-1])
+                viol_tri = torch.relu(pred_tri.squeeze() - (-0.5))
+            else:
+                viol_tri = torch.tensor(0.0, device=device, dtype=x_torch.dtype)
 
             # H3 FIX: P3-specific constraints (iota, mirror ratio, flux compression)
             # These are extracted from surrogate predictions but were previously ignored
@@ -549,7 +564,8 @@ def gradient_descent_on_inputs(
                 weights.mhd * viol_mhd
                 + weights.qi * viol_qi
                 + weights.elongation * viol_elo
-                + viol_ar  # H3 FIX: P2 aspect ratio constraint
+                + viol_ar  # Aspect ratio constraint (P1/P2)
+                + viol_tri  # P1 triangularity constraint
                 + viol_iota  # No configurable weight - use unit weight
                 + viol_mirror
                 + viol_flux
@@ -837,10 +853,15 @@ def optimize_alm_inner_loop(
         viol_map["max_elongation"] = c_elo
 
         # Average Triangularity (P1)
-        # Not predicted by this surrogate, but placeholder for P1 support
-        viol_map["average_triangularity"] = torch.tensor(
-            0.0, device=device, dtype=x_torch.dtype
-        )
+        # Constraint: average_triangularity <= -0.5 (constellaration GeometricalProblem).
+        # We compute it deterministically from geometry (no surrogate head).
+        if problem.lower().startswith("p1"):
+            pred_tri = geometry.average_triangularity(r_cos, z_sin, x_input[-1])
+            viol_map["average_triangularity"] = torch.relu(pred_tri.squeeze() - (-0.5))
+        else:
+            viol_map["average_triangularity"] = torch.tensor(
+                0.0, device=device, dtype=x_torch.dtype
+            )
 
         # 2. Stack in canonical order.
         #

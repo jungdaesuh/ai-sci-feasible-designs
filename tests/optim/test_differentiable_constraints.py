@@ -106,6 +106,38 @@ def test_p1_aspect_ratio_penalty(mock_surrogate, mock_config):
             mock_ar.assert_called()
 
 
+def test_p1_triangularity_constraint_enforced(mock_surrogate, mock_config):
+    """P1 has an average_triangularity <= -0.5 constraint (benchmark definition).
+
+    Gradient descent should compute triangularity via the differentiable geometry
+    helper and include it in the penalty term. This test guards against silently
+    dropping the constraint in the optimization loop.
+    """
+    candidates = [{"params": {"r_cos": [], "z_sin": []}}]
+    mock_config.problem = "p1"
+
+    with patch("ai_scientist.optim.geometry.aspect_ratio") as mock_ar:
+        mock_ar.return_value = torch.tensor([3.0])
+
+        with patch("ai_scientist.optim.geometry.elongation_isoperimetric") as mock_elo:
+            mock_elo.return_value = torch.tensor([1.0])
+
+            with patch("ai_scientist.optim.geometry.average_triangularity") as mock_tri:
+                mock_tri.return_value = torch.tensor([-0.6])
+
+                differentiable.gradient_descent_on_inputs(
+                    candidates,
+                    mock_surrogate,
+                    mock_config,
+                    steps=1,
+                    lr=0.01,
+                    device="cpu",
+                    target=TargetKind.OBJECTIVE,
+                )
+
+                mock_tri.assert_called()
+
+
 def test_p2_no_mhd_penalty(mock_surrogate, mock_config):
     """Test that P2 optimization ignores MHD vacuum well violations."""
     candidates = [{"params": {"r_cos": [], "z_sin": []}}]
