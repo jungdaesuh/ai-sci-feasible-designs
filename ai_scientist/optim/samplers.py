@@ -80,7 +80,11 @@ class RotatingEllipseSampler:
             center_idx = n_cols // 2
             if center_idx > 0:
                 r_cos[0, :center_idx] = 0.0
-            z_sin[0, :] = 0.0
+                z_sin[0, : center_idx + 1] = (
+                    0.0  # Zero n<=0, keep n>0 (vertical shaping)
+                )
+            else:
+                z_sin[0, :] = 0.0
 
             params = {
                 "r_cos": r_cos.tolist(),
