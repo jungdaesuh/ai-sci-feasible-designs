@@ -309,6 +309,12 @@ class ALMConfig:
     oracle_budget_max: int = 200
     oracle_num_workers: int = 4
 
+    # P3-only (MHDStableQIStellarator):
+    # constellaration's ALM runner converts the multi-objective P3 problem into a
+    # single-objective optimization by *constraining* aspect ratio.
+    # This bound is required by constellaration.optimization.augmented_lagrangian_runner.objective_constraints.
+    aspect_ratio_upper_bound: float = 20.0
+
     @staticmethod
     def default() -> "ALMConfig":
         """Standard ALM settings."""
@@ -768,6 +774,7 @@ def _alm_config_from_dict(data: Mapping[str, Any] | None) -> ALMConfig:
         oracle_budget_increment=int(config.get("oracle_budget_increment", 26)),
         oracle_budget_max=int(config.get("oracle_budget_max", 200)),
         oracle_num_workers=int(config.get("oracle_num_workers", 4)),
+        aspect_ratio_upper_bound=float(config.get("aspect_ratio_upper_bound", 20.0)),
     )
 
 

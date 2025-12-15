@@ -48,10 +48,10 @@ class Problem(ABC):
     def is_feasible(self, metrics: Dict[str, Any]) -> bool:
         """Check if metrics satisfy all constraints."""
         violations = self._normalized_constraint_violations(metrics)
-        # Use strict tolerance to match constellaration exactly.
-        # The 1e-9 threshold ensures no false acceptance at constraint boundaries
-        # (e.g., vacuum_well = -0.0001 should NOT pass as feasible).
-        return bool(np.all(violations <= 1e-9))
+        # Match constellaration.problems._DEFAULT_RELATIVE_TOLERANCE (1e-2).
+        # Benchmarks treat small normalized violations as feasible to account for
+        # numerical noise in VMEC/Boozer computations.
+        return bool(np.all(violations <= 1e-2))
 
     def compute_feasibility(self, metrics: Dict[str, Any]) -> float:
         """Compute continuous feasibility metric (0 = feasible)."""

@@ -8,6 +8,10 @@ allowing supervision injection between outer iterations.
 
 from __future__ import annotations
 
+# Ensure SurfaceRZFourier is registered as a JAX pytree before we call
+# constellaration.utils.pytree.mask_and_ravel (import-order independent).
+import ai_scientist.pytree_guard  # noqa: F401
+
 import multiprocessing
 from concurrent import futures
 from dataclasses import dataclass

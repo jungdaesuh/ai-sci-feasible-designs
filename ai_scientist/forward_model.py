@@ -643,9 +643,9 @@ def compute_constraint_margins(
             p3_bounds = get_constraint_bounds("p3")
             well_lower = p3_bounds.get("vacuum_well_lower", 0.0)
             well_denom = max(0.1, abs(well_lower))
-            margins["vacuum_well"] = (
-                _lower_bound_margin(well_value, well_lower) / well_denom
-            )
+            # Constraint violation in natural units: (lower_bound - value)
+            # Normalize once by denom = max(1e-1, abs(lower_bound)) to match benchmark.
+            margins["vacuum_well"] = (well_lower - well_value) / well_denom
 
             flux_value = metrics_map.get("flux_compression_in_regions_of_bad_curvature")
             flux = float(flux_value) if flux_value is not None else float("nan")
@@ -710,9 +710,10 @@ def compute_p3_objectives(
         (aspect_ratio, gradient_scale_length) tuple for Pareto front analysis.
         First objective should be minimized, second should be maximized.
     """
-    aspect = float(getattr(metrics, "aspect_ratio", 10.0))
+    metrics_map = _metrics_to_dict(metrics)
+    aspect = float(metrics_map.get("aspect_ratio", 10.0))
     gradient = float(
-        getattr(metrics, "minimum_normalized_magnetic_gradient_scale_length", 0.0)
+        metrics_map.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
     )
     return (aspect, gradient)
 

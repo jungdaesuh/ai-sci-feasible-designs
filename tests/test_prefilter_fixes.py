@@ -45,18 +45,18 @@ class TestDatasetSamplerP1(unittest.TestCase):
             # Test cases
             # 1. Valid: AR=4.0, Tri=-0.6, Iota=0.4
             c1 = {
-                "aspect_ratio": 4.0,
-                "average_triangularity": -0.6,
-                "edge_rotational_transform_over_n_field_periods": 0.4,
+                "metrics.aspect_ratio": 4.0,
+                "metrics.average_triangularity": -0.6,
+                "metrics.edge_rotational_transform_over_n_field_periods": 0.4,
             }
             # 2. Invalid Iota: AR=4.0, Tri=-0.6, Iota=0.2
             c2 = {
-                "aspect_ratio": 4.0,
-                "average_triangularity": -0.6,
-                "edge_rotational_transform_over_n_field_periods": 0.2,
+                "metrics.aspect_ratio": 4.0,
+                "metrics.average_triangularity": -0.6,
+                "metrics.edge_rotational_transform_over_n_field_periods": 0.2,
             }
             # 3. Missing Iota
-            c3 = {"aspect_ratio": 4.0, "average_triangularity": -0.6}
+            c3 = {"metrics.aspect_ratio": 4.0, "metrics.average_triangularity": -0.6}
 
             assert func(c1) is True, "Should keep valid P1 candidate"
             assert func(c2) is False, "Should drop candidate with iota < 0.3"

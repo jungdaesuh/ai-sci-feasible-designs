@@ -290,6 +290,12 @@ class TestCoordinatorASO:
         )
 
         # Verifications
+        # P3 ASO requires an aspect-ratio upper bound for constellaration's ALM objective_constraints.
+        assert mock_create_context.call_count == 1
+        assert (
+            mock_create_context.call_args.kwargs.get("aspect_ratio_upper_bound")
+            == coordinator.cfg.alm.aspect_ratio_upper_bound
+        )
         assert mock_step_alm.call_count == 3
         assert coordinator.planner.supervise.call_count == 3
         assert len(candidates) == 1  # One final candidate

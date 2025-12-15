@@ -542,10 +542,15 @@ class Coordinator:
         problem = self._get_problem(config)
         settings = self._build_optimization_settings(config)
 
+        aspect_ratio_upper_bound = None
+        if (config.problem or "").lower().startswith("p3"):
+            aspect_ratio_upper_bound = config.alm.aspect_ratio_upper_bound
+
         alm_context, alm_state = create_alm_context(
             boundary=boundary,
             problem=problem,
             settings=settings,
+            aspect_ratio_upper_bound=aspect_ratio_upper_bound,
         )
         traj = traj.model_copy(
             update={"alm_context": alm_context, "alm_state": alm_state}
@@ -639,6 +644,7 @@ class Coordinator:
                         boundary=boundary,
                         problem=problem,
                         settings=settings,
+                        aspect_ratio_upper_bound=aspect_ratio_upper_bound,
                     )
                     alm_context = new_context
                     traj = traj.model_copy(
