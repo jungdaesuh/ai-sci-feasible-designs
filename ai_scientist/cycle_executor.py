@@ -1514,7 +1514,19 @@ class CycleExecutor:
                         }
                     )
 
-                    loss = augmented_lagrangian_function(obj, constr, state).item()
+                    # ALM minimizes by design. Convert maximization objectives into
+                    # a minimization form for the oracle loss.
+                    #
+                    # - P1: minimize elongation (already minimization)
+                    # - P2: maximize gradient -> minimize (20 - gradient) (matches
+                    #   constellaration.optimization.augmented_lagrangian_runner)
+                    obj_for_alm = obj
+                    if (self.config.problem or "").lower().startswith("p2"):
+                        obj_for_alm = 20.0 - obj
+
+                    loss = augmented_lagrangian_function(
+                        obj_for_alm, constr, state
+                    ).item()
                     oracle.tell(candidate, loss)
 
                 recommendation = oracle.provide_recommendation()

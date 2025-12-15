@@ -848,9 +848,25 @@ def optimize_alm_inner_loop(
         # In production, this should match `get_constraint_names(problem, for_alm=True)`.
         # In tests (and some lightweight runners), we may receive a shorter ALM state;
         # in that case we optimize the prefix of the canonical constraint list.
-        alm_names_full = get_constraint_names(problem, for_alm=True)
         n_constraints = int(penalty_params.numel())
-        alm_names = alm_names_full[:n_constraints]
+
+        # Choose the constraint name ordering that matches the ALM state length.
+        # - P1/P2: for_alm has no effect (same list)
+        # - P3: for_alm=True prepends "aspect_ratio" (6 constraints) while the
+        #       standard problem has 5 constraints. CycleExecutor may run ALM
+        #       without the extra aspect-ratio bound, so we must match by length.
+        names_standard = get_constraint_names(problem, for_alm=False)
+        names_alm = get_constraint_names(problem, for_alm=True)
+
+        if n_constraints == len(names_alm):
+            alm_names = names_alm
+        elif n_constraints == len(names_standard):
+            alm_names = names_standard
+        else:
+            # Fallback: optimize a consistent prefix of the closest list.
+            # Prefer the standard list unless the ALM list is strictly required.
+            base = names_alm if n_constraints > len(names_standard) else names_standard
+            alm_names = base[:n_constraints]
 
         # Filter names that might not be in our map (safety)
         ordered_constraints = []

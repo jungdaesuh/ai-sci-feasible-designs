@@ -28,7 +28,7 @@ except ImportError:
     ConstellarationSettings = None  # type: ignore[misc, assignment]
 
 from ai_scientist.backends.base import PhysicsBackend
-from ai_scientist.constraints import get_constraint_bounds
+from ai_scientist.constraints import get_constraint_bounds, get_constraint_names
 
 
 # --- Type Protocol for Metrics ---
@@ -655,7 +655,20 @@ def compute_constraint_margins(
         if include_qi_constraint:
             margins["qi"] = _log10_margin(-3.5)
 
-    return margins
+    # Ensure stable, canonical ordering so list(margins.values()) aligns with
+    # constraints.get_constraint_names(problem) across the codebase.
+    # This prevents subtle bugs where penalty parameters or logs are associated
+    # with the wrong constraint due to dict insertion order differences.
+    canonical = get_constraint_names(problem_key)
+    ordered: Dict[str, float] = {
+        name: margins[name] for name in canonical if name in margins
+    }
+    # Preserve any unexpected keys (should be none) deterministically.
+    for extra_key in margins:
+        if extra_key not in ordered:
+            ordered[extra_key] = margins[extra_key]
+
+    return ordered
 
 
 def compute_objective(
