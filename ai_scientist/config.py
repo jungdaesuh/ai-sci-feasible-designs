@@ -145,8 +145,12 @@ class FidelityLadder:
 
 @dataclass(frozen=True)
 class BoundaryTemplateConfig:
-    n_poloidal_modes: int  # Treated as max_poloidal_mode (mpol)
-    n_toroidal_modes: int  # Treated as max_toroidal_mode (ntor)
+    # IMPORTANT: These follow constellaration.geometry.surface_rz_fourier.SurfaceRZFourier
+    # naming, i.e. they are the *array dimensions* for r_cos/z_sin:
+    # - n_poloidal_modes = mpol + 1  (number of rows, m = 0..mpol)
+    # - n_toroidal_modes = 2*ntor + 1 (number of cols, n = -ntor..ntor; must be odd)
+    n_poloidal_modes: int
+    n_toroidal_modes: int
     n_field_periods: int
     base_major_radius: float
     base_minor_radius: float
@@ -155,23 +159,23 @@ class BoundaryTemplateConfig:
 
     @property
     def max_poloidal_mode(self) -> int:
-        """Maximum poloidal mode index (mpol). Same as n_poloidal_modes."""
-        return self.n_poloidal_modes
+        """Maximum poloidal mode index (mpol) = n_poloidal_modes - 1."""
+        return self.n_poloidal_modes - 1
 
     @property
     def max_toroidal_mode(self) -> int:
-        """Maximum toroidal mode index (ntor). Same as n_toroidal_modes."""
-        return self.n_toroidal_modes
+        """Maximum toroidal mode index (ntor) = (n_toroidal_modes - 1) // 2."""
+        return (self.n_toroidal_modes - 1) // 2
 
     @property
     def n_poloidal_coefficients(self) -> int:
-        """Number of rows in r_cos/z_sin arrays = mpol + 1."""
-        return self.n_poloidal_modes + 1
+        """Number of rows in r_cos/z_sin coefficient arrays (alias)."""
+        return self.n_poloidal_modes
 
     @property
     def n_toroidal_coefficients(self) -> int:
-        """Number of columns in r_cos/z_sin arrays = 2*ntor + 1 (always odd)."""
-        return 2 * self.n_toroidal_modes + 1
+        """Number of columns in r_cos/z_sin coefficient arrays (alias)."""
+        return self.n_toroidal_modes
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,10 @@ class ProposalMixConfig:
     exploitation_ratio: float = 0.0
     surrogate_pool_multiplier: float = 2.0
     sampler_type: str = "standard"
+    # Phase 5 pipeline toggles
+    # When disabled, Coordinator skips RLRefinementWorker (PPO-CMA) and goes straight
+    # from surrogate ranking to gradient descent optimization.
+    rl_refinement_enabled: bool = True
     # UCB exploration parameters (Issue #11)
     ucb_exploration_initial: float = 2.0  # High exploration at start
     ucb_exploration_final: float = 0.1  # Low exploration at end
@@ -624,6 +632,7 @@ def _proposal_mix_from_dict(
         jitter_scale=float(config.get("jitter_scale", 0.01)),
         surrogate_pool_multiplier=float(config.get("surrogate_pool_multiplier", 2.0)),
         sampler_type=str(config.get("sampler_type", "standard")),
+        rl_refinement_enabled=bool(config.get("rl_refinement_enabled", True)),
         # UCB parameters (Issue #11)
         ucb_exploration_initial=float(config.get("ucb_exploration_initial", 2.0)),
         ucb_exploration_final=float(config.get("ucb_exploration_final", 0.1)),

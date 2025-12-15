@@ -163,6 +163,42 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         self.assertEqual(len(ranked), 2)
         self.mock_surrogate.rank_candidates.assert_not_called()
 
+    def test_produce_candidates_skips_rl_when_disabled(self):
+        # Disable RL refinement via config toggle
+        self.cfg.proposal_mix.rl_refinement_enabled = False
+
+        # Ensure HYBRID path (cycle < 5 -> HYBRID)
+        self.mock_world_model.average_recent_hv_delta.return_value = None
+
+        seeds = [
+            {"id": 1, "params": {"r_cos": [[1.0]], "z_sin": [[0.0]]}},
+            {"id": 2, "params": {"r_cos": [[1.0]], "z_sin": [[0.0]]}},
+        ]
+
+        self.coordinator.explore_worker.run.return_value = {"candidates": seeds}
+
+        # PreRelax + Geometer pass-through
+        self.coordinator.prerelax_worker = MagicMock()
+        self.coordinator.prerelax_worker.run.return_value = {"candidates": seeds}
+        self.coordinator.geo_worker.run.return_value = {"candidates": seeds}
+
+        # RL worker should not be called at all
+        self.coordinator.rl_worker = MagicMock()
+
+        # Optimization worker returns candidates
+        self.coordinator.opt_worker.run.return_value = {"candidates": seeds}
+
+        out = self.coordinator.produce_candidates(
+            cycle=1,
+            experiment_id=1,
+            n_candidates=2,
+            template=self.cfg.boundary_template,
+        )
+
+        self.assertEqual(len(out), 2)
+        self.coordinator.rl_worker.run.assert_not_called()
+        self.coordinator.opt_worker.run.assert_called_once()
+
     @patch("ai_scientist.coordinator.TrajectoryState")
     @patch("ai_scientist.coordinator.create_alm_context")
     @patch("ai_scientist.coordinator.step_alm")

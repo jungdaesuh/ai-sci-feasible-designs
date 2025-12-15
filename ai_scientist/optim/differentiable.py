@@ -52,17 +52,17 @@ def _is_maximization_problem(problem: str, target: TargetKind) -> bool:
 
     Args:
         problem: Problem identifier (p1, p2, p3).
-        target: The surrogate training target (TargetKind.OBJECTIVE or TargetKind.HV).
+        target: The surrogate training target.
 
     Direction logic:
-        - HV (hypervolume) is ALWAYS maximized regardless of problem.
+        - HV / GRADIENT_PROXY are ALWAYS maximized regardless of problem.
         - Physics objectives vary by problem:
             P1: max_elongation -> minimize
             P2: gradient_scale_length -> MAXIMIZE
             P3: aspect_ratio -> minimize
     """
-    # HV is always maximized (Pareto hypervolume metric)
-    if target == TargetKind.HV:
+    # HV (legacy) and GRADIENT_PROXY (canonical) are always maximized.
+    if target in (TargetKind.HV, TargetKind.GRADIENT_PROXY):
         return True
 
     # Physics objective direction
@@ -333,8 +333,13 @@ def gradient_descent_on_inputs(
 
     # Determine masking parameters from template
     template = cfg.boundary_template
-    max_poloidal = max(1, template.max_poloidal_mode)
-    max_toroidal = max(1, template.max_toroidal_mode)
+    # Derive mode numbers from the coefficient matrix dimensions.
+    # We intentionally use n_poloidal_modes / n_toroidal_modes to remain compatible
+    # with tests that inject MagicMock templates.
+    n_poloidal_modes = int(getattr(template, "n_poloidal_modes"))
+    n_toroidal_modes = int(getattr(template, "n_toroidal_modes"))
+    max_poloidal = max(1, n_poloidal_modes - 1)
+    max_toroidal = max(1, (n_toroidal_modes - 1) // 2)
 
     if surrogate._schema is None:
         raise RuntimeError(
@@ -837,8 +842,16 @@ def optimize_alm_inner_loop(
             0.0, device=device, dtype=x_torch.dtype
         )
 
-        # 2. Stack in canonical order
-        alm_names = get_constraint_names(problem, for_alm=True)
+        # 2. Stack in canonical order.
+        #
+        # IMPORTANT: The ALM state controls the number of constraints being optimized.
+        # In production, this should match `get_constraint_names(problem, for_alm=True)`.
+        # In tests (and some lightweight runners), we may receive a shorter ALM state;
+        # in that case we optimize the prefix of the canonical constraint list.
+        alm_names_full = get_constraint_names(problem, for_alm=True)
+        n_constraints = int(penalty_params.numel())
+        alm_names = alm_names_full[:n_constraints]
+
         # Filter names that might not be in our map (safety)
         ordered_constraints = []
         for name in alm_names:

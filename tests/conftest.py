@@ -21,14 +21,14 @@ if not _CONSTELLARATION_AVAILABLE:
     if "vmecpp" not in sys.modules:
         sys.modules["vmecpp"] = MagicMock()
         sys.modules["vmecpp"].__path__ = []
-        sys.modules["vmecpp"].__spec__ = None
+        sys.modules["vmecpp"].__spec__ = MagicMock()
     if "constellaration" not in sys.modules:
         sys.modules["constellaration"] = MagicMock()
         sys.modules["constellaration"].__path__ = []
-        sys.modules["constellaration"].__spec__ = None
+        sys.modules["constellaration"].__spec__ = MagicMock()
     if "constellaration.forward_model" not in sys.modules:
         sys.modules["constellaration.forward_model"] = MagicMock()
-        sys.modules["constellaration.forward_model"].__spec__ = None
+        sys.modules["constellaration.forward_model"].__spec__ = MagicMock()
     if "constellaration.geometry" not in sys.modules:
         sys.modules["constellaration.geometry"] = MagicMock()
         # Configure SurfaceRZFourier to return a mock with r_cos/z_sin that have shape
@@ -50,41 +50,43 @@ if not _CONSTELLARATION_AVAILABLE:
         sys.modules[
             "constellaration.geometry"
         ].SurfaceRZFourier.return_value = mock_surface
-        sys.modules["constellaration.geometry"].__spec__ = None
-        sys.modules["constellaration.geometry"].SurfaceRZFourier.__spec__ = None
+        sys.modules["constellaration.geometry"].__spec__ = MagicMock()
+        sys.modules["constellaration.geometry"].SurfaceRZFourier.__spec__ = MagicMock()
     if "constellaration.problems" not in sys.modules:
         sys.modules["constellaration.problems"] = MagicMock()
-        sys.modules["constellaration.problems"].__spec__ = None
+        sys.modules["constellaration.problems"].__spec__ = MagicMock()
     if "constellaration.boozer" not in sys.modules:
         sys.modules["constellaration.boozer"] = MagicMock()
-        sys.modules["constellaration.boozer"].__spec__ = None
+        sys.modules["constellaration.boozer"].__spec__ = MagicMock()
     if "constellaration.optimization" not in sys.modules:
         sys.modules["constellaration.optimization"] = MagicMock()
         sys.modules["constellaration.optimization"].__path__ = []
-        sys.modules["constellaration.optimization"].__spec__ = None
+        sys.modules["constellaration.optimization"].__spec__ = MagicMock()
     if "constellaration.optimization.augmented_lagrangian" not in sys.modules:
         sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
-        sys.modules["constellaration.optimization.augmented_lagrangian"].__spec__ = None
+        sys.modules[
+            "constellaration.optimization.augmented_lagrangian"
+        ].__spec__ = MagicMock()
     if "constellaration.mhd" not in sys.modules:
         sys.modules["constellaration.mhd"] = MagicMock()
         sys.modules["constellaration.mhd"].__path__ = []
-        sys.modules["constellaration.mhd"].__spec__ = None
+        sys.modules["constellaration.mhd"].__spec__ = MagicMock()
     if "constellaration.mhd.vmec_utils" not in sys.modules:
         sys.modules["constellaration.mhd.vmec_utils"] = MagicMock()
-        sys.modules["constellaration.mhd.vmec_utils"].__spec__ = None
+        sys.modules["constellaration.mhd.vmec_utils"].__spec__ = MagicMock()
     if "constellaration.optimization.settings" not in sys.modules:
         sys.modules["constellaration.optimization.settings"] = MagicMock()
-        sys.modules["constellaration.optimization.settings"].__spec__ = None
+        sys.modules["constellaration.optimization.settings"].__spec__ = MagicMock()
     if "constellaration.utils" not in sys.modules:
         sys.modules["constellaration.utils"] = MagicMock()
         sys.modules["constellaration.utils"].__path__ = []
-        sys.modules["constellaration.utils"].__spec__ = None
+        sys.modules["constellaration.utils"].__spec__ = MagicMock()
     if "constellaration.utils.pytree" not in sys.modules:
         sys.modules["constellaration.utils.pytree"] = MagicMock()
-        sys.modules["constellaration.utils.pytree"].__spec__ = None
+        sys.modules["constellaration.utils.pytree"].__spec__ = MagicMock()
     if "constellaration.initial_guess" not in sys.modules:
         sys.modules["constellaration.initial_guess"] = MagicMock()
-        sys.modules["constellaration.initial_guess"].__spec__ = None
+        sys.modules["constellaration.initial_guess"].__spec__ = MagicMock()
 
 
 # Configure mocks to be JSON serializable (behave like Pydantic models)

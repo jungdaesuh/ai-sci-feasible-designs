@@ -134,10 +134,10 @@ LAMBDA_R00_REGULARIZATION: float = 10.0
 # Override via R00_TARGET env var or by calling get_r00_target(custom_value)
 R00_REGULARIZATION_TARGET: float = 1.0
 
-# H2 Fix: P3 Hypervolume reference point thresholds (natural units)
-# Points with gradient < HV_REFERENCE_GRADIENT contribute zero hypervolume
-# Override via HV_REF_GRADIENT / HV_REF_ASPECT env vars
-HV_REFERENCE_GRADIENT: float = 1.0  # Natural units (positive)
+# H2 Fix: P3 Hypervolume reference point in MINIMIZATION space (matches benchmark).
+# This corresponds to the objective vector (-gradient, aspect_ratio).
+# Override via HV_REF_GRADIENT / HV_REF_ASPECT env vars.
+HV_REFERENCE_GRADIENT: float = 1.0
 HV_REFERENCE_ASPECT_RATIO: float = 20.0
 
 # Early stopping parameters for gradient descent
@@ -260,30 +260,21 @@ def get_r00_target() -> float:
 
 
 def get_hv_reference_point() -> Tuple[float, float]:
-    """Get P3 hypervolume reference point in MINIMIZATION form (H1/H2 Fix).
+    """Get P3 hypervolume reference point in MINIMIZATION form.
 
-    CONVENTION EQUIVALENCE (H1 Fix):
-    The benchmark (constellaration/problems.py) uses:
-        X = [(-1.0 * gradient), (+1.0 * aspect_ratio)]
+    Matches `constellaration.problems.MHDStableQIStellarator._score`, which computes
+    hypervolume over points in minimization space:
+        X = [(-gradient), (aspect_ratio)]
+    with:
         reference_point = [1.0, 20.0]
 
-    This function returns:
-        reference_point = (-1.0, 20.0) in minimization form
-
-    These are mathematically equivalent because:
-        -gradient > -1.0  iff  gradient < 1.0
-
-    Both filter out points where gradient < 1.0 (poor performing designs).
-    The sign difference is just a convention for minimization-form storage.
-
-    The reference point can be overridden via environment variables:
-    - HV_REF_GRADIENT: gradient threshold in natural units (default 1.0)
-    - HV_REF_ASPECT: aspect ratio threshold (default 20.0)
+    Environment overrides:
+    - HV_REF_GRADIENT: reference value for the (-gradient) axis in minimization space
+    - HV_REF_ASPECT: reference value for the (aspect_ratio) axis
 
     Returns:
-        Tuple of (-gradient, aspect_ratio) in minimization form.
-        Points with gradient < threshold contribute zero hypervolume.
+        Tuple of (ref_neg_gradient, ref_aspect_ratio) in minimization form.
     """
     grad = float(os.environ.get("HV_REF_GRADIENT", HV_REFERENCE_GRADIENT))
     aspect = float(os.environ.get("HV_REF_ASPECT", HV_REFERENCE_ASPECT_RATIO))
-    return (-grad, aspect)  # Minimization form: negate gradient
+    return (grad, aspect)

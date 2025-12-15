@@ -389,6 +389,15 @@ def main() -> None:
         )
     if cli.aso:
         experiment = replace(experiment, aso=replace(experiment.aso, enabled=True))
+    if getattr(cli, "disable_rl", False):
+        run_overrides = dict(experiment.run_overrides or {})
+        proposal_mix_overrides: dict[str, Any] = {}
+        existing_proposal_mix = run_overrides.get("proposal_mix")
+        if isinstance(existing_proposal_mix, Mapping):
+            proposal_mix_overrides.update(existing_proposal_mix)
+        proposal_mix_overrides["rl_refinement_enabled"] = False
+        run_overrides["proposal_mix"] = proposal_mix_overrides
+        experiment = replace(experiment, run_overrides=run_overrides)
     if cli.slow:
         experiment = replace(
             experiment,

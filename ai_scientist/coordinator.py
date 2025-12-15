@@ -223,12 +223,16 @@ class Coordinator:
                 top_k = valid_seeds[:100]
 
             # STAGE 5: RL Refine - Micro-surgery on top-K only
-            rl_ctx = {
-                "candidates": top_k,
-                "target_metrics": explore_ctx.get("target_metrics"),
-            }
-            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
-            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            if self.cfg.proposal_mix.rl_refinement_enabled:
+                rl_ctx = {
+                    "candidates": top_k,
+                    "target_metrics": explore_ctx.get("target_metrics"),
+                }
+                refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+                print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            else:
+                refined = top_k
+                print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
 
             # STAGE 6: Optimize - Final gradient descent
             opt_ctx = {"initial_guesses": refined}
@@ -275,12 +279,16 @@ class Coordinator:
                 top_k = valid_seeds[:100]
 
             # STAGE 5: RL Refine - Micro-surgery on top-K only
-            rl_ctx = {
-                "candidates": top_k,
-                "target_metrics": explore_ctx.get("target_metrics"),
-            }
-            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
-            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            if self.cfg.proposal_mix.rl_refinement_enabled:
+                rl_ctx = {
+                    "candidates": top_k,
+                    "target_metrics": explore_ctx.get("target_metrics"),
+                }
+                refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+                print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            else:
+                refined = top_k
+                print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
 
             # STAGE 6: Optimize - Final gradient descent
             opt_ctx = {"initial_guesses": refined}

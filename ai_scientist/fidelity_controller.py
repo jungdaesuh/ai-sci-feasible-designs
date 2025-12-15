@@ -166,8 +166,7 @@ class FidelityController:
         stage: str,
         budgets: ai_config.BudgetConfig,
         cycle_start: float,
-        evaluate_fn: ProblemEvaluator
-        | None = None,  # Deprecated/Unused if using forward_model
+        evaluate_fn: ProblemEvaluator | None = None,
         *,
         sleep_per_eval: float = 0.0,
         tool_name: str | None = None,
@@ -184,22 +183,51 @@ class FidelityController:
         if _time_exceeded(cycle_start, wall_limit):
             return []
 
-        # Prepare settings
-        # We use tools._settings_for_stage to get the correct config
-        # This assumes tools is available and has this helper.
-        # If not, we should replicate logic or import from where it lives.
-        # For now, we rely on tools.
+        # Optional injection point: if an evaluator is provided, use it instead of
+        # the centralized forward model. This keeps integration tests fast (they can
+        # patch the evaluator) while production can rely on forward_model_batch.
+        if evaluate_fn is not None:
+            if tool_name:
+                adapter.prepare_peft_hook(tool_name, stage)
+
+            results: list[dict[str, Any]] = []
+            for candidate in candidate_list:
+                if _time_exceeded(cycle_start, wall_limit):
+                    break
+
+                evaluation = evaluate_fn(
+                    candidate["params"], stage=stage, use_cache=True
+                )
+                design_id = (
+                    candidate.get("design_hash")
+                    or evaluation.get("design_hash")
+                    or tools.design_hash(candidate["params"])
+                )
+                results.append(
+                    {
+                        "params": candidate["params"],
+                        "evaluation": evaluation,
+                        "seed": int(candidate.get("seed", -1)),
+                        "design_hash": str(design_id),
+                    }
+                )
+
+                if sleep_per_eval > 0:
+                    time.sleep(sleep_per_eval)
+
+            if tool_name:
+                adapter.apply_lora_updates(tool_name, stage)
+
+            return results
+
+        # Default (production) path: use the centralized forward model.
         fm_settings = tools._settings_for_stage(stage, self.config.problem)
 
-        # Prepare PEFT hook
         if tool_name:
             adapter.prepare_peft_hook(tool_name, stage)
 
-        # Extract boundaries
         boundaries = [c["params"] for c in candidate_list]
 
-        # Run Batch Evaluation
-        # We use the budgets.n_workers for parallelism
         batch_results = forward_model_batch(
             boundaries,
             fm_settings,
@@ -208,11 +236,9 @@ class FidelityController:
             use_cache=True,
         )
 
-        # Apply PEFT updates
         if tool_name:
             adapter.apply_lora_updates(tool_name, stage)
 
-        # Process Results
         results: list[dict[str, Any]] = []
 
         for i, result in enumerate(batch_results):

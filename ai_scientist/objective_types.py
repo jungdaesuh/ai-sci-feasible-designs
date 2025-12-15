@@ -56,6 +56,10 @@ class TargetKind(str, Enum):
     """
 
     OBJECTIVE = "objective"
+    # Backwards-compatible alias for the P3 Pareto proxy / hypervolume column.
+    # The DB column is named "hv"; newer code may pass "gradient_proxy" and the
+    # repository maps it to "hv".
+    HV = "hv"
     GRADIENT_PROXY = "gradient_proxy"  # Per-candidate proxy, NOT hypervolume
 
 

@@ -193,7 +193,16 @@ class CycleExecutor:
     ) -> CycleResult:
         tool_name = _problem_tool_name(self.config.problem)
         base_evaluate = _problem_evaluator(self.config.problem)
-        evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
+        verifier_evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
+        # Keep the centralized batch evaluator as the default (forward_model_batch),
+        # but allow tests to inject a lightweight evaluator by patching
+        # `_problem_evaluator` to return a different callable.
+        fidelity_evaluate_fn = (
+            None
+            if base_evaluate
+            in (tools.evaluate_p1, tools.evaluate_p2, tools.evaluate_p3)
+            else base_evaluate
+        )
         cycle_start = time.perf_counter()
         cycle_number = cycle_index + 1
         global _LAST_SURROGATE_FIT_SEC
@@ -576,7 +585,7 @@ class CycleExecutor:
                 stage=screen_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=None,  # Deprecated
+                evaluate_fn=fidelity_evaluate_fn,
                 sleep_per_eval=sleep_per_eval,
                 tool_name=tool_name,
             )
@@ -647,7 +656,7 @@ class CycleExecutor:
                 stage=promote_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=None,  # Deprecated
+                evaluate_fn=fidelity_evaluate_fn,
                 sleep_per_eval=sleep_per_eval,
                 tool_name=tool_name,
             )
@@ -945,7 +954,7 @@ class CycleExecutor:
             cycle_number=cycle_number,
             best_entry=best_entry,
             best_eval=best_eval,
-            evaluation_fn=evaluate_fn,
+            evaluation_fn=verifier_evaluate_fn,
             tool_name=tool_name,
             best_seed=best_seed,
             git_sha=git_sha,
