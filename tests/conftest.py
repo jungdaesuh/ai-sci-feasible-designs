@@ -1,23 +1,71 @@
+import os
 import sys
 import warnings
 from unittest.mock import MagicMock
 
 import pytest
 
-# Check if real constellaration is available BEFORE mocking
+
+def _is_truthy_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+_PHYSICS_BACKEND_ENV = os.environ.get("AI_SCIENTIST_PHYSICS_BACKEND", "auto").lower()
+_REQUIRE_REAL_BACKEND = _PHYSICS_BACKEND_ENV == "real" or _is_truthy_env(
+    os.environ.get("AI_SCIENTIST_REQUIRE_REAL_BACKEND")
+)
+_ALLOW_PHYSICS_MOCKS = _PHYSICS_BACKEND_ENV == "mock" or _is_truthy_env(
+    os.environ.get("AI_SCIENTIST_ALLOW_PHYSICS_MOCKS")
+)
+
+# Check if real constellaration is available BEFORE any optional mocking.
 _CONSTELLARATION_AVAILABLE = False
+_CONSTELLARATION_IMPORT_ERROR: ImportError | None = None
 try:
-    # Try importing a key module to check availability
+    # Try importing a key module to check availability.
     import constellaration.forward_model as _check_fm
 
     _CONSTELLARATION_AVAILABLE = True
     del _check_fm
-except ImportError:
-    pass
+except ImportError as exc:
+    _CONSTELLARATION_IMPORT_ERROR = exc
+
+
+def _vmecpp_native_available() -> bool:
+    """Return True iff the vmecpp C++ extension can be imported."""
+    try:
+        import vmecpp.cpp._vmecpp  # noqa: F401
+
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+if _REQUIRE_REAL_BACKEND:
+    # Fail fast with a targeted message when real physics is explicitly required.
+    if not _CONSTELLARATION_AVAILABLE:
+        msg = (
+            "Real physics backend requested but constellaration is not importable.\n"
+            "Set AI_SCIENTIST_PHYSICS_BACKEND=mock to run unit tests without physics, "
+            "or fix the environment so constellaration/vmecpp import works.\n"
+        )
+        if _CONSTELLARATION_IMPORT_ERROR is not None:
+            msg += f"Original error: {_CONSTELLARATION_IMPORT_ERROR!r}\n"
+        pytest.exit(msg, returncode=2)
+    if not _vmecpp_native_available():
+        pytest.exit(
+            "Real physics backend requested but vmecpp native extension cannot be "
+            "imported (dlopen/link error). This often presents as a missing "
+            "dependency such as @rpath/libtorch.dylib.\n"
+            "Fix/reinstall vmecpp in the active environment and retry.\n",
+            returncode=2,
+        )
 
 # Only mock vmecpp and constellaration if real imports are NOT available
-# This allows tests that need real constellaration to work properly
-if not _CONSTELLARATION_AVAILABLE:
+# This is intentionally opt-in: set AI_SCIENTIST_ALLOW_PHYSICS_MOCKS=1 to enable.
+if not _CONSTELLARATION_AVAILABLE and _ALLOW_PHYSICS_MOCKS:
     if "vmecpp" not in sys.modules:
         sys.modules["vmecpp"] = MagicMock()
         sys.modules["vmecpp"].__path__ = []
@@ -193,7 +241,7 @@ def runner_module():
 
 
 # Only configure mock attributes if mocks are active
-if not _CONSTELLARATION_AVAILABLE:
+if not _CONSTELLARATION_AVAILABLE and _ALLOW_PHYSICS_MOCKS:
     sys.modules[
         "constellaration.forward_model"
     ].ConstellarationSettings = MockPydanticModel
@@ -260,7 +308,7 @@ warnings.filterwarnings(
 
 
 @pytest.fixture(autouse=True)
-def reset_evaluation_state():
+def reset_evaluation_state(request: pytest.FixtureRequest):
     """Reset all cache state and backend before and after each test.
 
     This fixture addresses test order-dependency issues caused by:
@@ -278,9 +326,11 @@ def reset_evaluation_state():
 
         # Clear before test
         fm.clear_cache()
-        # Default to mock backend for all tests.
-        # Tests requiring real backend must use the 'real_backend' fixture.
-        fm.set_backend(MockPhysicsBackend())
+        # Default to mock backend for unit tests.
+        # Integration tests (or explicit real-backend runs) must opt out.
+        is_integration = request.node.get_closest_marker("integration") is not None
+        if not is_integration and not _REQUIRE_REAL_BACKEND:
+            fm.set_backend(MockPhysicsBackend())
         tools_eval._EVALUATION_CACHE.clear()
         tools_eval._CACHE_STATS.clear()
     except (ImportError, AttributeError):
@@ -343,12 +393,25 @@ def real_backend():
 
         backend = RealPhysicsBackend()
         if not backend.is_available():
+            if _REQUIRE_REAL_BACKEND:
+                pytest.fail(
+                    "Real physics backend requested but RealPhysicsBackend.is_available() "
+                    "returned False. This usually indicates a broken vmecpp native "
+                    "installation (e.g. dlopen/libtorch linking).",
+                    pytrace=False,
+                )
             pytest.skip("Real physics backend requires constellaration")
 
         fm.set_backend(backend)
         yield backend
         fm.reset_backend()
     except ImportError:
+        if _REQUIRE_REAL_BACKEND:
+            pytest.fail(
+                "Real physics backend requested but imports failed. Fix the environment "
+                "so constellaration/vmecpp can be imported.",
+                pytrace=False,
+            )
         pytest.skip("Real physics backend requires constellaration")
 
 
