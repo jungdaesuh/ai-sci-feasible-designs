@@ -18,6 +18,9 @@ __pycache__/
 */__pycache__/
 *.py[cod]
 
+# Egg-info (editable installs)
+*.egg-info/
+
 # OS/editor junk
 .DS_Store
 *.swp

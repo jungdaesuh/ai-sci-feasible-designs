@@ -120,8 +120,17 @@ def prerelax_boundary(
         final_loss = loss_scalar.item()
 
     # Export back
+    r_cos_out = r_cos.detach().cpu().squeeze(0).numpy()
+    z_sin_out = z_sin.detach().cpu().squeeze(0).numpy()
+
+    if boundary_params.get("is_stellarator_symmetric", False):
+        center = r_cos_out.shape[1] // 2
+        if center > 0:
+            r_cos_out[0, :center] = 0.0
+            z_sin_out[0, : center + 1] = 0.0
+
     new_params = boundary_params.copy()
-    new_params["r_cos"] = r_cos.detach().cpu().squeeze(0).numpy().tolist()
-    new_params["z_sin"] = z_sin.detach().cpu().squeeze(0).numpy().tolist()
+    new_params["r_cos"] = r_cos_out.tolist()
+    new_params["z_sin"] = z_sin_out.tolist()
 
     return new_params, final_loss

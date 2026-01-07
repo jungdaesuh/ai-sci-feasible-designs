@@ -15,7 +15,6 @@ import math
 import os
 import platform
 import sys
-import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -45,6 +44,7 @@ from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration import forward_model
+from ai_scientist import forward_model as centralized_fm
 from orchestration import adaptation as adaptation_helpers
 from ai_scientist.prefilter import FeasibilityPrefilter
 from ai_scientist.optim import geometry
@@ -1779,9 +1779,15 @@ def _objective_constraints(
     problem_type: str,
     predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]]
     | None = None,
+    stage: str = "high",
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
 ]:
+    """Evaluate objective and constraints for a given boundary.
+
+    Uses the centralized ai_scientist.forward_model as SSOT for evaluation,
+    caching, and error handling.
+    """
     boundary_obj = unravel_and_unmask_fn(jnp.asarray(x * scale))
 
     boundary_params = {
@@ -1801,42 +1807,51 @@ def _objective_constraints(
             None,
         )
 
-    with tempfile.TemporaryDirectory() as _:
+    # Use centralized forward model (SSOT) with proper settings
+    # Fidelity mapping: promote/high/p2/p3 = high-fidelity VMEC
+    # (per forward_model.py:565 "promote: high-fidelity VMEC but skip QI")
+    stage_lower = stage.lower()
+    fidelity = (
+        "high"
+        if stage_lower in ("high", "promote", "p2", "p3", "high_fidelity")
+        else "low"
+    )
+    fm_settings = centralized_fm.ForwardModelSettings(
+        constellaration_settings=settings,
+        problem=problem_type,
+        stage=stage,
+        fidelity=fidelity,
+    )
+
+    try:
+        result = centralized_fm.forward_model(
+            boundary_params,
+            fm_settings,
+            use_cache=False,  # Disable cache for optimization inner loop
+        )
+        metrics = result.metrics
+        objective = jnp.array(result.objective)
+        constraints = jnp.array(result.constraints)
+    except Exception:
         metrics = None
-        try:
-            metrics, _ = forward_model.forward_model(
-                boundary=boundary_obj,
-                settings=settings,
-            )
-        except Exception as _:
-            pass
-
-        if metrics is None:
-            objective = jnp.array(NAN_TO_HIGH_VALUE)
-            p_key = (problem_type or "").lower()
-            if p_key.startswith("p1"):
-                c_size = 3
-            else:
-                c_size = 5
-            constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
+        # Failure penalties: constraints handle infeasibility (all set to NAN_TO_HIGH_VALUE)
+        # Objective: use semantically meaningful "worst" value per problem
+        # - P1: max elongation (minimize) -> use NAN_TO_HIGH_VALUE (large is bad)
+        # - P2: gradient scale length (maximize) -> use 0.0 (zero gradient is worst)
+        # - P3: aspect ratio (minimize) -> use NAN_TO_HIGH_VALUE (large is bad)
+        p_key = (problem_type or "").lower()
+        if p_key.startswith("p2"):
+            failure_penalty = 0.0  # Worst gradient is 0
         else:
-            if problem_type.lower().startswith("p1"):
-                objective = jnp.array(metrics.max_elongation)
-            elif problem_type.lower().startswith("p2"):
-                # P2: maximize gradient scale length
-                objective = jnp.array(
-                    metrics.minimum_normalized_magnetic_gradient_scale_length
-                )
-            else:
-                # P3: minimize aspect ratio
-                objective = jnp.array(metrics.aspect_ratio)
+            failure_penalty = NAN_TO_HIGH_VALUE
+        objective = jnp.array(failure_penalty)
+        if p_key.startswith("p1"):
+            c_size = 3
+        else:
+            c_size = 5
+        constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
 
-            margins = tools.compute_constraint_margins(
-                metrics, problem_type, stage="high"
-            )
-            constraints = jnp.array(list(margins.values()))
-
-        return ((objective, constraints), metrics)
+    return ((objective, constraints), metrics)
 
 
 def _generate_candidate_params(

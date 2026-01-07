@@ -276,11 +276,11 @@ def _auto_select_backend() -> "PhysicsBackend":
 
         backend = RealPhysicsBackend()
         if not backend.is_available():
-            logger.warning(
-                "AI_SCIENTIST_PHYSICS_BACKEND=real but constellaration not available, "
-                "falling back to mock"
+            raise RuntimeError(
+                "AI_SCIENTIST_PHYSICS_BACKEND=real but the real physics backend is not "
+                "available. This usually indicates a broken or missing "
+                "constellaration/vmecpp installation (e.g. native dlopen/link errors)."
             )
-            return MockPhysicsBackend()
         logger.debug("Using real backend (AI_SCIENTIST_PHYSICS_BACKEND=real)")
         return backend
     else:  # auto
@@ -510,10 +510,12 @@ def make_boundary_from_params(
         "n_field_periods": int(params.get("n_field_periods", 1)),
     }
 
-    if "r_sin" in params:
-        payload["r_sin"] = np.asarray(params["r_sin"], dtype=float)
-    if "z_cos" in params:
-        payload["z_cos"] = np.asarray(params["z_cos"], dtype=float)
+    r_sin = params.get("r_sin")
+    if r_sin is not None:
+        payload["r_sin"] = np.asarray(r_sin, dtype=float)
+    z_cos = params.get("z_cos")
+    if z_cos is not None:
+        payload["z_cos"] = np.asarray(z_cos, dtype=float)
     if "nfp" in params:
         payload.setdefault("n_field_periods", int(params["nfp"]))
 
