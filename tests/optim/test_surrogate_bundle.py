@@ -1,6 +1,7 @@
 import time
 
 import numpy as np
+import pytest
 
 from ai_scientist.optim.surrogate import SurrogateBundle
 
@@ -89,6 +90,7 @@ def test_rank_prefers_feasible_in_minimize():
     assert ranked[0].expected_value > ranked[1].expected_value
 
 
+@pytest.mark.slow
 def test_fit_and_predict_timing_budget():
     bundle = SurrogateBundle(timeout_seconds=1.0)
     metrics, targets = _training_history(200)

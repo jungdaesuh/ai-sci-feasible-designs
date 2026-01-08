@@ -34,6 +34,8 @@ from ai_scientist.optim.alm_bridge import (
     step_alm,
 )
 
+pytestmark = pytest.mark.integration
+
 # ... (TestALMBridgeAPIContract and test_alm_bridge_imports remain unchanged)
 
 

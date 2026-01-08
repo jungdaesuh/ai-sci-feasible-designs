@@ -20,5 +20,5 @@ docker run --rm -t \
   bash -euo pipefail -c "\
     python -m pip install --upgrade pip; \
     python -m pip install -e '.[test,optimization,datasets]'; \
-    pytest tests/; \
+    pytest -m 'not integration and not slow' tests/; \
   "

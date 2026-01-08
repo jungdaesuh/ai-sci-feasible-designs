@@ -14,4 +14,5 @@ Use this to reproduce the GitHub Actions test job locally.
 - This uses `python:3.10-bullseye` to match CI’s Python version.
 - The script mirrors the fast CI path (mocked physics backend, no constellaration build).
 - Torch is pinned to the CPU wheel via `constraints/ci.txt` and the PyTorch CPU index.
+- Fast CI skips `integration` and `slow` tests by default.
 - Pip cache is mounted from `~/.cache/pip` to speed up repeat runs.
