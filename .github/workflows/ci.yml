@@ -27,7 +27,7 @@ jobs:
       - name: Install system build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gfortran libopenblas-dev
+          sudo apt-get install -y cmake ninja-build gfortran libopenblas-dev libnetcdf-dev
       - name: Install dependencies
         run: |
           pip install -e ".[test,optimization]"
