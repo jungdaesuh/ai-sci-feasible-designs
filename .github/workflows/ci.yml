@@ -26,6 +26,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ".[test,optimization]"
-          pip install -e "constellaration"
+          pip install "git+https://github.com/proximafusion/constellaration.git"
       - name: Run tests
         run: pytest tests/
