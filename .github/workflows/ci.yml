@@ -24,6 +24,10 @@ jobs:
         with:
           python-version: "3.10"
           cache: "pip"
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gfortran libopenblas-dev
       - name: Install dependencies
         run: |
           pip install -e ".[test,optimization]"
