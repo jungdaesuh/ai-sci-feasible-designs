@@ -248,6 +248,8 @@ class TestCoordinatorSurrogate(unittest.TestCase):
 
         mock_create_alm.return_value = (MagicMock(), MagicMock())
         mock_create_alm_bridge.return_value = mock_create_alm.return_value
+        # Avoid deep ALM execution in this unit test.
+        self.coordinator._run_trajectory_aso = MagicMock(return_value=[])
 
         # Call
         self.coordinator.produce_candidates_aso(
