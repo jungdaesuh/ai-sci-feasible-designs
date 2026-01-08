@@ -13,12 +13,12 @@ docker run --rm -t \
   -v "${ROOT_DIR}:/work" \
   -v "${PIP_CACHE_DIR}:/root/.cache/pip" \
   -w /work \
+  -e AI_SCIENTIST_ALLOW_PHYSICS_MOCKS=1 \
+  -e PIP_CONSTRAINT=/work/constraints/ci.txt \
+  -e PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
   "${DOCKER_IMAGE}" \
   bash -euo pipefail -c "\
-    apt-get update; \
-    apt-get install -y cmake ninja-build gfortran libopenblas-dev libnetcdf-dev git; \
     python -m pip install --upgrade pip; \
-    python -m pip install -e '.[test,optimization]'; \
-    python -m pip install 'git+https://github.com/proximafusion/constellaration.git'; \
+    python -m pip install -e '.[test,optimization,datasets]'; \
     pytest tests/; \
   "

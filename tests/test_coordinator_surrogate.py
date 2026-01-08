@@ -35,6 +35,7 @@ class TestCoordinatorSurrogate(unittest.TestCase):
             "torch.optim": MagicMock(),
             "torch.utils": MagicMock(),
             "torch.utils.data": MagicMock(),
+            "torch.utils.checkpoint": MagicMock(),
         }
 
         # Start patcher
@@ -44,8 +45,15 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         # Import modules under test (now using mocks)
         # We need to reload them to ensure they pick up the mocks
         import ai_scientist.coordinator
+        import ai_scientist.optim.alm_bridge
         import ai_scientist.optim.surrogate
         import importlib
+
+        if "ai_scientist.optim.alm_bridge" in sys.modules:
+            mod = sys.modules["ai_scientist.optim.alm_bridge"]
+            importlib.reload(mod)
+        else:
+            import ai_scientist.optim.alm_bridge
 
         if "ai_scientist.optim.surrogate" in sys.modules:
             mod = sys.modules["ai_scientist.optim.surrogate"]
@@ -103,6 +111,7 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         # dependency order (children first) to avoid dangling references.
         modules_to_clean = [
             "ai_scientist.coordinator",
+            "ai_scientist.optim.alm_bridge",
             "ai_scientist.optim.surrogate",
             "ai_scientist.optim",  # Parent may cache references to surrogate
         ]
@@ -201,9 +210,14 @@ class TestCoordinatorSurrogate(unittest.TestCase):
 
     @patch("ai_scientist.coordinator.TrajectoryState")
     @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.optim.alm_bridge.create_alm_context")
     @patch("ai_scientist.coordinator.step_alm")
     def test_produce_candidates_aso_uses_surrogate(
-        self, mock_step, mock_create_alm, mock_traj_cls
+        self,
+        mock_step,
+        mock_create_alm_bridge,
+        mock_create_alm,
+        mock_traj_cls,
     ):
         # Setup
         n_needed = 1
@@ -233,6 +247,7 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         mock_traj_cls.return_value = mock_traj_instance
 
         mock_create_alm.return_value = (MagicMock(), MagicMock())
+        mock_create_alm_bridge.return_value = mock_create_alm.return_value
 
         # Call
         self.coordinator.produce_candidates_aso(

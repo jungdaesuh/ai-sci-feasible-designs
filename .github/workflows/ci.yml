@@ -18,19 +18,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     needs: lint
+    env:
+      AI_SCIENTIST_ALLOW_PHYSICS_MOCKS: "1"
+      PIP_CONSTRAINT: constraints/ci.txt
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
-      - name: Install system build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gfortran libopenblas-dev libnetcdf-dev
       - name: Install dependencies
         run: |
-          pip install -e ".[test,optimization]"
-          pip install "git+https://github.com/proximafusion/constellaration.git"
+          pip install -e ".[test,optimization,datasets]"
       - name: Run tests
         run: pytest tests/
