@@ -248,8 +248,19 @@ class TestCoordinatorSurrogate(unittest.TestCase):
 
         mock_create_alm.return_value = (MagicMock(), MagicMock())
         mock_create_alm_bridge.return_value = mock_create_alm.return_value
-        # Avoid deep ALM execution in this unit test.
-        self.coordinator._run_trajectory_aso = MagicMock(return_value=[])
+        # Avoid deep ALM execution in this unit test while capturing inputs.
+        captured = {}
+
+        def _capture_traj(*args, **kwargs):
+            if "traj" in kwargs:
+                captured["traj"] = kwargs["traj"]
+            elif args:
+                captured["traj"] = args[0]
+            else:
+                captured["traj"] = None
+            return []
+
+        self.coordinator._run_trajectory_aso = MagicMock(side_effect=_capture_traj)
 
         # Call
         self.coordinator.produce_candidates_aso(
@@ -268,10 +279,9 @@ class TestCoordinatorSurrogate(unittest.TestCase):
 
         # 3. Check best seed selected (id=9)
         # Verify the trajectory passed into the ASO runner uses the top-ranked seed.
-        run_call = self.coordinator._run_trajectory_aso.call_args
-        self.assertIsNotNone(run_call)
-        traj_arg = run_call.kwargs.get("traj", run_call.args[0])
-        self.assertEqual(traj_arg.seed["id"], 9)
+        self.assertIn("traj", captured)
+        self.assertIsNotNone(captured["traj"])
+        self.assertEqual(captured["traj"].seed["id"], 9)
 
 
 if __name__ == "__main__":
