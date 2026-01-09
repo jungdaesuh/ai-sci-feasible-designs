@@ -507,12 +507,21 @@ class WorldModel:
         )
         candidate_id = cursor.lastrowid
         assert candidate_id is not None
+        # H3 FIX: Merge constraint_margins into metrics payload so recent_failures()
+        # can access constraint violation data for the "learning from failures" loop.
+        # Previously only evaluation["metrics"] was stored, but recent_failures()
+        # expects constraint_margins to be inside raw_json.
+        metrics_payload = dict(evaluation.get("metrics", {}))
+        if "constraint_margins" in evaluation:
+            metrics_payload["constraint_margins"] = evaluation["constraint_margins"]
         metrics_id = self.log_metrics(
             candidate_id,
-            evaluation.get("metrics", {}),
+            metrics_payload,
             feasibility=float(evaluation.get("feasibility", 0.0)),
             objective=evaluation.get("objective"),
-            hv=evaluation.get("hv"),
+            hv=evaluation.get(
+                "gradient_proxy", evaluation.get("hv")
+            ),  # H2 FIX: Use gradient_proxy with fallback
             commit=False,
         )
         if commit:
@@ -1078,23 +1087,45 @@ class WorldModel:
         *,
         target: str = "hv",
         problem: str | None = None,
+        experiment_id: int | None = None,
     ) -> list[tuple[Mapping[str, Any], float]]:
-        """Return cached metrics + target values usable by the surrogate ranker."""
+        """Return cached metrics + target values usable by the surrogate ranker.
 
-        allowed_targets = {"hv", "objective", "feasibility"}
-        target_column = target if target in allowed_targets else "hv"
-        rows = self._conn.execute(
-            """
-            SELECT c.problem, c.params_json, m.raw_json, m.hv, m.objective, m.feasibility
+        A7 FIX: Query now applies WHERE filters in SQL to avoid fetching
+        the entire metrics table, preventing OOM for large experiment history.
+        """
+
+        # H2 FIX: Accept "gradient_proxy" as alias for DB column "hv"
+        # The DB column remains "hv" for backward compat with existing data
+        target_column = "hv" if target in {"hv", "gradient_proxy"} else target
+        allowed_columns = {"hv", "objective", "feasibility"}
+        target_column = target_column if target_column in allowed_columns else "hv"
+
+        # A7 FIX: Build query with SQL-side filtering instead of Python-side
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        if problem is not None:
+            where_clauses.append("c.problem = ?")
+            params.append(problem)
+
+        if experiment_id is not None:
+            where_clauses.append("c.experiment_id = ?")
+            params.append(experiment_id)
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        query = f"""
+            SELECT c.problem, c.params_json, c.status, m.raw_json, m.hv, m.objective, m.feasibility,
+                   c.experiment_id
             FROM metrics m
-            JOIN candidates c ON m.candidate_id = c.id
+            JOIN candidates c ON m.candidate_id = c.id{where_sql}
             ORDER BY m.id ASC
             """
-        ).fetchall()
+        rows = self._conn.execute(query, params).fetchall()
+
         history: list[tuple[Mapping[str, Any], float]] = []
         for row in rows:
-            if problem is not None and row["problem"] != problem:
-                continue
             value = row[target_column]
             if value is None:
                 continue
@@ -1105,8 +1136,14 @@ class WorldModel:
                 params_payload = None
             if params_payload is not None:
                 metrics_payload["candidate_params"] = params_payload
+
             # Inject feasibility so runner's restoration logic sees it (P1 fix)
             if row["feasibility"] is not None:
                 metrics_payload["feasibility"] = float(row["feasibility"])
+
+            # A4.3 FIX Helper: Inject stage/status so surrogate knows fidelity
+            if row["status"] is not None:
+                metrics_payload["_stage"] = row["status"]
+
             history.append((metrics_payload, float(value)))
         return history

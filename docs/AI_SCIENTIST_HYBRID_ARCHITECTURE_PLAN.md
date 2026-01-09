@@ -87,7 +87,7 @@ $$ \mathcal{L} = w_p \cdot \text{NeuralNet}(x)_{[\text{MHD}, \text{QI}]} + w_e \
 ### Phase 4: The "Brain" Integration
 *   [x] **Task 4.1:** Update `ai_scientist/optim/differentiable.py`.
     *   Modify `gradient_descent_on_inputs` to use the new Hybrid Loss formula.
-    *   Inject `geometry.elongation(x)` directly into the loss calculation.
+    *   Inject `geometry.elongation_isoperimetric(x)` directly into the loss calculation.
 
 ---
 
@@ -101,7 +101,8 @@ $$ \mathcal{L} = w_p \cdot \text{NeuralNet}(x)_{[\text{MHD}, \text{QI}]} + w_e \
 ---
 
 ## 5. Compatibility Check
-*   **Existing Code:** `ai_scientist/optim/differentiable.py` already uses PyTorch for optimization. This plan simply changes *what* function is being optimized (Surrogate $ightarrow$ Hybrid).
+*   **Existing Code:** `ai_scientist/optim/differentiable.py` already uses PyTorch for optimization. This plan simply changes *what* function is being optimized (Surrogate $
+ightarrow$ Hybrid).
 *   **Dataset:** The 182k dataset (`AI_SCIENTIST_DATASET_INTEGRATION_PLAN.md`) is perfectly suited to train the specialized "Physicist" model.
 
 This plan represents the optimal synthesis of AI capability and Scientific Computing rigor.

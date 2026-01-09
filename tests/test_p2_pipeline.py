@@ -20,11 +20,10 @@ def test_p2_problem_definition():
 
 
 @patch("ai_scientist.experiment_runner.CycleExecutor")
-@patch("ai_scientist.experiment_runner.Coordinator")
 @patch("ai_scientist.experiment_runner.memory.WorldModel")
 @patch("ai_scientist.experiment_runner.rag.ensure_index")
 def test_p2_pipeline_execution(
-    mock_ensure_index, mock_world_model, mock_coordinator, mock_cycle_executor
+    mock_ensure_index, mock_world_model, mock_cycle_executor, tmp_path
 ):
     """Test that running with --problem p2 initializes the correct components."""
 
@@ -51,6 +50,9 @@ def test_p2_pipeline_execution(
     cfg.problem = "p2"
     cfg.cycles = 1
     cfg.random_seed = 42
+    # Prevent MagicMock from being coerced into a filesystem path like
+    # "MagicMock/mock.reporting_dir/<id>" when the runner writes artifacts.
+    cfg.reporting_dir = tmp_path / "reports"
 
     # Real dataclasses for fields that get serialized via asdict
     # We need to provide required fields for these dataclasses
@@ -141,12 +143,12 @@ def test_p2_pipeline_execution(
     # Run experiment
     run_experiment(cfg, runtime=runtime)
 
-    # Verify CycleExecutor was initialized (it handles the problem logic internally via config/coordinator)
+    # Verify CycleExecutor was initialized (it handles the problem logic internally via config)
     # The key check is that the runner didn't crash and passed the problem override to the experiment config
-    # We can check if the Coordinator was initialized with the updated config
-
-    args, _ = mock_coordinator.call_args
-    passed_cfg = args[0]
+    # Since Coordinator is no longer used, we verify via CycleExecutor
+    mock_cycle_executor.assert_called_once()
+    _, kwargs = mock_cycle_executor.call_args
+    passed_cfg = kwargs.get("config")
     assert passed_cfg.problem == "p2"
 
     # Verify start_experiment was called

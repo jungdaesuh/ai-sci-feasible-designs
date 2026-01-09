@@ -1,8 +1,9 @@
 # configs/experiment.p3.prod.yaml
-# Production-grade preset for P3 problem, emphasizing stability and physics-aligned exploration.
+# Production-grade preset for P3 problem with full autonomous capabilities.
+# Enables ASO (LLM supervision), Generative (Diffusion), and all optimization components.
 # Based on docs/AI_SCIENTIST_RESEARCH_PRODUCTION_FIX.md and docs/AI_SCIENTIST_UNIFIED_ROADMAP.md.
 
-problem: p3 # Explicitly define the problem key as per typical config usage.
+problem: p3
 
 boundary_template:
   n_field_periods: 3
@@ -27,7 +28,26 @@ budgets:
   max_high_fidelity_evals_per_cycle: 4
 
 adaptive_budgets:
-  enabled: true # From section 4 of RPF, 'adaptive_budgets.enabled' by default in prod preset
+  enabled: true
+
+# ASO: LLM-supervised optimization with heuristic fallback
+aso:
+  enabled: true
+  supervision_mode: event_triggered
+  use_heuristic_fallback: true
+  stagnation_violation_threshold: 0.05
+  max_penalty_boost: 4.0
+
+# Generative: StellarForge Diffusion for candidate generation
+generative:
+  enabled: true
+  backend: diffusion
+  checkpoint_path: checkpoints/diffusion_v2.pt
+  device: cpu
+  hidden_dim: 2048
+  n_layers: 4
+  pca_components: 50
+  diffusion_timesteps: 200
 
 reporting:
   prometheus_export_enabled: false

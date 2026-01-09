@@ -2,37 +2,59 @@
 
 # ruff: noqa: E402
 import sys
-from unittest.mock import MagicMock
-
-# Mock dependencies to avoid environment issues during unit testing
-sys.modules["vmecpp"] = MagicMock()
-sys.modules["vmecpp.cpp"] = MagicMock()
-sys.modules["vmecpp.cpp._vmecpp"] = MagicMock()
-
-# Mock constellaration as a package
-constellaration = MagicMock()
-sys.modules["constellaration"] = constellaration
-sys.modules["constellaration.forward_model"] = MagicMock()
-sys.modules["constellaration.boozer"] = MagicMock()
-sys.modules["constellaration.mhd"] = MagicMock()
-sys.modules["constellaration.geometry"] = MagicMock()
-sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
-sys.modules["constellaration.optimization"] = MagicMock()
-sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
-sys.modules["constellaration.optimization.settings"] = MagicMock()
-sys.modules["constellaration.utils"] = MagicMock()
-sys.modules["constellaration.utils.pytree"] = MagicMock()
-sys.modules["constellaration.problems"] = MagicMock()
-sys.modules["constellaration.initial_guess"] = MagicMock()
-
+from unittest.mock import MagicMock, patch
+import pytest
 import numpy as np
 
-from ai_scientist.problems import P1Problem, P2Problem, P3Problem, Problem, get_problem
+
+@pytest.fixture(autouse=True)
+def mock_dependencies():
+    """Mock dependencies for all tests in this module."""
+    mock_vmecpp = MagicMock()
+    mock_constellaration = MagicMock()
+
+    # Setup mock modules dictionary
+    mock_modules = {
+        "vmecpp": mock_vmecpp,
+        "vmecpp.cpp": MagicMock(),
+        "vmecpp.cpp._vmecpp": MagicMock(),
+        "constellaration": mock_constellaration,
+        "constellaration.forward_model": MagicMock(),
+        "constellaration.boozer": MagicMock(),
+        "constellaration.mhd": MagicMock(),
+        "constellaration.geometry": MagicMock(),
+        "constellaration.geometry.surface_rz_fourier": MagicMock(),
+        "constellaration.optimization": MagicMock(),
+        "constellaration.optimization.augmented_lagrangian": MagicMock(),
+        "constellaration.optimization.settings": MagicMock(),
+        "constellaration.utils": MagicMock(),
+        "constellaration.utils.pytree": MagicMock(),
+        "constellaration.problems": MagicMock(),
+        "constellaration.initial_guess": MagicMock(),
+    }
+
+    # Apply mocks using patch.dict
+    with patch.dict(sys.modules, mock_modules):
+        # Force re-import of ai_scientist.problems to pick up mocks
+        import importlib
+
+        if "ai_scientist.problems" in sys.modules:
+            importlib.reload(sys.modules["ai_scientist.problems"])
+        else:
+            importlib.import_module("ai_scientist.problems")
+
+        yield
+
+        # Cleanup handled by patch.dict for mocks, but we should remove the reloaded module
+        # so subsequent tests don't use this mocked version
+        if "ai_scientist.problems" in sys.modules:
+            del sys.modules["ai_scientist.problems"]
 
 
 class TestProblemABC:
     def test_template_methods(self):
         """Test is_feasible, compute_feasibility, max_violation template methods."""
+        from ai_scientist.problems import Problem
 
         class MockProblem(Problem):
             @property
@@ -72,6 +94,8 @@ class TestProblemABC:
 
 class TestP1Problem:
     def test_constraints(self):
+        from ai_scientist.problems import P1Problem
+
         p = P1Problem()
         assert p.name == "p1"
         assert len(p.constraint_names) == 3
@@ -102,6 +126,8 @@ class TestP1Problem:
 
 class TestP2Problem:
     def test_constraints(self):
+        from ai_scientist.problems import P2Problem
+
         p = P2Problem()
         assert p.name == "p2"
 
@@ -130,6 +156,8 @@ class TestP2Problem:
 
 class TestP3Problem:
     def test_constraints(self):
+        from ai_scientist.problems import P3Problem
+
         p = P3Problem()
         assert p.name == "p3"
 
@@ -140,6 +168,7 @@ class TestP3Problem:
         # flux_compression_in_regions_of_bad_curvature <= 0.9
         # vacuum_well >= 0.0
         metrics = {
+            "aspect_ratio": 8.0,  # P3 objective: minimize aspect_ratio
             "edge_rotational_transform_over_n_field_periods": 0.3,
             "qi": 1e-4,
             "edge_magnetic_mirror_ratio": 0.2,
@@ -148,7 +177,9 @@ class TestP3Problem:
             "minimum_normalized_magnetic_gradient_scale_length": 2.0,
         }
         assert p.is_feasible(metrics)
-        assert p.get_objective(metrics) == -2.0
+        assert p.get_objective(metrics) == pytest.approx(
+            -0.25
+        )  # Scalarized: -L_∇B / AR = -2.0 / 8.0
 
         # Infeasible case (vacuum well)
         metrics_bad = metrics.copy()
@@ -157,6 +188,8 @@ class TestP3Problem:
 
 
 def test_get_problem():
+    from ai_scientist.problems import get_problem, P1Problem, P2Problem, P3Problem
+
     assert isinstance(get_problem("p1"), P1Problem)
     assert isinstance(get_problem("P1"), P1Problem)
     assert isinstance(get_problem("p2"), P2Problem)

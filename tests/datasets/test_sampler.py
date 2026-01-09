@@ -43,18 +43,18 @@ def test_load_dataset_p1_filter(mock_load_dataset):
 
     # Valid P1 example
     valid_ex = {
-        "aspect_ratio": 4.05,
-        "average_triangularity": -0.65,
-        "edge_rotational_transform_over_n_field_periods": 0.35,
+        "metrics.aspect_ratio": 4.05,
+        "metrics.average_triangularity": -0.65,
+        "metrics.edge_rotational_transform_over_n_field_periods": 0.35,
     }
     assert filter_func(valid_ex) is True
 
     # Invalid aspect ratio
-    invalid_ar = {"aspect_ratio": 5.0, "average_triangularity": -0.65}
+    invalid_ar = {"metrics.aspect_ratio": 5.0, "metrics.average_triangularity": -0.65}
     assert filter_func(invalid_ar) is False
 
     # Invalid triangularity
-    invalid_tri = {"aspect_ratio": 4.05, "average_triangularity": -0.1}
+    invalid_tri = {"metrics.aspect_ratio": 4.05, "metrics.average_triangularity": -0.1}
     assert filter_func(invalid_tri) is False
 
 
@@ -79,39 +79,39 @@ def test_load_dataset_p2_filter(mock_load_dataset):
 
     # Valid P2 example - all constraints satisfied
     valid_ex = {
-        "aspect_ratio": 8.0,
-        "edge_rotational_transform_over_n_field_periods": 0.3,
-        "max_elongation": 4.0,
-        "edge_magnetic_mirror_ratio": 0.15,
+        "metrics.aspect_ratio": 8.0,
+        "metrics.edge_rotational_transform_over_n_field_periods": 0.3,
+        "metrics.max_elongation": 4.0,
+        "metrics.edge_magnetic_mirror_ratio": 0.15,
     }
     assert filter_func(valid_ex) is True
 
     # Invalid aspect ratio (too high)
     invalid_ar = {
-        "aspect_ratio": 12.0,
-        "edge_rotational_transform_over_n_field_periods": 0.3,
-        "max_elongation": 4.0,
+        "metrics.aspect_ratio": 12.0,
+        "metrics.edge_rotational_transform_over_n_field_periods": 0.3,
+        "metrics.max_elongation": 4.0,
     }
     assert filter_func(invalid_ar) is False
 
     # Invalid edge rotational transform (too low)
     invalid_iota = {
-        "aspect_ratio": 8.0,
-        "edge_rotational_transform_over_n_field_periods": 0.2,
-        "max_elongation": 4.0,
+        "metrics.aspect_ratio": 8.0,
+        "metrics.edge_rotational_transform_over_n_field_periods": 0.2,
+        "metrics.max_elongation": 4.0,
     }
     assert filter_func(invalid_iota) is False
 
     # Invalid max elongation (too high)
     invalid_elong = {
-        "aspect_ratio": 8.0,
-        "edge_rotational_transform_over_n_field_periods": 0.3,
-        "max_elongation": 6.0,
+        "metrics.aspect_ratio": 8.0,
+        "metrics.edge_rotational_transform_over_n_field_periods": 0.3,
+        "metrics.max_elongation": 6.0,
     }
     assert filter_func(invalid_elong) is False
 
     # Missing fields should be kept (conservative)
-    incomplete_ex = {"aspect_ratio": 8.0}
+    incomplete_ex = {"metrics.aspect_ratio": 8.0}
     assert filter_func(incomplete_ex) is True
 
 
@@ -132,11 +132,11 @@ def test_load_dataset_p1_missing_fields(mock_load_dataset):
     filter_func = mock_ds.filter.call_args[0][0]
 
     # Missing aspect_ratio should be rejected
-    missing_ar = {"average_triangularity": -0.65}
+    missing_ar = {"metrics.average_triangularity": -0.65}
     assert filter_func(missing_ar) is False
 
     # Missing triangularity should be rejected
-    missing_tri = {"aspect_ratio": 4.05}
+    missing_tri = {"metrics.aspect_ratio": 4.05}
     assert filter_func(missing_tri) is False
 
     # Empty dict should be rejected

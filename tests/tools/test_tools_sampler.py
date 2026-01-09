@@ -31,7 +31,7 @@ def test_normalized_constraint_distance_sampler_improves_feasible_rate() -> None
             if abs(np.asarray(sample["offset"], dtype=float).item()) <= 0.25
         ) / len(samples)
 
-    sampler_rate = feasible_rate(proposals)
+    sampler_rate = feasible_rate(proposals)  # pyright: ignore[reportArgumentType]
     uniform_rate = feasible_rate(uniform_proposals)
 
     assert sampler_rate > uniform_rate + 0.15

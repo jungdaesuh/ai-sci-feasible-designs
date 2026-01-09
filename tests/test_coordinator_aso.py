@@ -1,46 +1,49 @@
 # ruff: noqa: E402
-import importlib
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Mock dependencies to avoid environment issues
-sys.modules["vmecpp"] = MagicMock()
-sys.modules["vmecpp.cpp"] = MagicMock()
-sys.modules["vmecpp.cpp._vmecpp"] = MagicMock()
-
-constellaration = MagicMock()
-sys.modules["constellaration"] = constellaration
-sys.modules["constellaration.forward_model"] = MagicMock()
-sys.modules["constellaration.boozer"] = MagicMock()
-sys.modules["constellaration.mhd"] = MagicMock()
-sys.modules["constellaration.geometry"] = MagicMock()
-sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
-sys.modules["constellaration.optimization"] = MagicMock()
-sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
-sys.modules[
-    "constellaration.optimization.augmented_lagrangian"
-].AugmentedLagrangianState = MagicMock
-sys.modules["constellaration.optimization.settings"] = MagicMock()
-sys.modules["constellaration.utils"] = MagicMock()
-sys.modules["constellaration.utils.pytree"] = MagicMock()
-sys.modules["constellaration.problems"] = MagicMock()
-sys.modules["constellaration.initial_guess"] = MagicMock()
-
 import jax.numpy as jnp
 import numpy as np
 
-# Reload coordinator to ensure it picks up the mocked dependencies
-if "ai_scientist.coordinator" in sys.modules:
-    import ai_scientist.coordinator
+# Removed top-level imports to prevent stale references
+# from ai_scientist.config import ALMConfig, ASOConfig, ExperimentConfig
+# from ai_scientist.coordinator import Coordinator, TrajectoryState
+# from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+# from ai_scientist.planner import DirectiveAction, DirectiveSource, OptimizationDirective
 
-    importlib.reload(ai_scientist.coordinator)
 
-from ai_scientist.config import ALMConfig, ASOConfig, ExperimentConfig
-from ai_scientist.coordinator import Coordinator, TrajectoryState
-from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
-from ai_scientist.planner import DirectiveAction, DirectiveSource, OptimizationDirective
+# Configure mocks to be JSON serializable (behave like Pydantic models)
+class MockPydanticModel(MagicMock):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._mock_data = kwargs
+
+    def model_dump(self, *args, **kwargs):
+        return self._mock_data
+
+    def dict(self, *args, **kwargs):
+        return self._mock_data
+
+    def model_copy(self, *args, **kwargs):
+        return self
+
+    def __iter__(self):
+        # Prevent Pydantic from treating this as an iterator
+        raise TypeError("MockPydanticModel is not iterable")
+
+    def __repr__(self):
+        # Stable repr for caching
+        return f"MockPydanticModel({self._mock_data})"
+
+    def __getattr__(self, name):
+        try:
+            data = object.__getattribute__(self, "_mock_data")
+            if name in data:
+                return data[name]
+        except AttributeError:
+            pass
+        return super().__getattr__(name)
 
 
 # Helper to create a mock ALM state
@@ -55,35 +58,98 @@ def create_mock_alm_state(**kwargs):
     }
     defaults.update(kwargs)
 
-    # Create a MagicMock and set attributes explicitly
-    state = MagicMock()
-    for k, v in defaults.items():
-        setattr(state, k, v)
+    # Create a MockPydanticModel instead of raw MagicMock
+    state = MockPydanticModel(**defaults)
 
-    # Mock model_copy method to simulate Pydantic V2 behavior
+    # Mock model_copy method explicitly if needed, but MockPydanticModel handles it
     def mock_copy(update=None):
         new_kwargs = defaults.copy()
         if update:
             new_kwargs.update(update)
         return create_mock_alm_state(**new_kwargs)
 
-    state.model_copy.side_effect = mock_copy
-    state.copy.side_effect = mock_copy  # Mock both just in case
+    state.model_copy = MagicMock(side_effect=mock_copy)
+    state.copy = MagicMock(side_effect=mock_copy)
     return state
 
 
 class TestCoordinatorASO:
+    @pytest.fixture(autouse=True)
+    def mock_dependencies(self):
+        """Mock external dependencies (vmecpp, constellaration) for this test class."""
+        mock_vmecpp = MagicMock()
+        mock_constellaration = MagicMock()
+
+        # Configure pytree mock to return proper 2-tuple for mask_and_ravel
+        mock_pytree = MagicMock()
+        mock_pytree.mask_and_ravel.return_value = (
+            MagicMock(),  # flat array (initial_guess)
+            lambda x: MagicMock(),  # unravel function
+        )
+
+        # Configure ALM module with the State class as MockPydanticModel
+        # Pydantic validation requires the class to be consistent with instance
+        mock_alm_module = MagicMock()
+        mock_alm_module.AugmentedLagrangianState = MockPydanticModel
+
+        mock_modules = {
+            "vmecpp": mock_vmecpp,
+            "vmecpp.cpp": MagicMock(),
+            "vmecpp.cpp._vmecpp": MagicMock(),
+            "constellaration": mock_constellaration,
+            "constellaration.forward_model": MagicMock(),
+            "constellaration.boozer": MagicMock(),
+            "constellaration.mhd": MagicMock(),
+            "constellaration.geometry": MagicMock(),
+            "constellaration.geometry.surface_rz_fourier": MagicMock(),
+            "constellaration.optimization": MagicMock(),
+            "constellaration.optimization.augmented_lagrangian": mock_alm_module,
+            "constellaration.optimization.settings": MagicMock(),
+            "constellaration.utils": MagicMock(),
+            "constellaration.utils.pytree": mock_pytree,
+            "constellaration.problems": MagicMock(),
+            "constellaration.initial_guess": MagicMock(),
+        }
+
+        # Use patch.dict to safely mock sys.modules for the duration of the test
+        with patch.dict(sys.modules, mock_modules):
+            # We must reload/re-import coordinator to pick up the mocks
+            # If it was already loaded, remove it first
+            if "ai_scientist.coordinator" in sys.modules:
+                del sys.modules["ai_scientist.coordinator"]
+            if "ai_scientist.optim.alm_bridge" in sys.modules:
+                del sys.modules["ai_scientist.optim.alm_bridge"]
+
+            yield
+
+            # Cleanup: ensuring polluted modules are removed so they don't affect other tests
+            modules_to_clean = [
+                "ai_scientist.coordinator",
+                "ai_scientist.optim.alm_bridge",
+            ]
+            for mod in modules_to_clean:
+                if mod in sys.modules:
+                    del sys.modules[mod]
+
     @pytest.fixture
     def mock_cfg(self):
+        from ai_scientist.config import ALMConfig, ASOConfig, ExperimentConfig
+
         cfg = MagicMock(spec=ExperimentConfig)
         cfg.aso = ASOConfig(enabled=True)
         cfg.alm = ALMConfig()
         cfg.problem = "p3"
         cfg.reporting_dir = "reports"
+        # Add proposal_mix for produce_candidates_aso
+        cfg.proposal_mix = MagicMock()
+        cfg.proposal_mix.surrogate_pool_multiplier = 2.0
         return cfg
 
     @pytest.fixture
     def coordinator(self, mock_cfg):
+        # Must import inside the test/fixture so that it happens INSIDE the patch.dict context
+        from ai_scientist.coordinator import Coordinator
+
         with (
             patch("ai_scientist.coordinator.OptimizationWorker"),
             patch("ai_scientist.coordinator.ExplorationWorker"),
@@ -98,6 +164,10 @@ class TestCoordinatorASO:
 
     def test_generate_diagnostics_extracts_all_fields(self, coordinator):
         """Task 5.7: Verify _generate_diagnostics extracts all ALM fields correctly."""
+        # Import inside test to ensure we use the reloaded classes that match the mocks
+        from ai_scientist.coordinator import TrajectoryState
+        from ai_scientist.optim.alm_bridge import ALMContext
+
         # Previous state (for delta calculation)
         prev_state = create_mock_alm_state(
             objective=jnp.array(1.1),
@@ -113,9 +183,14 @@ class TestCoordinatorASO:
             bounds=jnp.ones(10) * 0.5,
         )
 
-        # Setup trajectory with history
+        # Setup trajectory with history and alm_context (required by _generate_diagnostics)
+        mock_alm_context = MagicMock(spec=ALMContext)
         traj = TrajectoryState(
-            id=0, seed={}, history=[prev_state, current_state], steps=1
+            id=0,
+            seed={},
+            history=[prev_state, current_state],
+            steps=1,
+            alm_context=mock_alm_context,
         )
 
         # Run generation
@@ -142,6 +217,13 @@ class TestCoordinatorASO:
         self, mock_state_to_params, mock_create_context, mock_step_alm, coordinator
     ):
         """Task 5.8: Integration test of 3-step ASO loop with mock ALM."""
+        from ai_scientist.config import ASOConfig
+        from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+        from ai_scientist.planner import (
+            DirectiveAction,
+            DirectiveSource,
+            OptimizationDirective,
+        )
 
         # Mock Config
         coordinator.cfg.aso = ASOConfig(
@@ -208,6 +290,12 @@ class TestCoordinatorASO:
         )
 
         # Verifications
+        # P3 ASO requires an aspect-ratio upper bound for constellaration's ALM objective_constraints.
+        assert mock_create_context.call_count == 1
+        assert (
+            mock_create_context.call_args.kwargs.get("aspect_ratio_upper_bound")
+            == coordinator.cfg.alm.aspect_ratio_upper_bound
+        )
         assert mock_step_alm.call_count == 3
         assert coordinator.planner.supervise.call_count == 3
         assert len(candidates) == 1  # One final candidate

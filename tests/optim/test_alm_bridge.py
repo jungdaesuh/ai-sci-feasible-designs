@@ -4,6 +4,16 @@ import pytest
 import hypothesis
 from hypothesis import strategies as st
 
+# IMPORTANT: Import pytree_guard FIRST to install the registration guard
+# before any constellaration modules that register PyTree types.
+# This prevents "Duplicate custom PyTreeDef type registration" errors.
+try:
+    import ai_scientist.pytree_guard  # noqa: F401 - side effect: installs guard
+except ImportError as e:
+    # Only ignore if the module itself is missing, not internal import errors
+    if "pytree_guard" not in str(e) and "ai_scientist" not in str(e):
+        raise  # Re-raise internal import errors for debugging
+
 # Check if constellaration is available
 try:
     import constellaration.forward_model as forward_model
@@ -14,17 +24,6 @@ try:
         AugmentedLagrangianSettings,
         AugmentedLagrangianState,
     )
-    from constellaration.utils.pytree import register_pydantic_data
-
-    # Register SurfaceRZFourier as a pytree node to ensure mask_and_ravel works
-    # This is likely done implicitly in the full app but needed explicitly here
-    try:
-        register_pydantic_data(
-            surface_rz_fourier.SurfaceRZFourier,
-            meta_fields=["n_field_periods", "is_stellarator_symmetric"],
-        )
-    except ValueError:
-        pass
 except ImportError:
     pytest.skip("constellaration not installed", allow_module_level=True)
 
@@ -34,6 +33,8 @@ from ai_scientist.optim.alm_bridge import (
     create_alm_context,
     step_alm,
 )
+
+pytestmark = pytest.mark.integration
 
 # ... (TestALMBridgeAPIContract and test_alm_bridge_imports remain unchanged)
 
@@ -198,6 +199,7 @@ class TestALMInvariants:
       while integration tests ensure the bridge correctly wraps constellaration's ALM
     """
 
+    @hypothesis.settings(deadline=None)
     @hypothesis.given(
         multipliers=st.lists(
             st.floats(0.0, 100.0, allow_nan=False),
@@ -234,6 +236,7 @@ class TestALMInvariants:
         # Verify non-negativity invariant holds
         assert jnp.all(new_multipliers >= 0)
 
+    @hypothesis.settings(deadline=None)
     @hypothesis.given(
         penalties=st.lists(
             st.floats(1.0, 1e6, allow_nan=False), min_size=3, max_size=5

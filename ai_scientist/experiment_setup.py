@@ -108,6 +108,7 @@ class RunnerCLIConfig:
     log_cache_stats: bool
     run_preset: str | None
     planner: str
+    disable_rl: bool = False
     resume_from: Path | None = None
     aso: bool = False
     preset: str | None = None
@@ -216,6 +217,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable Agent-Supervised Optimization with real ALM state",
     )
+    parser.add_argument(
+        "--no-rl",
+        action="store_true",
+        help="Disable RL refinement (PPO-CMA) in the Phase 5 Coordinator pipeline.",
+    )
     return parser
 
 
@@ -239,6 +245,7 @@ def parse_args(args: Sequence[str] | None = None) -> RunnerCLIConfig:
         log_cache_stats=bool(namespace.log_cache_stats),
         run_preset=namespace.run_preset,
         planner=namespace.planner,
+        disable_rl=bool(namespace.no_rl),
         resume_from=namespace.resume_from,
         aso=bool(namespace.aso),
         preset=namespace.preset,

@@ -11,24 +11,24 @@
 # - Larger initial bounds to encourage broader exploration of the geometry space.
 
 problem: p1
-cycles: 20  # P1 is fast, so we run more cycles to explore diverse geometries
+cycles: 20 # P1 is fast, so we run more cycles to explore diverse geometries
 random_seed: 1001
 experiment_tag: "aso_p1_prod"
 
 boundary_template:
-  n_poloidal_modes: 6  # Increased resolution for NAE stability
+  n_poloidal_modes: 6 # Increased resolution for NAE stability
   n_toroidal_modes: 6
-  n_field_periods: 1   # Simplified to 1 to avoid NAE generation errors
+  n_field_periods: 1 # Simplified to 1 to avoid NAE generation errors
   base_major_radius: 1.0
   base_minor_radius: 0.2
   perturbation_scale: 0.05 # Reduced perturbation for stability
 
 budgets:
-  screen_evals_per_cycle: 200   # High throughput for geometry
+  screen_evals_per_cycle: 200 # High throughput for geometry
   promote_top_k: 20
   max_high_fidelity_evals_per_cycle: 200
-  wall_clock_minutes: 30        # Short cycles
-  n_workers: 8                  # Parallelize geometry checks aggressively
+  wall_clock_minutes: 30 # Short cycles
+  n_workers: 8 # Parallelize geometry checks aggressively
   pool_type: process
 
 adaptive_budgets:
@@ -39,7 +39,7 @@ fidelity_ladder:
   promote: p1
 
 stage_gates:
-  s1_to_s2_feasibility_margin: 0.001       # Stricter for P1
+  s1_to_s2_feasibility_margin: 0.001 # Stricter for P1
   s1_to_s2_objective_improvement: 0.01
   s1_to_s2_lookback_cycles: 5
   s2_to_s3_hv_delta: 0.005
@@ -50,11 +50,11 @@ governance:
   hv_lookback: 5
 
 proposal_mix:
-  constraint_ratio: 0.5      # Balance exploration more for P1
+  constraint_ratio: 0.5 # Balance exploration more for P1
   exploration_ratio: 0.5
-  jitter_scale: 0.05         # Aggressive jitter
+  jitter_scale: 0.05 # Aggressive jitter
   surrogate_pool_multiplier: 4.0
-  sampler_type: rotating_ellipse    # Use simpler sampler to ensure valid seeds
+  sampler_type: rotating_ellipse # Use simpler sampler to ensure valid seeds
 
 surrogate:
   backend: neural_operator
@@ -66,10 +66,10 @@ surrogate:
 
 # ALM Configuration for Geometry
 alm:
-  maxit: 40                  # More iterations to refine geometry precisely
+  maxit: 40 # More iterations to refine geometry precisely
   penalty_parameters_initial: 10.0 # Start stricter
-  bounds_initial: 0.5        # Smaller trust region for precision
-  oracle_budget_initial: 50  # Faster inner loops
+  bounds_initial: 0.5 # Smaller trust region for precision
+  oracle_budget_initial: 50 # Faster inner loops
   oracle_budget_increment: 10
   oracle_budget_max: 100
   oracle_num_workers: 8
@@ -80,10 +80,22 @@ aso:
   supervision_mode: event_triggered
   supervision_interval: 10
   use_heuristic_fallback: true
-  steps_per_supervision: 2   # Check less frequently as P1 is stable
+  steps_per_supervision: 2 # Check less frequently as P1 is stable
   stagnation_violation_threshold: 0.01 # Stricter stagnation detection
-  max_penalty_boost: 10.0    # Aggressive penalty boosting for geometry constraints
+  max_penalty_boost: 10.0 # Aggressive penalty boosting for geometry constraints
   feasibility_threshold: 1e-4 # High precision required
+
+# Generative Model (StellarForge Diffusion)
+generative:
+  enabled: true
+  backend: diffusion
+  checkpoint_path: checkpoints/diffusion_v2.pt
+  device: cpu # Set to cuda/mps for GPU acceleration
+  hidden_dim: 2048
+  n_layers: 4
+  pca_components: 50
+  diffusion_timesteps: 200
+  batch_size: 4096
 
 reporting:
   prometheus_export_enabled: false

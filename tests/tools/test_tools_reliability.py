@@ -37,11 +37,11 @@ def test_safe_evaluate_respects_maximize_penalty() -> None:
 def test_structured_flatten_keeps_rcos_index_stable() -> None:
     schema = tools.FlattenSchema(mpol=3, ntor=2, schema_version=1)
     params_small = base_params()
-    params_small["r_cos"][1][2] = 0.77
+    params_small["r_cos"][1][2] = 0.77  # pyright: ignore[reportIndexIssue]
 
     params_large = base_params()
     params_large["r_cos"].append([0.0, 0.0, 0.0, 0.0, 0.0])
-    params_large["r_cos"][1][2] = 0.77
+    params_large["r_cos"][1][2] = 0.77  # pyright: ignore[reportIndexIssue]
 
     vector_small, _ = tools.structured_flatten(params_small, schema=schema)
     vector_large, _ = tools.structured_flatten(params_large, schema=schema)

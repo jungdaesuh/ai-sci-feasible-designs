@@ -17,7 +17,7 @@ experiment_tag: "aso_p2_prod"
 boundary_template:
   n_poloidal_modes: 4
   n_toroidal_modes: 4
-  n_field_periods: 4    # P2 often targets 4-5 field periods
+  n_field_periods: 4 # P2 often targets 4-5 field periods
   base_major_radius: 1.0
   base_minor_radius: 0.2
   perturbation_scale: 0.05
@@ -82,6 +82,18 @@ aso:
   stagnation_violation_threshold: 0.05
   max_penalty_boost: 5.0
   feasibility_threshold: 1e-3
+
+# Generative Model (StellarForge Diffusion)
+generative:
+  enabled: true
+  backend: diffusion
+  checkpoint_path: checkpoints/diffusion_v2.pt
+  device: cpu # Set to cuda/mps for GPU acceleration
+  hidden_dim: 2048
+  n_layers: 4
+  pca_components: 50
+  diffusion_timesteps: 200
+  batch_size: 4096
 
 reporting:
   prometheus_export_enabled: false

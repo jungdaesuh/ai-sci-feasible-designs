@@ -105,11 +105,230 @@ def test_model_forward_shape():
     # Set nfp (last column) to valid positive integers
     x[:, -1] = torch.randint(1, 5, (batch_size,)).float()
 
-    obj, mhd, qi = model(x)
+    # Issue #1 FIX: Model now returns 6 outputs (obj, mhd, qi, iota, mirror_ratio, flux_compression)
+    obj, mhd, qi, iota, mirror, flux = model(x)
 
     assert obj.shape == (batch_size,)
     assert mhd.shape == (batch_size,)
     assert qi.shape == (batch_size,)
+    assert iota.shape == (batch_size,)
+    assert mirror.shape == (batch_size,)
+    assert flux.shape == (batch_size,)
+
+
+def test_load_checkpoint_full_object_restores_normalization_stats(tmp_path):
+    """Full-object checkpoints must restore normalization stats for meaningful inference.
+
+    `scripts/train_offline.py` saves the entire NeuralOperatorSurrogate via torch.save().
+    load_checkpoint() should restore the normalization tensors (_y_* stats) so that
+    predict_torch() returns values in the original physical units (not z-scored space).
+    """
+    surrogate = NeuralOperatorSurrogate(
+        min_samples=4,
+        epochs=1,
+        batch_size=2,
+        learning_rate=0.01,
+        n_ensembles=1,
+        device="cpu",
+    )
+    metrics, targets = _training_history(8)
+    surrogate.fit(metrics, targets, minimize_objective=False, cycle=1)
+
+    checkpoint_path = tmp_path / "surrogate_full_object.pt"
+    torch.save(surrogate, checkpoint_path)
+
+    loaded = NeuralOperatorSurrogate(
+        min_samples=2, epochs=1, n_ensembles=1, device="cpu"
+    )
+    loaded.load_checkpoint(checkpoint_path)
+
+    stats_names = (
+        "_y_obj_mean",
+        "_y_obj_std",
+        "_y_mhd_mean",
+        "_y_mhd_std",
+        "_y_qi_log_mean",
+        "_y_qi_log_std",
+        "_y_iota_mean",
+        "_y_iota_std",
+        "_y_mirror_ratio_mean",
+        "_y_mirror_ratio_std",
+        "_y_flux_compression_mean",
+        "_y_flux_compression_std",
+    )
+
+    for name in stats_names:
+        assert hasattr(loaded, name), f"Missing normalization stat after load: {name}"
+        assert hasattr(surrogate, name), f"Test setup missing expected stat: {name}"
+        loaded_val = getattr(loaded, name)
+        orig_val = getattr(surrogate, name)
+        assert isinstance(loaded_val, torch.Tensor)
+        assert isinstance(orig_val, torch.Tensor)
+        assert torch.allclose(loaded_val.cpu(), orig_val.cpu())
+        assert loaded_val.device == torch.device(loaded._device)
+
+    assert loaded._trained
+    assert len(loaded._models) == len(surrogate._models)
+    assert all(not model.training for model in loaded._models)
+
+
+class TestMultiConstraintFeasibility:
+    """Tests for B7 fix: multi-constraint feasibility check."""
+
+    def test_soft_feasibility_all_satisfied(self):
+        """Test feasibility when all constraints are satisfied."""
+        surrogate = NeuralOperatorSurrogate(min_samples=4, epochs=2)
+        metrics, targets = _training_history(8)
+        surrogate.fit(metrics, targets, minimize_objective=False)
+
+        # Feasible values
+        prob = surrogate._compute_soft_feasibility(
+            mhd_val=0.05,  # vacuum_well >= 0
+            qi_val=1e-5,  # log10(1e-5) = -5 < -3.5 (P3 threshold)
+            elongation_val=3.0,  # < 5.0 (P2 threshold)
+            problem="p3",
+        )
+
+        # Should be high probability
+        assert prob > 0.5, f"Expected prob > 0.5, got {prob}"
+
+    def test_soft_feasibility_vacuum_well_violated(self):
+        """Test feasibility when vacuum_well is violated."""
+        surrogate = NeuralOperatorSurrogate(min_samples=4, epochs=2)
+        metrics, targets = _training_history(8)
+        surrogate.fit(metrics, targets, minimize_objective=False)
+
+        # Negative vacuum_well (MHD unstable)
+        prob = surrogate._compute_soft_feasibility(
+            mhd_val=-0.5,  # vacuum_well < 0 (violated)
+            qi_val=1e-5,
+            elongation_val=3.0,
+            problem="p3",
+        )
+
+        # Should be lower probability due to violation
+        prob_satisfied = surrogate._compute_soft_feasibility(
+            mhd_val=0.05,
+            qi_val=1e-5,
+            elongation_val=3.0,
+            problem="p3",
+        )
+        assert prob < prob_satisfied, "Violated should have lower prob"
+
+    def test_soft_feasibility_qi_violated(self):
+        """Test feasibility when QI residual is violated."""
+        surrogate = NeuralOperatorSurrogate(min_samples=4, epochs=2)
+        metrics, targets = _training_history(8)
+        surrogate.fit(metrics, targets, minimize_objective=False)
+
+        # High QI residual (violated for P3: threshold is log10(qi) <= -3.5)
+        prob_bad_qi = surrogate._compute_soft_feasibility(
+            mhd_val=0.05,
+            qi_val=0.1,  # log10(0.1) = -1 > -3.5 (violated)
+            elongation_val=3.0,
+            problem="p3",
+        )
+
+        prob_good_qi = surrogate._compute_soft_feasibility(
+            mhd_val=0.05,
+            qi_val=1e-5,  # log10(1e-5) = -5 < -3.5 (satisfied)
+            elongation_val=3.0,
+            problem="p3",
+        )
+
+        assert prob_bad_qi < prob_good_qi, "Bad QI should have lower prob"
+
+    def test_soft_feasibility_elongation_p2_only(self):
+        """Test that elongation constraint only applies to P2."""
+        surrogate = NeuralOperatorSurrogate(min_samples=4, epochs=2)
+        metrics, targets = _training_history(8)
+        surrogate.fit(metrics, targets, minimize_objective=False)
+
+        # High elongation (violated for P2: threshold is 5.0)
+        prob_p2 = surrogate._compute_soft_feasibility(
+            mhd_val=0.05,
+            qi_val=1e-5,
+            elongation_val=6.0,  # > 5.0 (violated for P2)
+            problem="p2",
+        )
+
+        prob_p3 = surrogate._compute_soft_feasibility(
+            mhd_val=0.05,
+            qi_val=1e-5,
+            elongation_val=6.0,  # P3 has no elongation constraint
+            problem="p3",
+        )
+
+        # P2 should have lower prob due to elongation violation
+        assert prob_p2 < prob_p3, "P2 should penalize high elongation"
+
+    def test_rank_candidates_with_problem_parameter(self):
+        """Test that rank_candidates accepts problem parameter."""
+        surrogate = NeuralOperatorSurrogate(min_samples=4, epochs=5, batch_size=2)
+        metrics, targets = _training_history(8)
+        surrogate.fit(metrics, targets, minimize_objective=False)
+
+        candidates = [
+            {"params": _make_params(0.5)},
+            {"params": _make_params(2.0)},
+        ]
+
+        # Test with different problem types
+        ranked_p2 = surrogate.rank_candidates(
+            candidates, minimize_objective=False, problem="p2"
+        )
+        ranked_p3 = surrogate.rank_candidates(
+            candidates, minimize_objective=False, problem="p3"
+        )
+
+        assert len(ranked_p2) == 2
+        assert len(ranked_p3) == 2
+
+        # Both should have prob_feasible set
+        assert 0 <= ranked_p2[0].prob_feasible <= 1
+        assert 0 <= ranked_p3[0].prob_feasible <= 1
+
+
+class TestElongationIsoperimetricUsed:
+    """Tests for B5 fix: verify elongation_isoperimetric is used in ranking."""
+
+    def test_rank_candidates_uses_isoperimetric_elongation(self):
+        """Verify rank_candidates uses elongation_isoperimetric."""
+        from ai_scientist.optim import geometry
+
+        surrogate = NeuralOperatorSurrogate(min_samples=4, epochs=5, batch_size=2)
+        metrics, targets = _training_history(8)
+        surrogate.fit(metrics, targets, minimize_objective=False)
+
+        # Create candidate with known elongation
+        mpol, ntor = 3, 3
+        R_major = 10.0
+        kappa = 2.0  # Elongation
+
+        r_cos = np.zeros((mpol + 1, 2 * ntor + 1))
+        z_sin = np.zeros((mpol + 1, 2 * ntor + 1))
+        r_cos[0, ntor] = R_major
+        r_cos[1, ntor] = 1.0
+        z_sin[1, ntor] = kappa
+
+        params = {
+            "r_cos": r_cos.tolist(),
+            "z_sin": z_sin.tolist(),
+            "n_field_periods": 3,
+        }
+
+        candidates = [{"params": params}]
+        ranked = surrogate.rank_candidates(candidates, minimize_objective=False)
+
+        # Compute expected elongation using isoperimetric method
+        r_cos_t = torch.tensor(r_cos).unsqueeze(0).float()
+        z_sin_t = torch.tensor(z_sin).unsqueeze(0).float()
+        expected_elo = geometry.elongation_isoperimetric(r_cos_t, z_sin_t, 3)
+
+        # The predicted elongation should match the isoperimetric calculation
+        assert np.isclose(
+            ranked[0].predicted_elongation, expected_elo.item(), rtol=0.01
+        ), f"Expected {expected_elo.item()}, got {ranked[0].predicted_elongation}"
 
 
 if __name__ == "__main__":

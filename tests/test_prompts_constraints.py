@@ -1,5 +1,5 @@
 from ai_scientist import prompts
-from constellaration import problems
+from ai_scientist import problems
 
 
 def _constraint_value(spec: prompts.ProblemSpec, name: str) -> float:
@@ -10,9 +10,9 @@ def _constraint_value(spec: prompts.ProblemSpec, name: str) -> float:
 
 
 def test_problem_specs_match_problem_definitions():
-    geom = problems.GeometricalProblem()
-    simple_qi = problems.SimpleToBuildQIStellarator()
-    mhd_qi = problems.MHDStableQIStellarator()
+    geom = problems.P1Problem()
+    simple_qi = problems.P2Problem()
+    mhd_qi = problems.P3Problem()
 
     p1_spec = prompts.get_problem_spec("p1")
     assert _constraint_value(p1_spec, "aspect_ratio") == geom._aspect_ratio_upper_bound

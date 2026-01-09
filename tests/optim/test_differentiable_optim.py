@@ -5,6 +5,7 @@ import numpy as np
 import torch.nn as nn
 
 from ai_scientist import config as ai_config
+from ai_scientist.objective_types import TargetKind
 from ai_scientist.optim import differentiable
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 
@@ -28,13 +29,14 @@ class TestDifferentiableOptim(unittest.TestCase):
         self.surrogate._schema = self.schema
 
         # Create a simple dummy model
+        # Issue #1 FIX: Now returns 6 values: obj, mhd, qi, iota, mirror_ratio, flux_compression
         class DummyModel(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.mpol = mpol
                 self.ntor = ntor
                 # Just some learnable params to allow gradients
-                self.layer = nn.Linear(1, 3)
+                self.layer = nn.Linear(1, 6)  # Now 6 outputs
 
             def forward(self, x):
                 # x is (Batch, DenseSize)
@@ -42,10 +44,27 @@ class TestDifferentiableOptim(unittest.TestCase):
                 # Collapse x to 1 dim to feed linear
                 val = x.mean(dim=1, keepdim=True)
                 out = self.layer(val)
-                # return obj, mhd, qi
-                return out[:, 0], out[:, 1], out[:, 2]
+                # return obj, mhd, qi, iota, mirror_ratio, flux_compression (Issue #1 fix)
+                return out[:, 0], out[:, 1], out[:, 2], out[:, 3], out[:, 4], out[:, 5]
 
         self.surrogate._models = [DummyModel(), DummyModel()]
+
+        # Mock normalization stats (required for predict_torch denormalization)
+        import torch
+
+        self.surrogate._y_obj_mean = torch.tensor(0.0)
+        self.surrogate._y_obj_std = torch.tensor(1.0)
+        self.surrogate._y_mhd_mean = torch.tensor(0.0)
+        self.surrogate._y_mhd_std = torch.tensor(1.0)
+        self.surrogate._y_qi_log_mean = torch.tensor(-4.0)
+        self.surrogate._y_qi_log_std = torch.tensor(1.0)
+        self.surrogate._y_iota_mean = torch.tensor(0.3)
+        self.surrogate._y_iota_std = torch.tensor(0.1)
+        # Issue #1 fix: add mirror_ratio and flux_compression stats
+        self.surrogate._y_mirror_ratio_mean = torch.tensor(0.15)
+        self.surrogate._y_mirror_ratio_std = torch.tensor(0.1)
+        self.surrogate._y_flux_compression_mean = torch.tensor(0.5)
+        self.surrogate._y_flux_compression_std = torch.tensor(0.2)
 
         # Mock Config
         self.cfg = MagicMock(spec=ai_config.ExperimentConfig)
@@ -60,6 +79,7 @@ class TestDifferentiableOptim(unittest.TestCase):
         self.cfg.constraint_weights = ai_config.ConstraintWeightsConfig(
             mhd=1.0, qi=1.0, elongation=1.0
         )
+        self.cfg.problem = "p1"  # Add problem attribute for optimization direction
 
     def test_gradient_descent_updates_params(self):
         # Create a dummy candidate
@@ -82,7 +102,12 @@ class TestDifferentiableOptim(unittest.TestCase):
 
         # Run optimization
         optimized = differentiable.gradient_descent_on_inputs(
-            candidates, self.surrogate, self.cfg, steps=10, lr=0.1
+            candidates,
+            self.surrogate,
+            self.cfg,
+            steps=10,
+            lr=0.1,
+            target=TargetKind.OBJECTIVE,
         )
 
         self.assertEqual(len(optimized), 1)
@@ -133,6 +158,7 @@ class TestDifferentiableOptim(unittest.TestCase):
             n_field_periods_val=1,
             steps=5,
             lr=0.1,
+            target=TargetKind.OBJECTIVE,
         )
 
         # Check shape
@@ -140,6 +166,39 @@ class TestDifferentiableOptim(unittest.TestCase):
         # Check that it moved
         self.assertFalse(
             np.allclose(x_new, x_initial), "ALM inner loop should update params"
+        )
+
+    def test_p3_uses_maximization_direction(self):
+        """P3 with HV target should maximize (not minimize)."""
+        # P1: minimize (physics objective = elongation)
+        self.assertFalse(
+            differentiable._is_maximization_problem("p1", target=TargetKind.OBJECTIVE)
+        )
+
+        # P2: maximize (physics objective = gradient)
+        self.assertTrue(
+            differentiable._is_maximization_problem("p2", target=TargetKind.OBJECTIVE)
+        )
+
+        # P3 with physics objective: minimize (aspect_ratio)
+        self.assertFalse(
+            differentiable._is_maximization_problem("p3", target=TargetKind.OBJECTIVE)
+        )
+
+        # P3 with HV target: MAXIMIZE (key fix!)
+        self.assertTrue(
+            differentiable._is_maximization_problem("p3", target=TargetKind.HV)
+        )
+
+    def test_explicit_target_overrides_inference(self):
+        """Explicit target parameter should work regardless of problem name."""
+        # For P1, if target=HV is passed, should maximize
+        self.assertTrue(
+            differentiable._is_maximization_problem("p1", target=TargetKind.HV)
+        )
+        # For P3, if target=OBJECTIVE is passed, should minimize
+        self.assertFalse(
+            differentiable._is_maximization_problem("p3", target=TargetKind.OBJECTIVE)
         )
 
 

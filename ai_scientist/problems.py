@@ -5,6 +5,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from ai_scientist.constraints import get_constraint_names
+
 
 class Problem(ABC):
     """Abstract base class for optimization problems."""
@@ -32,14 +34,23 @@ class Problem(ABC):
 
     @abstractmethod
     def get_objective(self, metrics: Dict[str, Any]) -> float:
-        """Extract objective value from metrics."""
+        """Extract primary objective value from metrics.
+
+        Returns a single scalar representing the primary optimization objective.
+        For multi-objective problems (e.g., P3), this returns only the primary
+        objective for compatibility with single-objective optimizers. Use
+        problem-specific methods (e.g., forward_model.compute_p3_objectives())
+        for full multi-objective Pareto analysis.
+        """
         ...
 
     # Template methods
     def is_feasible(self, metrics: Dict[str, Any]) -> bool:
         """Check if metrics satisfy all constraints."""
         violations = self._normalized_constraint_violations(metrics)
-        # Use a small tolerance for floating point comparisons, consistent with constellaration
+        # Match constellaration.problems._DEFAULT_RELATIVE_TOLERANCE (1e-2).
+        # Benchmarks treat small normalized violations as feasible to account for
+        # numerical noise in VMEC/Boozer computations.
         return bool(np.all(violations <= 1e-2))
 
     def compute_feasibility(self, metrics: Dict[str, Any]) -> float:
@@ -62,7 +73,7 @@ class P1Problem(Problem):
 
     @property
     def constraint_names(self) -> List[str]:
-        return ["aspect_ratio", "average_triangularity", "edge_rotational_transform"]
+        return get_constraint_names("p1")
 
     # Constraint constants (exposed for prompts)
     _aspect_ratio_upper_bound = 4.0
@@ -105,13 +116,7 @@ class P2Problem(Problem):
 
     @property
     def constraint_names(self) -> List[str]:
-        return [
-            "aspect_ratio",
-            "edge_rotational_transform",
-            "qi",
-            "edge_magnetic_mirror_ratio",
-            "max_elongation",
-        ]
+        return get_constraint_names("p2")
 
     # Constraint constants (exposed for prompts)
     _aspect_ratio_upper_bound = 10.0
@@ -169,13 +174,7 @@ class P3Problem(Problem):
 
     @property
     def constraint_names(self) -> List[str]:
-        return [
-            "edge_rotational_transform",
-            "qi",
-            "edge_magnetic_mirror_ratio",
-            "flux_compression",
-            "vacuum_well",
-        ]
+        return get_constraint_names("p3")
 
     # Constraint constants (exposed for prompts)
     _edge_rotational_transform_over_n_field_periods_lower_bound = 0.25
@@ -183,6 +182,9 @@ class P3Problem(Problem):
     _edge_magnetic_mirror_ratio_upper_bound = 0.25
     _flux_compression_in_regions_of_bad_curvature_upper_bound = 0.9
     _vacuum_well_lower_bound = 0.0
+    # Normalization constant for vacuum_well when bound is 0 (avoids division by zero).
+    # Value matches constellaration.problems.MHDStableQIStellarator implementation.
+    _vacuum_well_normalization_fallback = 0.1
 
     def _normalized_constraint_violations(self, metrics: Dict[str, Any]) -> np.ndarray:
         # Constraints from constellaration.problems.MHDStableQIStellarator
@@ -197,7 +199,7 @@ class P3Problem(Problem):
         mirror_limit = self._edge_magnetic_mirror_ratio_upper_bound
         flux_limit = self._flux_compression_in_regions_of_bad_curvature_upper_bound
         well_limit = self._vacuum_well_lower_bound
-        well_norm = max(1e-1, well_limit)  # From constellaration code
+        well_norm = max(self._vacuum_well_normalization_fallback, abs(well_limit))
 
         iota = metrics.get("edge_rotational_transform_over_n_field_periods", 0.0)
         qi = metrics.get("qi", 1.0)
@@ -218,13 +220,36 @@ class P3Problem(Problem):
         return violations
 
     def get_objective(self, metrics: Dict[str, Any]) -> float:
-        # P3 is multi-objective, but for single-value context (like simple tracking)
-        # we might return the primary objective or a scalarization.
-        # However, Coordinator uses ALM which handles constraints.
-        # The 'objective' in ALM state is usually the Lagrangian.
-        # For simple tracking, let's return the gradient scale length (negated)
-        # as it's the primary physics performance metric besides aspect ratio.
-        return -metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+        """Return scalarized objective for single-objective optimization.
+
+        P3 is inherently multi-objective (minimize aspect_ratio AND maximize
+        L_grad_B for Pareto trade-off). This method returns a scalarized
+        objective that balances both metrics for single-objective optimizers.
+
+        The ratio L_∇B / AR is used because:
+        - It naturally traces along the Pareto front
+        - Encourages both lower AR and higher L_∇B simultaneously
+        - Is scale-invariant and captures the efficiency trade-off
+
+        For full multi-objective optimization, use:
+            - forward_model.compute_p3_objectives() -> (aspect_ratio, -L_grad_B)
+            - NSGA-II or similar Pareto-based algorithms
+
+        Returns:
+            Negative ratio (-L_∇B / AR): Lower is better (minimization convention).
+        """
+        import math
+
+        ar = metrics.get("aspect_ratio", float("inf"))
+        l_grad_b = metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
+
+        # Handle invalid configurations
+        if ar <= 0 or not math.isfinite(ar):
+            return float("inf")
+
+        # Scalarized objective: maximize L_∇B / AR
+        # Return negative for minimization convention
+        return -l_grad_b / ar
 
 
 def get_problem(name: str) -> Problem:

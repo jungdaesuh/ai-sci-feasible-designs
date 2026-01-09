@@ -145,6 +145,10 @@ class FidelityLadder:
 
 @dataclass(frozen=True)
 class BoundaryTemplateConfig:
+    # IMPORTANT: These follow constellaration.geometry.surface_rz_fourier.SurfaceRZFourier
+    # naming, i.e. they are the *array dimensions* for r_cos/z_sin:
+    # - n_poloidal_modes = mpol + 1  (number of rows, m = 0..mpol)
+    # - n_toroidal_modes = 2*ntor + 1 (number of cols, n = -ntor..ntor; must be odd)
     n_poloidal_modes: int
     n_toroidal_modes: int
     n_field_periods: int
@@ -152,6 +156,26 @@ class BoundaryTemplateConfig:
     base_minor_radius: float
     perturbation_scale: float
     seed_path: Path | None = None
+
+    @property
+    def max_poloidal_mode(self) -> int:
+        """Maximum poloidal mode index (mpol) = n_poloidal_modes - 1."""
+        return self.n_poloidal_modes - 1
+
+    @property
+    def max_toroidal_mode(self) -> int:
+        """Maximum toroidal mode index (ntor) = (n_toroidal_modes - 1) // 2."""
+        return (self.n_toroidal_modes - 1) // 2
+
+    @property
+    def n_poloidal_coefficients(self) -> int:
+        """Number of rows in r_cos/z_sin coefficient arrays (alias)."""
+        return self.n_poloidal_modes
+
+    @property
+    def n_toroidal_coefficients(self) -> int:
+        """Number of columns in r_cos/z_sin coefficient arrays (alias)."""
+        return self.n_toroidal_modes
 
 
 @dataclass(frozen=True)
@@ -177,6 +201,14 @@ class ProposalMixConfig:
     exploitation_ratio: float = 0.0
     surrogate_pool_multiplier: float = 2.0
     sampler_type: str = "standard"
+    # Phase 5 pipeline toggles
+    # When disabled, Coordinator skips RLRefinementWorker (PPO-CMA) and goes straight
+    # from surrogate ranking to gradient descent optimization.
+    rl_refinement_enabled: bool = True
+    # UCB exploration parameters (Issue #11)
+    ucb_exploration_initial: float = 2.0  # High exploration at start
+    ucb_exploration_final: float = 0.1  # Low exploration at end
+    ucb_decay_cycles: int = 20  # Cycles to decay from initial to final
 
 
 @dataclass(frozen=True)
@@ -188,12 +220,22 @@ class ConstraintWeightsConfig:
 
 @dataclass(frozen=True)
 class GenerativeConfig:
+    """Configuration for generative models (VAE/Diffusion).
+
+    IMPORTANT: Generative models are DISABLED by default (enabled=False).
+
+    To enable, set in your experiment YAML config:
+        generative:
+          enabled: true
+          checkpoint_path: /path/to/diffusion_v2.pt
+    """
+
     enabled: bool
     backend: str = "vae"
-    latent_dim: int = 16
+    latent_dim: int = 32  # Increased for 80+ dimensional input space
     learning_rate: float = 1e-3
     epochs: int = 100
-    kl_weight: float = 0.001
+    kl_weight: float = 0.1  # AoT Fix: Higher default with warmup annealing
 
     # StellarForge / Paper Specs (Padidar et al.)
     checkpoint_path: Path | None = None
@@ -232,6 +274,20 @@ class RetrainingConfig:
 
 
 @dataclass(frozen=True)
+class CurriculumConfig:
+    """Configuration for curriculum learning P1→P2→P3 (Issue #12).
+
+    When enabled, the optimizer starts with easier problems (P1) and
+    progressively adds constraints as feasibility thresholds are met.
+    """
+
+    enabled: bool = False  # Disabled by default
+    advancement_threshold: float = 0.3  # Feasibility rate to advance
+    min_cycles_per_stage: int = 5  # Minimum cycles before advancing
+    initial_stage: str = "p1"  # Starting stage (p1, p2, or p3)
+
+
+@dataclass(frozen=True)
 class ALMConfig:
     """ALM hyperparameters (mirrors constellaration settings)."""
 
@@ -252,6 +308,12 @@ class ALMConfig:
     oracle_budget_increment: int = 26
     oracle_budget_max: int = 200
     oracle_num_workers: int = 4
+
+    # P3-only (MHDStableQIStellarator):
+    # constellaration's ALM runner converts the multi-objective P3 problem into a
+    # single-objective optimization by *constraining* aspect ratio.
+    # This bound is required by constellaration.optimization.augmented_lagrangian_runner.objective_constraints.
+    aspect_ratio_upper_bound: float = 20.0
 
     @staticmethod
     def default() -> "ALMConfig":
@@ -278,7 +340,17 @@ class ALMConfig:
 
 @dataclass(frozen=True)
 class ASOConfig:
-    """Configuration for Agent-Supervised Optimization loop."""
+    """Configuration for Agent-Supervised Optimization loop.
+
+    IMPORTANT: ASO is DISABLED by default (enabled=False).
+
+    To enable LLM supervision, either:
+    1. Set `aso.enabled: true` in your experiment YAML config
+    2. Use ExperimentConfig.p3_aso_enabled() factory method
+    3. Use ExperimentConfig.p3_high_fidelity() factory method
+
+    ASO requires valid LLM API credentials.
+    """
 
     # Control mode
     enabled: bool = False
@@ -354,6 +426,7 @@ class ExperimentConfig:
     retraining: RetrainingConfig = field(default_factory=RetrainingConfig)
     alm: ALMConfig = field(default_factory=ALMConfig)
     aso: ASOConfig = field(default_factory=ASOConfig)
+    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)  # Issue #12
     optimizer_backend: str = "nevergrad"
     experiment_tag: str = "default"
     initialization_strategy: str = "template"
@@ -363,6 +436,9 @@ class ExperimentConfig:
     reporting: Mapping[str, Any] = field(default_factory=dict)
     run_overrides: Mapping[str, Any] = field(default_factory=dict)
     planner: str = "deterministic"
+    # H1 Fix: Enable R₀₀ (major radius) optimization with L2 regularization toward ~1.0
+    # Default False for backward compatibility with benchmark normalization convention
+    optimize_major_radius: bool = False
 
     @staticmethod
     def p3_high_fidelity() -> "ExperimentConfig":
@@ -382,7 +458,10 @@ class ExperimentConfig:
                 pool_type=defaults.budgets.pool_type,
             ),
             adaptive_budgets=defaults.adaptive_budgets,
-            fidelity_ladder=defaults.fidelity_ladder,
+            # H5 FIX: Force QI computation at promote stage for P3 high fidelity
+            # Using "p3" stage instead of "promote" ensures QI is computed
+            # since _settings_for_stage("promote") calls default_high_fidelity_skip_qi()
+            fidelity_ladder=FidelityLadder(screen="screen", promote="p3"),
             boundary_template=defaults.boundary_template,
             stage_gates=defaults.stage_gates,
             governance=defaults.governance,
@@ -559,6 +638,11 @@ def _proposal_mix_from_dict(
         jitter_scale=float(config.get("jitter_scale", 0.01)),
         surrogate_pool_multiplier=float(config.get("surrogate_pool_multiplier", 2.0)),
         sampler_type=str(config.get("sampler_type", "standard")),
+        rl_refinement_enabled=bool(config.get("rl_refinement_enabled", True)),
+        # UCB parameters (Issue #11)
+        ucb_exploration_initial=float(config.get("ucb_exploration_initial", 2.0)),
+        ucb_exploration_final=float(config.get("ucb_exploration_final", 0.1)),
+        ucb_decay_cycles=int(config.get("ucb_decay_cycles", 20)),
     )
 
 
@@ -638,7 +722,7 @@ def _generative_config_from_dict(
         latent_dim=int(config.get("latent_dim", 16)),
         learning_rate=float(config.get("learning_rate", 1e-3)),
         epochs=int(config.get("epochs", 100)),
-        kl_weight=float(config.get("kl_weight", 0.001)),
+        kl_weight=float(config.get("kl_weight", 0.1)),
         # StellarForge / Paper Specs (Padidar et al.)
         checkpoint_path=checkpoint_path,
         device=str(config.get("device", "cpu")),
@@ -690,6 +774,7 @@ def _alm_config_from_dict(data: Mapping[str, Any] | None) -> ALMConfig:
         oracle_budget_increment=int(config.get("oracle_budget_increment", 26)),
         oracle_budget_max=int(config.get("oracle_budget_max", 200)),
         oracle_num_workers=int(config.get("oracle_num_workers", 4)),
+        aspect_ratio_upper_bound=float(config.get("aspect_ratio_upper_bound", 20.0)),
     )
 
 
@@ -731,6 +816,17 @@ def _retraining_config_from_dict(data: Mapping[str, Any] | None) -> RetrainingCo
         min_elites=int(config.get("min_elites", 32)),
         hv_stagnation_threshold=float(config.get("hv_stagnation_threshold", 0.005)),
         hv_stagnation_lookback=int(config.get("hv_stagnation_lookback", 3)),
+    )
+
+
+def _curriculum_config_from_dict(data: Mapping[str, Any] | None) -> CurriculumConfig:
+    """Parse curriculum learning configuration (Issue #12)."""
+    config = data or {}
+    return CurriculumConfig(
+        enabled=bool(config.get("enabled", False)),
+        advancement_threshold=float(config.get("advancement_threshold", 0.3)),
+        min_cycles_per_stage=int(config.get("min_cycles_per_stage", 5)),
+        initial_stage=str(config.get("initial_stage", "p1")),
     )
 
 
@@ -788,6 +884,7 @@ def load_experiment_config(path: str | Path | None = None) -> ExperimentConfig:
         retraining=_retraining_config_from_dict(payload.get("retraining")),
         alm=_alm_config_from_dict(payload.get("alm")),
         aso=_aso_config_from_dict(payload.get("aso")),
+        curriculum=_curriculum_config_from_dict(payload.get("curriculum")),
         optimizer_backend=str(payload.get("optimizer_backend", "nevergrad")),
         experiment_tag=str(payload.get("experiment_tag", "default")),
         initialization_strategy=str(payload.get("initialization_strategy", "template")),

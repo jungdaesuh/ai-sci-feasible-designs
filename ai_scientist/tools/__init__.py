@@ -5,6 +5,8 @@ This module has been split into submodules but maintains the original API.
 
 from .design_manipulation import (
     normalized_constraint_distance_sampler,
+    propose_boundary,
+    recombine_designs,
     structured_flatten,
     structured_unflatten,
 )
@@ -30,6 +32,8 @@ __all__ = [
     "FlattenSchema",
     "structured_flatten",
     "structured_unflatten",
+    "propose_boundary",
+    "recombine_designs",
     "evaluate_p1",
     "evaluate_p2",
     "evaluate_p3",

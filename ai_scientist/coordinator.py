@@ -41,6 +41,21 @@ from ai_scientist.workers import (
 )
 
 
+def _alm_constraint_names(problem: str) -> list[str]:
+    """Return constraint names aligned with constellaration ALM `objective_constraints` order.
+
+    Coordinator diagnostics consume `AugmentedLagrangianState.constraints`, which come
+    from `constellaration.optimization.augmented_lagrangian_runner.objective_constraints`.
+    Those constraints are *not* the same as the benchmark problem constraint lists
+    (notably P3 includes an aspect-ratio upper-bound constraint injected by the runner).
+
+    NOTE: Uses the centralized constraint registry from ai_scientist.constraints.
+    """
+    from ai_scientist.constraints import get_constraint_names
+
+    return get_constraint_names(problem, for_alm=True)
+
+
 class TrajectoryState(pydantic.BaseModel):
     """State for a single optimization trajectory."""
 
@@ -97,7 +112,7 @@ class Coordinator:
 
         # ASO Initialization
         self.problem = get_problem(cfg.problem or "p3")
-        self.constraint_names = self.problem.constraint_names
+        self.constraint_names = _alm_constraint_names(cfg.problem or "p3")
         self.telemetry: List[Dict[str, Any]] = []
 
     def decide_strategy(self, cycle: int, experiment_id: int) -> str:
@@ -208,12 +223,16 @@ class Coordinator:
                 top_k = valid_seeds[:100]
 
             # STAGE 5: RL Refine - Micro-surgery on top-K only
-            rl_ctx = {
-                "candidates": top_k,
-                "target_metrics": explore_ctx.get("target_metrics"),
-            }
-            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
-            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            if self.cfg.proposal_mix.rl_refinement_enabled:
+                rl_ctx = {
+                    "candidates": top_k,
+                    "target_metrics": explore_ctx.get("target_metrics"),
+                }
+                refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+                print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            else:
+                refined = top_k
+                print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
 
             # STAGE 6: Optimize - Final gradient descent
             opt_ctx = {"initial_guesses": refined}
@@ -260,12 +279,16 @@ class Coordinator:
                 top_k = valid_seeds[:100]
 
             # STAGE 5: RL Refine - Micro-surgery on top-K only
-            rl_ctx = {
-                "candidates": top_k,
-                "target_metrics": explore_ctx.get("target_metrics"),
-            }
-            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
-            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            if self.cfg.proposal_mix.rl_refinement_enabled:
+                rl_ctx = {
+                    "candidates": top_k,
+                    "target_metrics": explore_ctx.get("target_metrics"),
+                }
+                refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+                print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+            else:
+                refined = top_k
+                print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
 
             # STAGE 6: Optimize - Final gradient descent
             opt_ctx = {"initial_guesses": refined}
@@ -392,29 +415,65 @@ class Coordinator:
                 metrics_list = []
                 target_values = []
 
+                # Determine training target and direction based on problem type
+                problem = (self.cfg.problem or "p3").lower()
+                if problem.startswith("p1"):
+                    # P1: train on objective (elongation, minimize)
+                    minimize_obj = True
+                else:
+                    # P2/P3: train on score (grad/aspect, maximize)
+                    minimize_obj = False
+
                 for cand in top_elites:
                     params = cand.get("params", cand.get("candidate_params"))
                     if params is None:
                         continue
 
-                    # Use the best available objective value
-                    target = cand.get(
-                        "objective",
-                        cand.get(
-                            "rl_score",
-                            cand.get("surrogate_score", 0.0),
-                        ),
-                    )
+                    # Extract actual metrics from evaluation (not the full candidate)
+                    eval_data = cand.get("evaluation", {})
+                    actual_metrics = eval_data.get("metrics", {})
 
-                    metrics_list.append({"candidate_params": params, "metrics": cand})
+                    # Skip if metrics are missing (don't train on fabricated targets)
+                    if not actual_metrics:
+                        continue
+
+                    # Determine training target based on problem.
+                    #
+                    # IMPORTANT: We must keep `target_values` aligned with the
+                    # `minimize_objective` flag used at ranking time:
+                    # - If we train on a minimization objective (P1 max_elongation),
+                    #   we must NOT negate it here, because `rank_candidates` will
+                    #   handle the direction via `minimize_objective=True`.
+                    # - For P2/P3 we train on a "higher is better" score proxy.
+                    #
+                    # See ai_scientist.objective_types for vocabulary.
+                    from ai_scientist.objective_types import compute_ranking_score
+
+                    if problem.startswith("p1"):
+                        # P1: train on physics objective (max_elongation; lower is better)
+                        target = eval_data.get("objective", cand.get("objective"))
+                    else:
+                        # P2/P3: use canonical ranking score (gradient / aspect)
+                        target = eval_data.get("score", cand.get("score"))
+                        if target is None:
+                            # Recompute from metrics using canonical formula
+                            target = compute_ranking_score(actual_metrics, problem)
+
+                    if target is None:
+                        continue
+
+                    metrics_list.append(
+                        {"candidate_params": params, "metrics": actual_metrics}
+                    )
                     target_values.append(float(target))
 
                 if metrics_list:
                     print(
-                        f"[Coordinator] Retraining surrogate on {len(metrics_list)} samples..."
+                        f"[Coordinator] Retraining surrogate on {len(metrics_list)} samples "
+                        f"(minimize_objective={minimize_obj})..."
                     )
                     self.surrogate.fit(
-                        metrics_list, target_values, minimize_objective=True
+                        metrics_list, target_values, minimize_objective=minimize_obj
                     )
                     print("[Coordinator] Surrogate retraining complete")
             except Exception as e:
@@ -487,10 +546,15 @@ class Coordinator:
         problem = self._get_problem(config)
         settings = self._build_optimization_settings(config)
 
+        aspect_ratio_upper_bound = None
+        if (config.problem or "").lower().startswith("p3"):
+            aspect_ratio_upper_bound = config.alm.aspect_ratio_upper_bound
+
         alm_context, alm_state = create_alm_context(
             boundary=boundary,
             problem=problem,
             settings=settings,
+            aspect_ratio_upper_bound=aspect_ratio_upper_bound,
         )
         traj = traj.model_copy(
             update={"alm_context": alm_context, "alm_state": alm_state}
@@ -499,13 +563,19 @@ class Coordinator:
         oracle_budget = alm.oracle_budget_initial
 
         while traj.budget_used < eval_budget and traj.status == "active":
+            # Mathematical Invariant: ALM state is mandatory for the optimization loop.
+            # While the TrajectoryState schema allows None (for initialization),
+            # the ASO loop cannot physically proceed without a defined Lagrangian state.
+            assert traj.alm_state is not None, "ASO loop requires initialized ALM state"
+            current_alm_state = traj.alm_state
+
             traj = traj.model_copy(update={"steps": traj.steps + 1})
             step_start = time.perf_counter()
 
             # 1. Execute ALM step
             result = step_alm(
                 context=alm_context,
-                state=traj.alm_state,
+                state=current_alm_state,
                 budget=min(oracle_budget, eval_budget - traj.budget_used),
                 num_workers=alm.oracle_num_workers,
             )
@@ -551,6 +621,7 @@ class Coordinator:
                 traj = traj.model_copy(update={"status": status})
                 print(f"[Coordinator] STOP: {directive.reasoning}")
                 # Extract final candidate
+                assert traj.alm_state is not None
                 candidates.append(
                     {
                         "params": state_to_boundary_params(alm_context, traj.alm_state),
@@ -567,6 +638,7 @@ class Coordinator:
                 new_seeds = self._prepare_seeds(None, cycle, 1)
                 if new_seeds:
                     # Save current best before restart
+                    assert traj.alm_state is not None
                     candidates.append(
                         {
                             "params": state_to_boundary_params(
@@ -584,6 +656,7 @@ class Coordinator:
                         boundary=boundary,
                         problem=problem,
                         settings=settings,
+                        aspect_ratio_upper_bound=aspect_ratio_upper_bound,
                     )
                     alm_context = new_context
                     traj = traj.model_copy(
@@ -629,6 +702,7 @@ class Coordinator:
             if traj.stagnation_count >= aso.max_stagnation_steps:
                 traj = traj.model_copy(update={"status": "stagnated"})
                 print("[Coordinator] Auto-STOP (stagnation limit)")
+                assert traj.alm_state is not None
                 candidates.append(
                     {
                         "params": state_to_boundary_params(alm_context, traj.alm_state),
@@ -840,7 +914,16 @@ class Coordinator:
     def _surrogate_rank_seeds(
         self, seeds: List[Dict[str, Any]], cycle: int
     ) -> List[Dict[str, Any]]:
-        """Rank seeds using the surrogate model."""
+        """Rank seeds using the surrogate model.
+
+        IMPORTANT: The surrogate predicts a *ranking target* whose direction
+        depends on the problem:
+        - P1: physics objective `max_elongation` (lower is better → minimize)
+        - P2/P3: score proxy `gradient / aspect` (higher is better → maximize)
+
+        This must stay consistent with `_periodic_retrain()` and the
+        `minimize_objective` flag passed into `surrogate.rank_candidates()`.
+        """
         if not seeds:
             return []
 
@@ -856,19 +939,26 @@ class Coordinator:
             f"[Coordinator] Ranking {len(seeds)} seeds with Neural Operator Surrogate..."
         )
         try:
+            problem = (self.cfg.problem or "p3").lower()
+            # Surrogate targets in this coordinator:
+            # - P1: objective (max_elongation) → minimize
+            # - P2/P3: score/HV proxies → maximize
+            minimize_objective = problem.startswith("p1")
             # Rank candidates (higher score is better)
             ranked_preds = self.surrogate.rank_candidates(
                 seeds,
-                minimize_objective=True,
+                minimize_objective=minimize_objective,
                 exploration_ratio=self.cfg.proposal_mix.exploration_ratio,
+                problem=problem,
             )
 
             # Convert back to seed dicts with metadata
             sorted_seeds = []
             for i, pred in enumerate(ranked_preds):
-                # Cast to Dict to allow mutation (pyright sees Mapping)
-                # Cast to Dict to allow mutation (pyright sees Mapping)
-                seed_data = dict(pred.metadata)  # type: ignore
+                # Handle Optional metadata - create empty dict if None
+                seed_data: Dict[str, Any] = (
+                    dict(pred.metadata) if pred.metadata is not None else {}
+                )
 
                 # Inject surrogate stats into seed for telemetry
                 seed_data["surrogate_score"] = pred.expected_value
@@ -957,8 +1047,8 @@ class Coordinator:
         fm_settings = ConstellarationSettings.default_high_fidelity()
 
         return OptimizationSettings(
-            max_poloidal_mode=config.boundary_template.n_poloidal_modes,
-            max_toroidal_mode=config.boundary_template.n_toroidal_modes,
+            max_poloidal_mode=config.boundary_template.max_poloidal_mode,
+            max_toroidal_mode=config.boundary_template.max_toroidal_mode,
             infinity_norm_spectrum_scaling=0.0,
             forward_model_settings=fm_settings,
             optimizer_settings=AugmentedLagrangianMethodSettings(

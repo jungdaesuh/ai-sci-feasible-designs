@@ -28,6 +28,261 @@ from ai_scientist import tools
 _LOGGER = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Issue #7 Fix: Learned Fourier Encoder with decay structure
+# =============================================================================
+
+
+class FourierEncoder(nn.Module):
+    """Learned encoder that respects Fourier coefficient decay structure.
+
+    Unlike PCA which treats all coefficients equally, this encoder:
+    1. Operates on the 2D Fourier grid (r_cos, z_sin)
+    2. Uses mode-weighted attention to respect spectral decay
+    3. Learns a latent representation end-to-end with diffusion
+
+    The mode weighting encourages the encoder to prioritize low-frequency
+    modes (small m, n) which contain most physical information.
+    """
+
+    # Type hint for registered buffer
+    mode_weights: torch.Tensor
+
+    def __init__(
+        self,
+        mpol: int,
+        ntor: int,
+        latent_dim: int = 50,
+        hidden_dim: int = 128,
+        mode_decay_rate: float = 0.5,
+    ):
+        super().__init__()
+        self.mpol = mpol
+        self.ntor = ntor
+        self.grid_h = mpol + 1
+        self.grid_w = 2 * ntor + 1
+        self.latent_dim = latent_dim
+        self.mode_decay_rate = mode_decay_rate
+
+        # Input: (B, 2, H, W) where 2 channels are r_cos, z_sin
+        self.encoder = nn.Sequential(
+            nn.Conv2d(2, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+        )
+
+        # Global pooling with learned mode weights
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        # Project to latent space
+        self.fc_latent = nn.Linear(hidden_dim, latent_dim)
+
+        # Pre-compute mode decay weights (registered as buffer)
+        self._init_mode_weights()
+
+    def _init_mode_weights(self) -> None:
+        """Initialize mode decay weights based on (m, n) indices.
+
+        Higher modes (larger |m| or |n|) get smaller weights, encoding
+        the physical prior that Fourier coefficients should decay.
+        """
+        m_idx = torch.arange(self.grid_h, dtype=torch.float32)
+        n_idx = torch.arange(self.grid_w, dtype=torch.float32) - self.ntor
+
+        # Mode magnitude: sqrt(m² + n²)
+        m_grid, n_grid = torch.meshgrid(m_idx, torch.abs(n_idx), indexing="ij")
+        mode_magnitude = torch.sqrt(m_grid**2 + n_grid**2 + 1.0)
+
+        # Decay weights: exp(-rate * magnitude)
+        weights = torch.exp(-self.mode_decay_rate * mode_magnitude)
+        weights = weights / weights.sum()  # Normalize
+
+        self.register_buffer("mode_weights", weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode flattened coefficients to latent space.
+
+        Args:
+            x: (B, 2 * H * W) flattened [r_cos, z_sin] coefficients
+
+        Returns:
+            z: (B, latent_dim) latent representation
+        """
+        batch_size = x.shape[0]
+        half_size = self.grid_h * self.grid_w
+
+        # Reshape to grid
+        r_cos = x[:, :half_size].view(batch_size, 1, self.grid_h, self.grid_w)
+        z_sin = x[:, half_size:].view(batch_size, 1, self.grid_h, self.grid_w)
+        grid = torch.cat([r_cos, z_sin], dim=1)  # (B, 2, H, W)
+
+        # Apply mode weights to input (soft attention)
+        weighted_grid = grid * self.mode_weights[None, None, :, :]
+
+        # Encode
+        features = self.encoder(weighted_grid)  # (B, hidden, H, W)
+        pooled = self.pool(features).flatten(1)  # (B, hidden)
+
+        return self.fc_latent(pooled)
+
+
+class FourierDecoder(nn.Module):
+    """Decoder that generates Fourier coefficients with decay regularization.
+
+    Outputs are passed through a mode-weighted softmax to encourage
+    spectral decay in the generated coefficients.
+    """
+
+    # Type hint for registered buffer
+    output_weights: torch.Tensor
+
+    def __init__(
+        self,
+        mpol: int,
+        ntor: int,
+        latent_dim: int = 50,
+        hidden_dim: int = 128,
+        mode_decay_rate: float = 0.5,
+    ):
+        super().__init__()
+        self.mpol = mpol
+        self.ntor = ntor
+        self.grid_h = mpol + 1
+        self.grid_w = 2 * ntor + 1
+        self.latent_dim = latent_dim
+
+        # Project from latent to spatial features
+        self.fc_expand = nn.Linear(latent_dim, hidden_dim * self.grid_h * self.grid_w)
+
+        # Refine with convolutions
+        self.decoder = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, 2, kernel_size=3, padding=1),  # Output: r_cos, z_sin
+        )
+
+        # Mode decay weights for output regularization
+        self._init_mode_weights(mode_decay_rate)
+
+    def _init_mode_weights(self, decay_rate: float) -> None:
+        """Initialize mode decay weights for output scaling."""
+        m_idx = torch.arange(self.grid_h, dtype=torch.float32)
+        n_idx = torch.arange(self.grid_w, dtype=torch.float32) - self.ntor
+
+        m_grid, n_grid = torch.meshgrid(m_idx, torch.abs(n_idx), indexing="ij")
+        mode_magnitude = torch.sqrt(m_grid**2 + n_grid**2 + 1.0)
+
+        # Softer decay for decoder (allow learning to override)
+        weights = torch.exp(-decay_rate * 0.5 * mode_magnitude)
+
+        self.register_buffer("output_weights", weights)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode latent to flattened coefficients.
+
+        Args:
+            z: (B, latent_dim) latent representation
+
+        Returns:
+            x: (B, 2 * H * W) flattened [r_cos, z_sin] coefficients
+        """
+        batch_size = z.shape[0]
+
+        # Expand to spatial
+        features = self.fc_expand(z)  # (B, hidden * H * W)
+        features = features.view(batch_size, -1, self.grid_h, self.grid_w)
+
+        # Decode
+        output = self.decoder(features)  # (B, 2, H, W)
+
+        # Apply mode weights to encourage decay
+        output = output * self.output_weights[None, None, :, :]
+
+        # Flatten: [r_cos, z_sin]
+        r_cos = output[:, 0].flatten(1)  # (B, H*W)
+        z_sin = output[:, 1].flatten(1)  # (B, H*W)
+
+        return torch.cat([r_cos, z_sin], dim=1)
+
+
+class FourierAutoencoder(nn.Module):
+    """Combined encoder-decoder with Fourier decay priors.
+
+    Use this as an alternative to PCA in DiffusionDesignModel for
+    better representation of stellarator geometries.
+    """
+
+    def __init__(
+        self,
+        mpol: int,
+        ntor: int,
+        latent_dim: int = 50,
+        hidden_dim: int = 128,
+        mode_decay_rate: float = 0.5,
+    ):
+        super().__init__()
+        self.encoder = FourierEncoder(
+            mpol, ntor, latent_dim, hidden_dim, mode_decay_rate
+        )
+        self.decoder = FourierDecoder(
+            mpol, ntor, latent_dim, hidden_dim, mode_decay_rate
+        )
+        self.latent_dim = latent_dim
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Transform input to latent space."""
+        return self.encoder(x)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Reconstruct from latent space."""
+        return self.decoder(z)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode and decode (for training)."""
+        z = self.encode(x)
+        recon = self.decode(z)
+        return recon, z
+
+    # Sklearn-compatible interface for drop-in PCA replacement
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        """Fit the autoencoder and transform data (PCA-compatible API)."""
+        raise NotImplementedError("Use fit() then transform() separately")
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Transform data to latent space (PCA-compatible API)."""
+        self.eval()
+        with torch.no_grad():
+            X_tensor = torch.tensor(X, dtype=torch.float32, device=self._device)
+            return self.encode(X_tensor).cpu().numpy()
+
+    def inverse_transform(self, Z: np.ndarray) -> np.ndarray:
+        """Reconstruct from latent space (PCA-compatible API)."""
+        self.eval()
+        with torch.no_grad():
+            Z_tensor = torch.tensor(Z, dtype=torch.float32, device=self._device)
+            return self.decode(Z_tensor).cpu().numpy()
+
+    @property
+    def n_components_(self) -> int:
+        """PCA-compatible API: number of latent dimensions."""
+        return self.latent_dim
+
+    @property
+    def _device(self) -> torch.device:
+        """Get device from encoder parameters."""
+        return next(self.encoder.parameters()).device
+
+
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -141,6 +396,11 @@ class DiffusionDesignModel:
         n_layers: int = 4,
         pca_components: int = 50,
         log_interval: int = 10,
+        # PCA out-of-distribution detection threshold
+        pca_ood_threshold: float = 0.1,
+        # Issue #7: Use learned FourierAutoencoder instead of PCA
+        use_fourier_encoder: bool = False,
+        fourier_encoder_epochs: int = 50,
     ) -> None:
         self._min_samples = min_samples
         self._lr = learning_rate
@@ -159,11 +419,15 @@ class DiffusionDesignModel:
         self._n_layers = n_layers
         self._pca_components = pca_components
         self._log_interval = log_interval
+        self._pca_ood_threshold = pca_ood_threshold
+        self._use_fourier_encoder = use_fourier_encoder
+        self._fourier_encoder_epochs = fourier_encoder_epochs
 
         self.__model: StellaratorDiffusion | None = None  # Use property for access
         self._schema: tools.FlattenSchema | None = None
         self._optimizer: optim.Optimizer | None = None
         self.pca: PCA | None = None
+        self.fourier_autoencoder: FourierAutoencoder | None = None
 
         self._trained = False
         self.m_mean: torch.Tensor | None = None
@@ -194,9 +458,31 @@ class DiffusionDesignModel:
         return self.__model is not None
 
     def _build_noise_schedule(self) -> None:
+        """Build the DDPM noise schedule with proper posterior variance.
+
+        The posterior variance in DDPM is:
+            beta_tilde_t = beta_t * (1 - alpha_hat_{t-1}) / (1 - alpha_hat_t)
+
+        This is the variance of q(x_{t-1} | x_t, x_0), which is the correct
+        variance to use during sampling (not simply beta_t).
+        """
         self.beta = torch.linspace(1e-4, 0.02, self._timesteps, device=self._device)
         self.alpha = 1.0 - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+
+        # Compute alpha_hat_prev: alpha_hat shifted by 1 with alpha_hat[-1] = 1.0
+        # alpha_hat_prev[t] = alpha_hat[t-1] for t > 0, else 1.0
+        self.alpha_hat_prev = torch.cat(
+            [torch.tensor([1.0], device=self._device), self.alpha_hat[:-1]]
+        )
+
+        # Posterior variance: beta_tilde = beta * (1 - alpha_hat_prev) / (1 - alpha_hat)
+        # Clamp denominator to avoid division by zero at t=0
+        self.beta_tilde = (
+            self.beta
+            * (1.0 - self.alpha_hat_prev)
+            / (1.0 - self.alpha_hat).clamp(min=1e-8)
+        )
 
     def _ensure_model(self) -> None:
         if self.__model is not None:
@@ -234,11 +520,25 @@ class DiffusionDesignModel:
         params = cand.get("params") or cand.get("candidate_params") or {}
 
         # Helper to find values in metrics or params
-        def get_val(key):
+        def get_val(key: str) -> float | None:
+            # Try metrics first
             if isinstance(metrics, dict):
                 v = metrics.get(key)
                 if v is not None:
                     return float(v)
+            elif hasattr(metrics, "model_dump"):
+                # Pydantic model - use model_dump()
+                m_dict = metrics.model_dump()
+                v = m_dict.get(key)
+                if v is not None:
+                    return float(v)
+            elif hasattr(metrics, key):
+                # Direct attribute access
+                v = getattr(metrics, key, None)
+                if v is not None:
+                    return float(v)
+
+            # Try params
             if isinstance(params, dict):
                 v = params.get(key)
                 if v is not None:
@@ -274,6 +574,74 @@ class DiffusionDesignModel:
                 is_qh = 0.0
 
         return np.array([iota, ar, nfp, is_qh], dtype=np.float32)
+
+    def _compute_fourier_decay_weights(
+        self, decay_rate: float = 0.3
+    ) -> np.ndarray | None:
+        """Compute mode-dependent decay weights for Fourier coefficients.
+
+        Issue #8 Fix: Encourages spectral decay in generated samples by
+        scaling high-frequency (high m, n) coefficients down.
+
+        Args:
+            decay_rate: Exponential decay rate. Higher = stronger penalty.
+                       Typical values: 0.1 (weak) to 0.5 (strong).
+
+        Returns:
+            weights: (2 * H * W,) array of weights for [r_cos, z_sin] coefficients.
+                    Values in (0, 1] where high-frequency modes have smaller weights.
+                    Returns None if schema not initialized.
+        """
+        if self._schema is None:
+            return None
+
+        mpol = self._schema.mpol
+        ntor = self._schema.ntor
+        grid_h = mpol + 1
+        grid_w = 2 * ntor + 1
+
+        # Mode indices
+        m_idx = np.arange(grid_h, dtype=np.float32)
+        n_idx = np.arange(grid_w, dtype=np.float32) - ntor
+
+        # Mode magnitude grid
+        m_grid, n_grid = np.meshgrid(m_idx, np.abs(n_idx), indexing="ij")
+        mode_magnitude = np.sqrt(m_grid**2 + n_grid**2 + 1.0)
+
+        # Decay weights: exp(-rate * magnitude)
+        # Normalized so low modes have weight ~1, high modes approach 0
+        weights_2d = np.exp(-decay_rate * (mode_magnitude - 1.0))
+        weights_2d = np.clip(weights_2d, 0.1, 1.0)  # Floor at 0.1 to avoid zero
+
+        # Flatten and duplicate for r_cos and z_sin
+        weights_flat = weights_2d.flatten()
+        weights = np.concatenate([weights_flat, weights_flat])
+
+        return weights
+
+    def _apply_fourier_decay(
+        self,
+        flattened: np.ndarray,
+        decay_rate: float = 0.3,
+    ) -> np.ndarray:
+        """Apply Fourier decay weights to generated coefficients.
+
+        Issue #8 Fix: Post-processing step that scales down high-frequency
+        modes in generated samples to ensure physical plausibility.
+
+        Args:
+            flattened: (N, 2*H*W) array of [r_cos, z_sin] coefficients.
+            decay_rate: Exponential decay rate for high-frequency suppression.
+
+        Returns:
+            Modified coefficients with spectral decay applied.
+        """
+        weights = self._compute_fourier_decay_weights(decay_rate)
+        if weights is None:
+            return flattened
+
+        # Apply weights element-wise
+        return flattened * weights[None, :]
 
     def fit(self, candidates: Sequence[Mapping[str, Any]]) -> None:
         sample_count = len(candidates)
@@ -319,12 +687,69 @@ class DiffusionDesignModel:
         # Convert to numpy for PCA
         X_np = np.vstack(vectors)
 
-        # Fit PCA
-        if self._pca_components > 0:
+        # Issue #7 Fix: Use FourierAutoencoder or PCA for latent space projection
+        if self._use_fourier_encoder and self._schema is not None:
+            _LOGGER.info(
+                "[diffusion] Training FourierAutoencoder (mpol=%d, ntor=%d, latent=%d)...",
+                self._schema.mpol,
+                self._schema.ntor,
+                self._pca_components,
+            )
+            self.fourier_autoencoder = FourierAutoencoder(
+                mpol=self._schema.mpol,
+                ntor=self._schema.ntor,
+                latent_dim=self._pca_components,
+            ).to(self._device)
+            ae = self.fourier_autoencoder  # Local ref for pyright
+            assert ae is not None  # Narrowing for pyright
+
+            # Train autoencoder
+            X_tensor = torch.tensor(X_np, dtype=torch.float32, device=self._device)
+            ae_dataset = TensorDataset(X_tensor)
+            ae_loader = DataLoader(
+                ae_dataset, batch_size=self._batch_size, shuffle=True
+            )
+            ae_optimizer = optim.Adam(ae.parameters(), lr=self._lr)
+
+            ae.train()
+            for ae_epoch in range(self._fourier_encoder_epochs):
+                ae_loss = 0.0
+                for (batch,) in ae_loader:
+                    ae_optimizer.zero_grad()
+                    recon, _ = ae(batch)
+                    loss = F.mse_loss(recon, batch)
+                    loss.backward()
+                    ae_optimizer.step()
+                    ae_loss += loss.item()
+
+                if self._log_interval > 0 and ae_epoch % self._log_interval == 0:
+                    _LOGGER.info(
+                        f"[autoencoder] Epoch {ae_epoch}/{self._fourier_encoder_epochs}: "
+                        f"loss={ae_loss:.4f}"
+                    )
+
+            ae.eval()
+            with torch.no_grad():
+                X_latent = ae.encode(X_tensor).cpu().numpy()
+            self.pca = None  # Ensure PCA is not used
+
+        elif self._pca_components > 0:
+            # Standard PCA path with variance warning
             self.pca = PCA(n_components=self._pca_components)
             X_latent = self.pca.fit_transform(X_np)
+
+            # Issue #7 Fix: Warn if PCA discards too much variance
+            explained = sum(self.pca.explained_variance_ratio_)
+            if explained < 0.95:
+                _LOGGER.warning(
+                    f"PCA with {self._pca_components} components explains only "
+                    f"{explained:.1%} variance. Consider use_fourier_encoder=True "
+                    f"or increasing pca_components."
+                )
+            self.fourier_autoencoder = None
         else:
             self.pca = None
+            self.fourier_autoencoder = None
             X_latent = X_np
 
         X = torch.tensor(X_latent, dtype=torch.float32).to(self._device)
@@ -452,6 +877,27 @@ class DiffusionDesignModel:
         X_np = np.vstack(vectors)
         X_latent = self.pca.transform(X_np)
 
+        # P1 FIX: Monitor reconstruction error to detect out-of-distribution elites
+        X_reconstructed = self.pca.inverse_transform(X_latent)
+        reconstruction_error = np.mean((X_np - X_reconstructed) ** 2, axis=1)
+        mean_error = float(np.mean(reconstruction_error))
+        max_error = float(np.max(reconstruction_error))
+        # Warn if error exceeds threshold (configurable via pca_ood_threshold)
+        if max_error > self._pca_ood_threshold:
+            _LOGGER.warning(
+                "[diffusion] Elite candidates may be outside PCA basis "
+                "(max reconstruction error: %.4f > %.4f threshold). "
+                "Consider re-fitting PCA on combined data.",
+                max_error,
+                self._pca_ood_threshold,
+            )
+        else:
+            _LOGGER.debug(
+                "[diffusion] PCA reconstruction: mean_error=%.6f, max_error=%.6f",
+                mean_error,
+                max_error,
+            )
+
         X = torch.tensor(X_latent, dtype=torch.float32).to(self._device)
         M = torch.tensor(np.vstack(metrics_list), dtype=torch.float32).to(self._device)
 
@@ -509,6 +955,13 @@ class DiffusionDesignModel:
             "m_mean": self._tensor_to_list(self.m_mean),
             "m_std": self._tensor_to_list(self.m_std),
             "pca": self.pca,  # Pickled PCA object
+            # Issue #7: Save FourierAutoencoder state
+            "fourier_autoencoder_state": (
+                self.fourier_autoencoder.state_dict()
+                if self.fourier_autoencoder is not None
+                else None
+            ),
+            "use_fourier_encoder": self._use_fourier_encoder,
             "configs": {
                 "hidden_dim": self._hidden_dim,
                 "n_layers": self._n_layers,
@@ -525,6 +978,20 @@ class DiffusionDesignModel:
         self.pca = checkpoint.get("pca")
         if self.pca:
             self._pca_components = self.pca.n_components_
+
+        # Issue #7: Load FourierAutoencoder if present
+        self._use_fourier_encoder = checkpoint.get("use_fourier_encoder", False)
+        ae_state = checkpoint.get("fourier_autoencoder_state")
+        if ae_state is not None and self._schema is not None:
+            self.fourier_autoencoder = FourierAutoencoder(
+                mpol=self._schema.mpol,
+                ntor=self._schema.ntor,
+                latent_dim=self._pca_components,
+            ).to(self._device)
+            self.fourier_autoencoder.load_state_dict(ae_state)
+            self.fourier_autoencoder.eval()
+        else:
+            self.fourier_autoencoder = None
 
         # Load configs if present
         configs = checkpoint.get("configs", {})
@@ -553,20 +1020,55 @@ class DiffusionDesignModel:
         self._trained = bool(checkpoint.get("trained", self._trained))
 
     def sample(
-        self, n_samples: int, target_metrics: Mapping[str, float], seed: int
+        self,
+        n_samples: int,
+        target_metrics: Mapping[str, float],
+        seed: int,
+        apply_fourier_decay: bool = True,
+        fourier_decay_rate: float = 0.3,
     ) -> list[Mapping[str, Any]]:
-        """Generate candidates conditioned on target metrics."""
+        """Generate candidates conditioned on target metrics.
+
+        Args:
+            n_samples: Number of candidates to generate.
+            target_metrics: Target conditioning metrics (iota, aspect_ratio, nfp, N).
+            seed: Random seed for reproducibility.
+            apply_fourier_decay: If True, apply spectral decay to suppress
+                high-frequency modes in generated samples (Issue #8 fix).
+            fourier_decay_rate: Decay rate for high-frequency suppression.
+                Higher values = stronger suppression. Default 0.3.
+
+        Returns:
+            List of candidate dictionaries with params and metadata.
+        """
         if not self._trained or not self._has_model() or self._schema is None:
             _LOGGER.warning("[diffusion] Model not trained.")
             return []
 
         # Prepare target metrics tensor
-        # Must match _extract_metrics logic
-        # target_metrics usually comes from exploration worker which has good keys
-        iota = target_metrics.get("iota_bar", 0.0)  # check keys
-        ar = target_metrics.get("aspect_ratio", 0.0)
-        nfp = target_metrics.get("nfp", 3.0)
-        is_qh = target_metrics.get("N", 0.0)  # 0 for QA
+        # FIX A4.4: Use canonical keys from METRIC_KEYS (SSOT with _extract_metrics)
+        # Previously used wrong keys: "iota_bar", "nfp", "N" (from pseudo-code)
+        iota = target_metrics.get(
+            self.METRIC_KEYS[0]
+        )  # edge_rotational_transform_over_n_field_periods
+        ar = target_metrics.get(self.METRIC_KEYS[1])  # aspect_ratio
+        nfp = target_metrics.get(self.METRIC_KEYS[2])  # number_of_field_periods
+        is_qh = target_metrics.get(self.METRIC_KEYS[3])  # is_quasihelical
+
+        # Warn on missing required keys instead of silent fallback
+        if iota is None:
+            _LOGGER.warning(
+                "[diffusion] Missing key '%s' in target_metrics. "
+                "Defaulting iota=0.0 - conditioning may not work as intended.",
+                self.METRIC_KEYS[0],
+            )
+            iota = 0.0
+        if ar is None:
+            ar = 0.0
+        if nfp is None:
+            nfp = 3.0
+        if is_qh is None:
+            is_qh = 0.0
 
         m_vec = [iota, ar, nfp, is_qh]
 
@@ -582,9 +1084,10 @@ class DiffusionDesignModel:
         rng.manual_seed(seed)
 
         with torch.no_grad():
+            # Use latent dim from PCA or FourierAutoencoder (both use _pca_components)
             latent_dim = (
                 self._pca_components
-                if self.pca
+                if self.pca or self.fourier_autoencoder
                 else (self._schema.mpol * self._schema.ntor * 2)
             )
 
@@ -596,31 +1099,47 @@ class DiffusionDesignModel:
                 generator=rng,
             )
 
+            # DDPM reverse process: x_{t-1} = mu_theta(x_t, t) + sigma_t * z
+            # where mu_theta = (1/sqrt(alpha_t)) * (x_t - beta_t/sqrt(1-alpha_hat_t) * eps_theta)
+            # and sigma_t = sqrt(beta_tilde_t) is the POSTERIOR variance (not beta_t!)
             for i in reversed(range(self._timesteps)):
                 t = torch.full((n_samples,), i, device=self._device, dtype=torch.long)
                 predicted_noise = self._model(x, t, M)
 
                 alpha = self.alpha[i]
                 alpha_hat = self.alpha_hat[i]
-                beta = self.beta[i]
+                beta_tilde = self.beta_tilde[i]  # Use posterior variance, not beta!
 
                 if i > 0:
                     noise = torch.randn_like(x)
                 else:
                     noise = torch.zeros_like(x)
 
-                x = (1 / torch.sqrt(alpha)) * (
+                # Compute mean: mu_theta(x_t, t)
+                mu = (1 / torch.sqrt(alpha)) * (
                     x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise
-                ) + torch.sqrt(beta) * noise
+                )
+
+                # Add noise with correct posterior variance
+                x = mu + torch.sqrt(beta_tilde) * noise
 
             # Move to CPU
             latent_samples = x.cpu().numpy()
 
-            # Inverse PCA
-            if self.pca:
+            # Inverse transform: FourierAutoencoder or PCA
+            if self.fourier_autoencoder is not None:
+                latent_tensor = torch.tensor(
+                    latent_samples, dtype=torch.float32, device=self._device
+                )
+                flattened = self.fourier_autoencoder.decode(latent_tensor).cpu().numpy()
+            elif self.pca:
                 flattened = self.pca.inverse_transform(latent_samples)
             else:
                 flattened = latent_samples
+
+            # Issue #8 Fix: Apply Fourier decay to suppress unphysical high-frequency modes
+            if apply_fourier_decay:
+                flattened = self._apply_fourier_decay(flattened, fourier_decay_rate)
 
         candidates = []
         # Extract nfp from target_metrics - must match conditioning logic (line 568)
@@ -859,6 +1378,13 @@ class GenerativeDesignModel:
         half_size = grid_size  # for one channel in flattened vector
 
         for epoch in range(self._epochs):
+            # AoT Fix 1: Cyclical KL annealing - warmup over first 20 epochs
+            # Prevents posterior collapse (Higgins et al., 2017: β-VAE)
+            warmup_epochs = 20
+            kl_weight_effective = min(
+                self._kl_weight, self._kl_weight * (epoch + 1) / warmup_epochs
+            )
+
             epoch_loss = 0.0
             epoch_recon = 0.0
             epoch_kl = 0.0
@@ -878,17 +1404,22 @@ class GenerativeDesignModel:
 
                 recon, mu, logvar = self._model(x_img)
 
-                # Loss
-                # MSE between recon and x_img
-                recon_loss = F.mse_loss(recon, x_img, reduction="sum") / batch_size
+                # Loss - using proper per-element normalization for both terms
+                # This ensures consistent scaling regardless of input dimensions
+                #
+                # Reconstruction: MSE per element (mean over batch AND spatial dims)
+                recon_loss = F.mse_loss(recon, x_img, reduction="mean")
 
-                # KLD
-                # -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-                kld_loss = (
-                    -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
+                # KLD: -0.5 * mean(1 + log(sigma^2) - mu^2 - sigma^2)
+                # Using mean over both batch and latent dims for consistent scaling
+                # AoT Fix 2: Clamp logvar to prevent exp() overflow (float32 max ≈ 3.4e38)
+                logvar_clamped = torch.clamp(logvar, min=-20.0, max=20.0)
+                kld_loss = -0.5 * torch.mean(
+                    1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp()
                 )
 
-                loss = recon_loss + self._kl_weight * kld_loss
+                # AoT Fix 1: Use warmed-up KL weight to prevent posterior collapse
+                loss = recon_loss + kl_weight_effective * kld_loss
 
                 loss.backward()
                 self._optimizer.step()
@@ -939,6 +1470,8 @@ class GenerativeDesignModel:
             vec = flattened[i]
             try:
                 params = tools.structured_unflatten(vec, self._schema)
+                # M1 FIX: Add n_field_periods (standard for benchmarks per AGENTS.md)
+                params["n_field_periods"] = 3
                 # Add design hash and source
                 candidates.append(
                     {

@@ -63,7 +63,11 @@ def propose_boundary(
                 new_params["r_cos"] = r_cos.tolist()
         if "z_sin" in new_params and new_params["z_sin"] is not None:
             z_sin = np.asarray(new_params["z_sin"])
-            z_sin[0, :] = 0.0
+            if z_sin.ndim > 1:
+                center_idx = z_sin.shape[1] // 2
+                # Keep the canonical convention used by constellaration masks:
+                # for m=0 we only keep toroidal modes with n>=1.
+                z_sin[0, : center_idx + 1] = 0.0
             new_params["z_sin"] = z_sin.tolist()
 
     return new_params
@@ -164,8 +168,14 @@ def recombine_designs(
     keys = ["r_cos", "z_sin", "r_sin", "z_cos"]
 
     for key in keys:
-        val_a = np.asarray(params_a.get(key, []), dtype=float)
-        val_b = np.asarray(params_b.get(key, []), dtype=float)
+        raw_a = params_a.get(key)
+        raw_b = params_b.get(key)
+
+        # Some serialized boundaries include optional coefficient matrices as explicit
+        # `None` values (e.g., from Pydantic dumps). Treat those as "absent" so that
+        # crossover remains defined for stellarator-symmetric inputs.
+        val_a = np.asarray([] if raw_a is None else raw_a, dtype=float)
+        val_b = np.asarray([] if raw_b is None else raw_b, dtype=float)
 
         if val_a.size == 0 and val_b.size == 0:
             continue

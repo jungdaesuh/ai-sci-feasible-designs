@@ -393,7 +393,7 @@ class PlanningAgent:
                 "error": message,
                 "objective": None,
                 "feasibility": None,
-                "hv": None,
+                "gradient_proxy": None,
             }
 
     def make_boundary(
@@ -527,7 +527,7 @@ class PlanningAgent:
         evaluation_summary = {
             "objective": evaluation.get("objective"),
             "feasibility": evaluation.get("feasibility"),
-            "hv": evaluation.get("hv"),
+            "gradient_proxy": evaluation.get("gradient_proxy", evaluation.get("hv")),
             "stage": evaluation.get("stage"),
             "agent_stage_label": f"agent-cycle-{cycle_number}",
         }

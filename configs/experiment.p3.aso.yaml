@@ -16,7 +16,7 @@ boundary_template:
   perturbation_scale: 0.05
 
 budgets:
-  screen_evals_per_cycle: 100   # High budget for ASO loop (oracle calls)
+  screen_evals_per_cycle: 100 # High budget for ASO loop (oracle calls)
   promote_top_k: 10
   max_high_fidelity_evals_per_cycle: 100
   wall_clock_minutes: 60
@@ -73,6 +73,18 @@ aso:
   steps_per_supervision: 1
   stagnation_violation_threshold: 0.05
   max_penalty_boost: 4.0
+
+# Generative Model (StellarForge Diffusion)
+generative:
+  enabled: true
+  backend: diffusion
+  checkpoint_path: checkpoints/diffusion_v2.pt
+  device: cpu # Set to cuda/mps for GPU acceleration
+  hidden_dim: 2048
+  n_layers: 4
+  pca_components: 50
+  diffusion_timesteps: 200
+  batch_size: 4096
 
 reporting:
   prometheus_export_enabled: false

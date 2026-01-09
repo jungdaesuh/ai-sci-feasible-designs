@@ -76,7 +76,7 @@ def _build_adapter_payload(
     entries: list[dict[str, Any]],
     sample_limit: int,
 ) -> dict[str, Any]:
-    statuses = sorted({entry.get("status") for entry in entries if entry.get("status")})
+    statuses = sorted(s for s in (entry.get("status") for entry in entries) if s)
     sample_commands = [
         entry.get("reproduction_command")
         for entry in entries

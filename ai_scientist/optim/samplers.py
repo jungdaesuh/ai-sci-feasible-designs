@@ -49,8 +49,8 @@ class RotatingEllipseSampler:
             )
 
             # Expand to template modes
-            max_poloidal = max(1, self._template.n_poloidal_modes - 1)
-            max_toroidal = max(1, (self._template.n_toroidal_modes - 1) // 2)
+            max_poloidal = max(1, self._template.max_poloidal_mode)
+            max_toroidal = max(1, self._template.max_toroidal_mode)
 
             expanded = surface_rz_fourier.set_max_mode_numbers(
                 base_surface,
@@ -80,7 +80,11 @@ class RotatingEllipseSampler:
             center_idx = n_cols // 2
             if center_idx > 0:
                 r_cos[0, :center_idx] = 0.0
-            z_sin[0, :] = 0.0
+                z_sin[0, : center_idx + 1] = (
+                    0.0  # Zero n<=0, keep n>0 (vertical shaping)
+                )
+            else:
+                z_sin[0, :] = 0.0
 
             params = {
                 "r_cos": r_cos.tolist(),
@@ -142,8 +146,8 @@ class NearAxisSampler:
                         rotational_transform=rotational_transform,
                         mirror_ratio=mirror_ratio,
                         n_field_periods=self._template.n_field_periods,
-                        max_poloidal_mode=self._template.n_poloidal_modes,
-                        max_toroidal_mode=self._template.n_toroidal_modes,
+                        max_poloidal_mode=self._template.max_poloidal_mode,
+                        max_toroidal_mode=self._template.max_toroidal_mode,
                     )
                     params = _surface_to_params(surface)
                     candidates.append(

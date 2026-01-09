@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
+from typing import Any
 
 import pytest
 
-from ai_scientist import model_endpoint
 from ai_scientist.config import load_model_config
 from ai_scientist.model_provider import build_chat_request, invoke_chat_completion
 
@@ -60,18 +61,50 @@ def test_moonshot_requests_can_override_messages() -> None:
 
 
 def test_invoke_chat_completion_hits_mock_endpoint() -> None:
+    from unittest.mock import patch
+
     config = load_model_config()
     provider = config.get_provider("openrouter")
     tool_call = {"name": "make_boundary", "arguments": {}}
-    with model_endpoint.run_model_endpoint(
-        config=config, provider_name=provider.name
-    ) as server:
+
+    expected_body: dict[str, Any] = {
+        "choices": [
+            {
+                "message": {
+                    "content": {"type": "tool_call", "tool": tool_call["name"]},
+                }
+            }
+        ]
+    }
+
+    class _FakeHTTPResponse:
+        def __init__(self, payload: dict[str, Any], *, status: int = 200) -> None:
+            self._payload = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self.status = status
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def getcode(self) -> int:
+            return self.status
+
+        def __enter__(self) -> "_FakeHTTPResponse":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+    def _fake_urlopen(*_: object, **__: object) -> _FakeHTTPResponse:
+        return _FakeHTTPResponse(expected_body, status=200)
+
+    with patch("ai_scientist.model_provider.urlopen", new=_fake_urlopen):
         response = invoke_chat_completion(
             provider,
             tool_call,
-            base_url_override=server.url,
+            base_url_override="http://127.0.0.1:0",
             messages=[{"role": "user", "content": "ping"}],
         )
+
     assert response.status_code == 200
     content = (response.body.get("choices") or [{}])[0].get("message", {})
     payload = content.get("content", {})

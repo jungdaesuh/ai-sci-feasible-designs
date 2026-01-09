@@ -1,6 +1,6 @@
 """Shared fixtures and helpers reused between ai_scientist tests."""
 
-from constellaration.forward_model import ConstellarationMetrics
+from ai_scientist.backends.mock import MockMetrics
 
 
 def base_params() -> dict[str, list[list[float]] | int | bool]:
@@ -12,14 +12,11 @@ def base_params() -> dict[str, list[list[float]] | int | bool]:
     }
 
 
-def dummy_metrics() -> ConstellarationMetrics:
-    return ConstellarationMetrics(
+def dummy_metrics() -> MockMetrics:
+    return MockMetrics(
         aspect_ratio=3.0,
-        aspect_ratio_over_edge_rotational_transform=2.0,
         max_elongation=1.2,
-        axis_rotational_transform_over_n_field_periods=0.35,
         edge_rotational_transform_over_n_field_periods=0.4,
-        axis_magnetic_mirror_ratio=0.7,
         edge_magnetic_mirror_ratio=0.6,
         average_triangularity=-0.3,
         vacuum_well=0.1,
@@ -29,7 +26,7 @@ def dummy_metrics() -> ConstellarationMetrics:
     )
 
 
-def dummy_metrics_with(**overrides: float) -> ConstellarationMetrics:
+def dummy_metrics_with(**overrides: float) -> MockMetrics:
     data = dummy_metrics().model_dump()
     data.update(overrides)
-    return ConstellarationMetrics(**data)
+    return MockMetrics(**data)

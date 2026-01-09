@@ -38,3 +38,8 @@ def test_parse_args_preset_defaults_to_none(runner_module) -> None:
     """Verify that preset is None by default."""
     args = runner_module.parse_args([])
     assert args.preset is None
+
+
+def test_parse_args_no_rl_sets_flag(runner_module) -> None:
+    args = runner_module.parse_args(["--no-rl"])
+    assert args.disable_rl is True
