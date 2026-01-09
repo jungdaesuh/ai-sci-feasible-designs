@@ -266,13 +266,12 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         # 2. Check ranking called
         self.coordinator._surrogate_rank_seeds.assert_called_with(mock_seeds, 1)
 
-        # 3. Check best seed selected (id=4)
-        # The trajectory should be initialized with the first ranked seed
-        # We can check the call to TrajectoryState constructor or the print output
-        # Here we check that the trajectory was created with the best seed
-        # Note: We mocked TrajectoryState, so we check the call args
-        call_args = mock_traj_cls.call_args
-        self.assertEqual(call_args.kwargs["seed"]["id"], 9)
+        # 3. Check best seed selected (id=9)
+        # Verify the trajectory passed into the ASO runner uses the top-ranked seed.
+        run_call = self.coordinator._run_trajectory_aso.call_args
+        self.assertIsNotNone(run_call)
+        traj_arg = run_call.kwargs.get("traj", run_call.args[0])
+        self.assertEqual(traj_arg.seed["id"], 9)
 
 
 if __name__ == "__main__":
