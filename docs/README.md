@@ -2,6 +2,7 @@
 
 ## Active docs
 - AI Scientist roadmap: `AI_SCIENTIST_UNIFIED_ROADMAP.md`
+- Results: `RESULTS.md`
 - Repo structure: `REPOSITORY_STRUCTURE_AND_FLOW.md`
 - Onboarding: `ai_scientist_onboarding.md`
 - Run protocol: `run_protocol.md`
