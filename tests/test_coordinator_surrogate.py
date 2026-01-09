@@ -35,6 +35,7 @@ class TestCoordinatorSurrogate(unittest.TestCase):
             "torch.optim": MagicMock(),
             "torch.utils": MagicMock(),
             "torch.utils.data": MagicMock(),
+            "torch.utils.checkpoint": MagicMock(),
         }
 
         # Start patcher
@@ -44,14 +45,34 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         # Import modules under test (now using mocks)
         # We need to reload them to ensure they pick up the mocks
         import ai_scientist.coordinator
+        import ai_scientist.optim.alm_bridge
         import ai_scientist.optim.surrogate
         import importlib
 
-        importlib.reload(ai_scientist.optim.surrogate)
-        importlib.reload(ai_scientist.coordinator)
+        if "ai_scientist.optim.alm_bridge" in sys.modules:
+            mod = sys.modules["ai_scientist.optim.alm_bridge"]
+            importlib.reload(mod)
+        else:
+            import ai_scientist.optim.alm_bridge
 
-        self.Coordinator = ai_scientist.coordinator.Coordinator
-        self.SurrogatePrediction = ai_scientist.optim.surrogate.SurrogatePrediction
+        if "ai_scientist.optim.surrogate" in sys.modules:
+            mod = sys.modules["ai_scientist.optim.surrogate"]
+            importlib.reload(mod)
+        else:
+            import ai_scientist.optim.surrogate
+
+        if "ai_scientist.coordinator" in sys.modules:
+            mod = sys.modules["ai_scientist.coordinator"]
+            importlib.reload(mod)
+            self.Coordinator = mod.Coordinator
+        else:
+            import ai_scientist.coordinator
+
+            self.Coordinator = ai_scientist.coordinator.Coordinator
+
+        self.SurrogatePrediction = sys.modules[
+            "ai_scientist.optim.surrogate"
+        ].SurrogatePrediction
 
         # Mock configuration
         self.cfg = MagicMock()
@@ -78,13 +99,30 @@ class TestCoordinatorSurrogate(unittest.TestCase):
 
     def tearDown(self):
         self.modules_patcher.stop()
-        # Reload real modules if they were loaded before
-        # This is a bit heavy-handed but ensures safety
-        if "ai_scientist.coordinator" in sys.modules:
-            import ai_scientist.coordinator
-            import importlib
 
-            importlib.reload(ai_scientist.coordinator)
+        # Clean up modules that were explicitly reloaded during setUp.
+        # Do NOT include ai_scientist.forward_model here - it was never mocked,
+        # and deleting it causes pickle identity issues for ProcessPoolExecutor
+        # in subsequent tests (the _process_worker_initializer function reference
+        # becomes stale when the module is reloaded).
+        #
+        # Include parent modules (ai_scientist.optim) because they may have
+        # cached references to the reloaded submodules. Clean in reverse
+        # dependency order (children first) to avoid dangling references.
+        modules_to_clean = [
+            "ai_scientist.coordinator",
+            "ai_scientist.optim.alm_bridge",
+            "ai_scientist.optim.surrogate",
+            "ai_scientist.optim",  # Parent may cache references to surrogate
+        ]
+
+        for mod_name in modules_to_clean:
+            if mod_name in sys.modules:
+                del sys.modules[mod_name]
+
+        # Force garbage collection of the mock objects to prevent leaks
+        self.mock_modules = None
+        self.modules_patcher = None
 
     def test_surrogate_rank_seeds(self):
         # Setup seeds
@@ -134,11 +172,52 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         self.assertEqual(len(ranked), 2)
         self.mock_surrogate.rank_candidates.assert_not_called()
 
+    def test_produce_candidates_skips_rl_when_disabled(self):
+        # Disable RL refinement via config toggle
+        self.cfg.proposal_mix.rl_refinement_enabled = False
+
+        # Ensure HYBRID path (cycle < 5 -> HYBRID)
+        self.mock_world_model.average_recent_hv_delta.return_value = None
+
+        seeds = [
+            {"id": 1, "params": {"r_cos": [[1.0]], "z_sin": [[0.0]]}},
+            {"id": 2, "params": {"r_cos": [[1.0]], "z_sin": [[0.0]]}},
+        ]
+
+        self.coordinator.explore_worker.run.return_value = {"candidates": seeds}
+
+        # PreRelax + Geometer pass-through
+        self.coordinator.prerelax_worker = MagicMock()
+        self.coordinator.prerelax_worker.run.return_value = {"candidates": seeds}
+        self.coordinator.geo_worker.run.return_value = {"candidates": seeds}
+
+        # RL worker should not be called at all
+        self.coordinator.rl_worker = MagicMock()
+
+        # Optimization worker returns candidates
+        self.coordinator.opt_worker.run.return_value = {"candidates": seeds}
+
+        out = self.coordinator.produce_candidates(
+            cycle=1,
+            experiment_id=1,
+            n_candidates=2,
+            template=self.cfg.boundary_template,
+        )
+
+        self.assertEqual(len(out), 2)
+        self.coordinator.rl_worker.run.assert_not_called()
+        self.coordinator.opt_worker.run.assert_called_once()
+
     @patch("ai_scientist.coordinator.TrajectoryState")
     @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.optim.alm_bridge.create_alm_context")
     @patch("ai_scientist.coordinator.step_alm")
     def test_produce_candidates_aso_uses_surrogate(
-        self, mock_step, mock_create_alm, mock_traj_cls
+        self,
+        mock_step,
+        mock_create_alm_bridge,
+        mock_create_alm,
+        mock_traj_cls,
     ):
         # Setup
         n_needed = 1
@@ -168,6 +247,20 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         mock_traj_cls.return_value = mock_traj_instance
 
         mock_create_alm.return_value = (MagicMock(), MagicMock())
+        mock_create_alm_bridge.return_value = mock_create_alm.return_value
+        # Avoid deep ALM execution in this unit test while capturing inputs.
+        captured = {}
+
+        def _capture_traj(*args, **kwargs):
+            if "traj" in kwargs:
+                captured["traj"] = kwargs["traj"]
+            elif args:
+                captured["traj"] = args[0]
+            else:
+                captured["traj"] = None
+            return []
+
+        self.coordinator._run_trajectory_aso = MagicMock(side_effect=_capture_traj)
 
         # Call
         self.coordinator.produce_candidates_aso(
@@ -184,13 +277,11 @@ class TestCoordinatorSurrogate(unittest.TestCase):
         # 2. Check ranking called
         self.coordinator._surrogate_rank_seeds.assert_called_with(mock_seeds, 1)
 
-        # 3. Check best seed selected (id=4)
-        # The trajectory should be initialized with the first ranked seed
-        # We can check the call to TrajectoryState constructor or the print output
-        # Here we check that the trajectory was created with the best seed
-        # Note: We mocked TrajectoryState, so we check the call args
-        call_args = mock_traj_cls.call_args
-        self.assertEqual(call_args.kwargs["seed"]["id"], 9)
+        # 3. Check best seed selected (id=9)
+        # Verify the trajectory passed into the ASO runner uses the top-ranked seed.
+        self.assertIn("traj", captured)
+        self.assertIsNotNone(captured["traj"])
+        self.assertEqual(captured["traj"].seed["id"], 9)
 
 
 if __name__ == "__main__":

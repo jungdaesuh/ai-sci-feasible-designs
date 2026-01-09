@@ -10,7 +10,7 @@ def test_diffusion_model_training_and_sampling():
     for i in range(5):
         params = test_helpers.base_params()
         # Add some noise to params so they aren't identical
-        params["r_cos"][0][2] += i * 0.1
+        params["r_cos"][0][2] += i * 0.1  # pyright: ignore[reportIndexIssue]
 
         metrics = test_helpers.dummy_metrics_with(
             aspect_ratio=4.0 + i * 0.1,
@@ -31,6 +31,7 @@ def test_diffusion_model_training_and_sampling():
         epochs=2,
         batch_size=2,
         timesteps=10,  # Reduce timesteps for test speed
+        pca_components=4,  # Small value for test data
         device="cpu",
     )
 
@@ -58,20 +59,25 @@ def test_diffusion_model_training_and_sampling():
 
 
 def test_stellarator_diffusion_shapes():
-    mpol = 4
-    ntor = 4
-    metric_dim = 5
+    """Test StellaratorDiffusion model shape handling.
+
+    StellaratorDiffusion expects:
+    - x: (B, input_dim) - 2D PCA-compressed latent vector
+    - metrics: (B, 4) - Conditioning metrics (iota, A, nfp, N)
+    """
+    input_dim = 50  # PCA latent dimension (paper default)
+    metric_dim = 4  # (iota, A, nfp, N) - fixed by model architecture
     B = 2
 
-    model = generative.StellaratorDiffusion(mpol, ntor, metric_dim)
+    model = generative.StellaratorDiffusion(input_dim=input_dim)
 
-    x = torch.randn(B, 2, mpol + 1, 2 * ntor + 1)
+    x = torch.randn(B, input_dim)  # 2D: PCA-compressed latent
     t = torch.randint(0, 10, (B,))
     metrics = torch.randn(B, metric_dim)
 
     out = model(x, t, metrics)
 
-    assert out.shape == x.shape
+    assert out.shape == x.shape  # (B, input_dim)
 
 
 def test_diffusion_fine_tune_on_elites():
@@ -82,7 +88,7 @@ def test_diffusion_fine_tune_on_elites():
     candidates = []
     for i in range(5):
         params = test_helpers.base_params()
-        params["r_cos"][0][2] += i * 0.1
+        params["r_cos"][0][2] += i * 0.1  # pyright: ignore[reportIndexIssue]
 
         metrics = test_helpers.dummy_metrics_with(
             aspect_ratio=4.0 + i * 0.1,
@@ -102,6 +108,7 @@ def test_diffusion_fine_tune_on_elites():
         epochs=2,
         batch_size=2,
         timesteps=10,
+        pca_components=4,  # Small value for test data
         device="cpu",
     )
 
@@ -117,7 +124,7 @@ def test_diffusion_fine_tune_on_elites():
     elites = []
     for i in range(3):
         params = test_helpers.base_params()
-        params["r_cos"][0][3] += i * 0.2  # Different modification
+        params["r_cos"][0][3] += i * 0.2  # pyright: ignore[reportIndexIssue]
 
         metrics = test_helpers.dummy_metrics_with(
             aspect_ratio=5.0 + i * 0.1,  # Different range
@@ -149,3 +156,56 @@ def test_diffusion_fine_tune_on_elites():
     generated = model.sample(n_samples=1, target_metrics=target_metrics, seed=42)
     assert len(generated) == 1
     assert "params" in generated[0]
+
+
+def test_diffusion_with_fourier_encoder():
+    """Test DiffusionDesignModel with FourierAutoencoder instead of PCA (Issue #7 fix)."""
+    # 1. Create mock data
+    candidates = []
+    for i in range(5):
+        params = test_helpers.base_params()
+        params["r_cos"][0][2] += i * 0.1  # pyright: ignore[reportIndexIssue]
+
+        metrics = test_helpers.dummy_metrics_with(
+            aspect_ratio=4.0 + i * 0.1,
+            max_elongation=1.5 + i * 0.1,
+            minimum_normalized_magnetic_gradient_scale_length=20.0 + i,
+            edge_rotational_transform_over_n_field_periods=0.4,
+        )
+
+        candidates.append(
+            {"params": params, "metrics": metrics, "design_hash": f"hash_{i}"}
+        )
+
+    # 2. Initialize Model with FourierAutoencoder
+    model = generative.DiffusionDesignModel(
+        min_samples=2,
+        learning_rate=1e-3,
+        epochs=2,
+        batch_size=2,
+        timesteps=10,
+        pca_components=4,  # Latent dim for autoencoder
+        device="cpu",
+        use_fourier_encoder=True,  # Enable FourierAutoencoder
+        fourier_encoder_epochs=2,  # Fast for tests
+    )
+
+    # 3. Fit - should train autoencoder, not PCA
+    model.fit(candidates)
+    assert model._trained
+    assert model.fourier_autoencoder is not None
+    assert model.pca is None  # PCA should not be used
+
+    # 4. Sample - should use autoencoder decode
+    target_metrics = {
+        "aspect_ratio": 4.5,
+        "minimum_normalized_magnetic_gradient_scale_length": 22.0,
+        "max_elongation": 1.6,
+        "edge_rotational_transform_over_n_field_periods": 0.4,
+    }
+
+    generated = model.sample(n_samples=2, target_metrics=target_metrics, seed=42)
+
+    assert len(generated) == 2
+    assert "params" in generated[0]
+    assert generated[0]["source"] == "diffusion_conditional"

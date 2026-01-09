@@ -77,7 +77,6 @@ def test_run_presets_emit_expected_stage_history(tmp_path):
                     config=cfg,
                     world_model=wm,
                     planner=None,
-                    coordinator=None,
                     budget_controller=budget_controller,
                     fidelity_controller=fidelity_controller,
                 )

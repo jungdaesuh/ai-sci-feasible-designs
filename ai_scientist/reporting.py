@@ -263,6 +263,23 @@ def save_pareto_figure(
     if not pareto_entries:
         return None
     try:
+        import os
+
+        # Matplotlib/fontconfig can attempt to write cache data under user home
+        # (e.g., ~/.matplotlib or ~/.cache/fontconfig). In sandboxed or CI
+        # environments those locations are often not writable and can lead to
+        # hard failures. Route caches under the reporting directory instead and
+        # force a non-interactive backend.
+        cache_root = Path(out_dir) / ".cache"
+        mpl_cache_dir = cache_root / "matplotlib"
+        mpl_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLBACKEND", "Agg")
+        os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache_dir))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
+
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except ImportError:  # pragma: no cover - optional dependency
         _LOGGER.warning(

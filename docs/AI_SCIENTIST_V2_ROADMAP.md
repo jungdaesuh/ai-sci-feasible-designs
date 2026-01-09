@@ -52,7 +52,7 @@ You cannot skip steps. Phase 1 (Data) is required for Phase 2 (Training). Phase 
     - *Source:* `HYBRID_ARCHITECTURE_PLAN` (Phase 4)
     - *Action:* Update `ai_scientist/optim/differentiable.py`.
     - *Formula:* `Loss = w_p * NN(x) + w_e * Math(x)`.
-    - *Detail:* Inject `geometry.elongation(x)` (from 1.1) directly into the loss graph.
+    - *Detail:* Inject `geometry.elongation_isoperimetric(x)` (from 1.1) directly into the loss graph.
 
 - [x] **3.2 Update Runner for Offline Artifacts**
     - *Source:* `DATASET_INTEGRATION_PLAN` (Phase 2)

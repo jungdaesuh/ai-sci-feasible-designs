@@ -10,6 +10,7 @@ forward.
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
@@ -41,9 +42,14 @@ def _flatten_boundary_params(params: Mapping[str, Any]) -> np.ndarray:
 
 def _params_feature_vector(params: Mapping[str, Any]) -> np.ndarray:
     flattened = _flatten_boundary_params(params)
+    nfp = float(params.get("n_field_periods") or params.get("nfp") or 1.0)
     if flattened.size == 0:
-        return np.zeros((2,), dtype=float)
-    return np.array([float(np.sum(flattened)), float(flattened.size)], dtype=float)
+        vec = np.array([0.0, 0.0, nfp], dtype=float)
+    else:
+        vec = np.array(
+            [float(np.sum(flattened)), float(flattened.size), nfp], dtype=float
+        )
+    return vec
 
 
 @dataclass(frozen=True)
@@ -69,14 +75,22 @@ class SimpleSurrogateRanker:
         gradient = float(
             metrics.get("minimum_normalized_magnetic_gradient_scale_length", 0.0)
         )
-        aspect = float(metrics.get("aspect_ratio", 0.0))
-        hv = float(metrics.get("hv", gradient - aspect))
-        return np.array([gradient, aspect, hv, gradient - aspect], dtype=float)
+        aspect = float(metrics.get("aspect_ratio", 1.0))
+        # H2 FIX: Use gradient_proxy (with hv fallback for legacy data)
+        gradient_proxy = float(
+            metrics.get("gradient_proxy", metrics.get("hv", gradient - aspect))
+        )
+        return np.array(
+            [gradient, aspect, gradient_proxy, gradient - aspect], dtype=float
+        )
 
     def fit(
         self,
         metrics_list: Sequence[Mapping[str, Any]],
         target_values: Sequence[float],
+        *,
+        minimize_objective: bool = False,  # Ignored - ridge regression is symmetric
+        cycle: int | None = None,  # Ignored - no retrain cadence logic
     ) -> None:
         if not metrics_list:
             raise ValueError("training data cannot be empty")
@@ -97,17 +111,26 @@ class SimpleSurrogateRanker:
     def fit_from_world_model(
         self,
         world_model: memory.WorldModel,
-        *,
+        problem: str,
         target_column: str = "hv",
-        problem: str | None = None,
+        cycle: int = 0,
+        experiment_id: int | None = None,
     ) -> None:
+        """Fetch history from WorldModel and fit the ranker."""
         history = world_model.surrogate_training_data(
-            target=target_column, problem=problem
+            target=target_column, problem=problem, experiment_id=experiment_id
         )
         if not history:
-            raise ValueError("insufficient history for surrogate training")
-        metrics_list, targets = zip(*history)
-        self.fit(metrics_list, targets)
+            return
+
+        metrics_list, target_values = zip(*history)
+        minimize_obj = problem.lower().startswith("p1")
+        self.fit(
+            metrics_list,
+            target_values,
+            minimize_objective=minimize_obj,
+            cycle=cycle,
+        )
 
     def _ensure_trained(self) -> None:
         if self._feature_weights is None:
@@ -166,6 +189,7 @@ class BaseSurrogate(ABC):
         *,
         minimize_objective: bool,
         exploration_ratio: float = 0.0,
+        problem: str | None = None,
     ) -> list[SurrogatePrediction]:
         """Rank candidates using the surrogate model."""
         pass
@@ -219,27 +243,45 @@ class SurrogateBundle(BaseSurrogate):
         self._single_class_fallback: int | None = (
             None  # Tracks degenerate training state
         )
+        # Explicit class encoding: 1 = feasible, 0 = infeasible
+        # Used for defensive single-class fallback logic
+        self._positive_class_label: int = 1
 
     def _with_timeout(self, func):
+        """Execute func with a timeout, ensuring non-blocking cleanup.
+
+        NOTE: We use shutdown(wait=False, cancel_futures=True) to prevent
+        deadlocks during test module reloading. This may leave orphaned threads
+        if the worker is truly stuck, but they will be cleaned up when the
+        process exits. This is an acceptable tradeoff for test suite stability.
+        See: https://github.com/python/cpython/issues/87423
+        """
         executor = ThreadPoolExecutor(max_workers=1)
         try:
+            print(f"DEBUG: submitting {func}")
             future = executor.submit(func)
-            result = future.result(timeout=self._timeout_seconds)
-            executor.shutdown(wait=True)
-            return result
-        except TimeoutError:
-            future.cancel()
-            executor.shutdown(wait=False)
-            raise
-        except:
-            executor.shutdown(wait=True)
-            raise
+            print("DEBUG: waiting for result")
+            res = future.result(timeout=self._timeout_seconds)
+            print("DEBUG: result received")
+            return res
+        finally:
+            # Non-blocking shutdown: prevents deadlock if worker is stuck
+            # cancel_futures=True prevents queued tasks from starting (Python 3.9+)
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _vectorize(self, params: Mapping[str, Any]) -> np.ndarray:
         vector, schema = tools.structured_flatten(params, schema=self._schema)
         if self._schema is None:
             self._schema = schema
-        return vector
+            # Canonicalization Warning: Schema derived from first candidate
+            logging.warning(
+                "[surrogate] Schema derived from first candidate: mpol=%d, ntor=%d. "
+                "Mixing shapes may cause silent truncation/zero-padding.",
+                schema.mpol,
+                schema.ntor,
+            )
+        nfp = float(params.get("n_field_periods") or params.get("nfp") or 1.0)
+        return np.append(vector, nfp)
 
     def _feature_matrix(self, metrics_list: Sequence[Mapping[str, Any]]) -> np.ndarray:
         vectors: list[np.ndarray] = []
@@ -302,18 +344,22 @@ class SurrogateBundle(BaseSurrogate):
             # Handle nested metrics structure if present, or direct keys
             m_payload = metrics.get("metrics", metrics)
 
-            # MHD: vacuum_well (>=0 is good). We often want to predict violation or raw value.
-            # Let's predict the raw value.
+            # MHD: vacuum_well
             vacuum_well = m_payload.get("vacuum_well")
             aux_targets["mhd"].append(
                 float(vacuum_well) if vacuum_well is not None else -1.0
             )
 
-            # QI: qi (lower is better)
+            # QI: qi
             qi_val = m_payload.get("qi")
-            aux_targets["qi"].append(float(qi_val) if qi_val is not None else 1.0)
+            # A4.2 FIX: Use log10 scale for QI
+            if qi_val is not None:
+                val = float(qi_val)
+                aux_targets["qi"].append(math.log10(max(val, 1e-12)))
+            else:
+                aux_targets["qi"].append(0.0)
 
-            # Elongation: max_elongation (lower is better)
+            # Elongation: max_elongation
             elongation = m_payload.get("max_elongation")
             aux_targets["elongation"].append(
                 float(elongation) if elongation is not None else 10.0
@@ -325,35 +371,33 @@ class SurrogateBundle(BaseSurrogate):
 
         feasible_mask = feasibility_labels == 1
 
-        # Align classifier features to all rows; regressor uses features_reg.
+        # We must define the training function here to capture local variables
         def _train_bundle() -> None:
             scaler = StandardScaler()
             scaled_class = scaler.fit_transform(features)
+
             clf = RandomForestClassifier(
-                n_estimators=12,
-                max_depth=6,
-                random_state=0,
-                n_jobs=1,
+                n_estimators=100, max_depth=12, random_state=0, n_jobs=1
             )
 
-            # Validate training data has both classes (fixes silent degradation)
+            # Validate training data
             unique_classes = np.unique(feasibility_labels)
             if len(unique_classes) < 2:
                 logging.warning(
                     f"[surrogate] Single-class training data (class={unique_classes[0]}) "
-                    "- classifier cannot discriminate between feasible/infeasible"
+                    "- skipping classifier training, using constant fallback"
                 )
                 self._single_class_fallback = int(unique_classes[0])
+                clf = None
             else:
                 self._single_class_fallback = None
-
-            clf.fit(scaled_class, feasibility_labels)
+                clf.fit(scaled_class, feasibility_labels)
 
             regressors = {}
 
-            # Train primary objective regressor (on feasible data only if enough samples)
+            # Primary Regressor
             primary_reg = RandomForestRegressor(
-                n_estimators=12, max_depth=6, random_state=0, n_jobs=1
+                n_estimators=100, max_depth=12, random_state=0, n_jobs=1
             )
             if np.count_nonzero(feasible_mask) >= self._min_feasible_for_regressor:
                 primary_reg.fit(
@@ -364,23 +408,11 @@ class SurrogateBundle(BaseSurrogate):
                 primary_reg.fit(scaled_class, primary_targets)
             regressors["objective"] = primary_reg
 
-            # Train auxiliary regressors (using all data or feasible? Physics metrics usually valid even if not fully feasible?)
-            # The prompt implies we want to predict violation "Instead of Infeasible (0.0), tell it MHD Violation = 0.5".
-            # VMEC usually returns metrics even if it's not a "good" stellarator, unless it crashed.
-            # If it crashed, we might have default bad values.
-            # Let's train on all data for aux metrics to learn from failures too, if data exists.
-            # But wait, if VMEC crashed, metrics are mostly junk.
-            # However, `runner.py` fills defaults on exception.
-            # Let's stick to the same logic: if we have enough feasible, use them.
-            # BUT for "restoration", we need to guide FROM infeasible TO feasible.
-            # So we MUST train on infeasible data if it has valid metrics.
-            # Assuming `metrics_list` contains valid VMEC outputs.
-
+            # Aux Regressors
             for name, targets in aux_target_arrays.items():
                 reg = RandomForestRegressor(
-                    n_estimators=12, max_depth=6, random_state=0, n_jobs=1
+                    n_estimators=100, max_depth=12, random_state=0, n_jobs=1
                 )
-                # Train on all data to capture the landscape including bad regions
                 reg.fit(scaled_class, targets)
                 regressors[name] = reg
 
@@ -410,7 +442,8 @@ class SurrogateBundle(BaseSurrogate):
     def _predict_batch(
         self, feature_matrix: np.ndarray
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        assert self._classifier is not None
+        # Classifier can be None if single-class fallback is active
+        assert self._classifier is not None or self._single_class_fallback is not None
         assert self._regressors
         assert self._scaler is not None
 
@@ -420,7 +453,8 @@ class SurrogateBundle(BaseSurrogate):
             # Use tracked single-class fallback instead of runtime detection
             if self._single_class_fallback is not None:
                 # Degenerate classifier: return constant probability based on known class
-                if self._single_class_fallback == 1:
+                # Use explicit _positive_class_label for defensive coding
+                if self._single_class_fallback == self._positive_class_label:
                     prob = np.ones(scaled.shape[0])  # All "feasible"
                 else:
                     prob = np.zeros(scaled.shape[0])  # All "infeasible"
@@ -472,6 +506,7 @@ class SurrogateBundle(BaseSurrogate):
         *,
         minimize_objective: bool,
         exploration_ratio: float = 0.0,
+        problem: str | None = None,
     ) -> list[SurrogatePrediction]:
         if not candidates:
             return []
@@ -501,20 +536,45 @@ class SurrogateBundle(BaseSurrogate):
         objs = preds_dict.get("objective", np.zeros(len(candidates)))
         mhds = preds_dict.get("mhd", np.zeros(len(candidates)))
         qis = preds_dict.get("qi", np.zeros(len(candidates)))
+        # A4.2 FIX: Denormalize QI from log10 to linear scale
+        qis = 10.0**qis
         elongations = preds_dict.get("elongation", np.zeros(len(candidates)))
 
         ranked: list[SurrogatePrediction] = []
+
+        # Gate objective weight on actual regressor existence
+        # self._regressors is dict[str, RandomForestRegressor]
+        objective_regressor_trained = (
+            self._trained and self._regressors.get("objective") is not None
+        )
+
+        if objective_regressor_trained:
+            training_size = self._last_fit_count
+            MIN_SAMPLES_FOR_OBJ = 32
+            obj_weight = min(1.0, training_size / (MIN_SAMPLES_FOR_OBJ * 2))
+        else:
+            obj_weight = 0.0
+
         for i, candidate in enumerate(candidates):
             pf = prob[i]
             obj = objs[i]
 
             constraint_distance = float(candidate.get("constraint_distance", 0.0))
             constraint_distance = max(0.0, constraint_distance)
+
+            # Classifier entropy (binary classification uncertainty proxy)
             uncertainty = float(pf * (1.0 - pf))
+
+            # Expected value: feasibility-weighted objective
             base_score = self._expected_value(pf, obj, minimize_objective)
-            score = (float(pf) - constraint_distance) + exploration_weight * uncertainty
-            # Preserve expected_value semantics for downstream consumers.
-            score = score if self._trained else base_score
+
+            # Composite score with ramped objective contribution
+            score = (
+                obj_weight * base_score
+                + (1.0 - obj_weight) * float(pf)
+                - constraint_distance
+                + exploration_weight * uncertainty
+            )
             ranked.append(
                 SurrogatePrediction(
                     expected_value=score,

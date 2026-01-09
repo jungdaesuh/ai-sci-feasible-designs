@@ -20,7 +20,6 @@ from ai_scientist import config as ai_config
 from ai_scientist import memory, rag, tools
 from ai_scientist import planner as ai_planner
 from ai_scientist.budget_manager import BudgetController
-from ai_scientist.coordinator import Coordinator
 from ai_scientist.cycle_executor import CycleExecutor, serialize_experiment_config
 from ai_scientist.experiment_setup import (
     RunnerCLIConfig,
@@ -32,7 +31,6 @@ from ai_scientist.experiment_setup import (
     validate_runtime_flags,
 )
 from ai_scientist.fidelity_controller import CycleSummary, FidelityController
-from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from orchestration import adaptation as adaptation_helpers
 
 
@@ -145,21 +143,10 @@ def run_experiment(
             else None
         )
 
-        coordinator = Coordinator(
-            cfg,
-            world_model,
-            planner=planning_agent or ai_planner.PlanningAgent(world_model=world_model),
-            surrogate=surrogate_model
-            if isinstance(surrogate_model, NeuralOperatorSurrogate)
-            else None,
-            generative_model=generative_model,
-        )
-
         cycle_executor = CycleExecutor(
             config=cfg,
             world_model=world_model,
             planner=planning_agent,
-            coordinator=coordinator,
             budget_controller=budget_controller,
             fidelity_controller=fidelity_ctl,
         )
@@ -402,6 +389,15 @@ def main() -> None:
         )
     if cli.aso:
         experiment = replace(experiment, aso=replace(experiment.aso, enabled=True))
+    if getattr(cli, "disable_rl", False):
+        run_overrides = dict(experiment.run_overrides or {})
+        proposal_mix_overrides: dict[str, Any] = {}
+        existing_proposal_mix = run_overrides.get("proposal_mix")
+        if isinstance(existing_proposal_mix, Mapping):
+            proposal_mix_overrides.update(existing_proposal_mix)
+        proposal_mix_overrides["rl_refinement_enabled"] = False
+        run_overrides["proposal_mix"] = proposal_mix_overrides
+        experiment = replace(experiment, run_overrides=run_overrides)
     if cli.slow:
         experiment = replace(
             experiment,

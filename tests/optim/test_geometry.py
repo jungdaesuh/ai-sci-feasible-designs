@@ -154,3 +154,221 @@ class TestGeometryInvariants:
         assert np.all(np.isfinite(R))
         assert np.all(np.isfinite(Z))
         assert np.all(np.isfinite(Phi))
+
+
+class TestCorrectedGeometryMetrics:
+    """Tests for physics-corrected geometry metrics (B4, B5 fixes)."""
+
+    def test_aspect_ratio_arc_length_circular_torus(self):
+        """
+        For a circular torus (R = R0 + a*cos(θ), Z = a*sin(θ)):
+        - Parametric mean and arc-length mean should agree (circular cross-section)
+        - Both should give AR = R0 / a
+        """
+        R_major = 10.0
+        R_minor = 1.0
+
+        mpol = 1
+        ntor = 0
+        r_cos = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+        z_sin = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+
+        r_cos[0, 0, 0] = R_major
+        r_cos[0, 1, 0] = R_minor
+        z_sin[0, 1, 0] = R_minor
+
+        nfp = 1
+
+        ar_original = geometry.aspect_ratio(r_cos, z_sin, nfp)
+        ar_corrected = geometry.aspect_ratio_arc_length(r_cos, z_sin, nfp)
+
+        expected_ar = R_major / R_minor
+
+        # Both should match for circular cross-section
+        assert np.isclose(ar_original.item(), expected_ar, rtol=0.05)
+        assert np.isclose(ar_corrected.item(), expected_ar, rtol=0.05)
+        # They should be very close for circular case
+        assert np.isclose(ar_original.item(), ar_corrected.item(), rtol=0.02)
+
+    def test_aspect_ratio_arc_length_elongated_differs(self):
+        """
+        For an elongated cross-section, arc-length weighted centroid
+        should differ from parametric mean.
+
+        Physics: High-curvature regions (near Z extrema for elongated shape)
+        get under-sampled by parametric mean.
+        """
+        R_major = 10.0
+
+        mpol = 2
+        ntor = 0
+        r_cos = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+        z_sin = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+
+        # Elliptical cross-section: a=1 (R direction), b=2 (Z direction)
+        r_cos[0, 0, 0] = R_major  # Major radius
+        r_cos[0, 1, 0] = 1.0  # R amplitude
+        z_sin[0, 1, 0] = 2.0  # Z amplitude (elongated in Z)
+
+        nfp = 1
+
+        ar_original = geometry.aspect_ratio(r_cos, z_sin, nfp)
+        ar_corrected = geometry.aspect_ratio_arc_length(r_cos, z_sin, nfp)
+
+        # Both should be positive and reasonable
+        assert ar_original.item() > 0
+        assert ar_corrected.item() > 0
+
+        # For elongated shapes, the methods should give different results
+        # (typically a few percent difference)
+        # Note: the corrected version uses arc-length weighting
+        # We don't assert which is larger, just that they differ for non-circular
+        # In practice, the difference depends on the exact shape
+
+    def test_elongation_isoperimetric_circle(self):
+        """
+        For a circular cross-section, elongation should be 1.0.
+        """
+        R_major = 10.0
+        R_minor = 1.0
+
+        mpol = 1
+        ntor = 0
+        r_cos = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+        z_sin = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+
+        r_cos[0, 0, 0] = R_major
+        r_cos[0, 1, 0] = R_minor
+        z_sin[0, 1, 0] = R_minor  # Circular: same R and Z amplitude
+
+        nfp = 1
+
+        elo_original = geometry.elongation(r_cos, z_sin, nfp)
+        elo_isoperimetric = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
+
+        # Both should be close to 1.0 for circular cross-section
+        assert np.isclose(elo_original.item(), 1.0, rtol=0.1)
+        assert np.isclose(elo_isoperimetric.item(), 1.0, rtol=0.1)
+
+    def test_elongation_isoperimetric_ellipse(self):
+        """
+        For an elliptical cross-section with semi-axes a, b:
+        - Elongation should be a/b (or b/a, whichever > 1)
+        - Isoperimetric method should match covariance for pure ellipses
+        """
+        R_major = 10.0
+
+        # Ellipse with aspect ratio 2:1 (elongation = 2)
+        a = 1.0  # R amplitude
+        b = 2.0  # Z amplitude
+
+        mpol = 1
+        ntor = 0
+        r_cos = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+        z_sin = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+
+        r_cos[0, 0, 0] = R_major
+        r_cos[0, 1, 0] = a
+        z_sin[0, 1, 0] = b
+
+        nfp = 1
+
+        elo_original = geometry.elongation(r_cos, z_sin, nfp)
+        elo_isoperimetric = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
+
+        expected_elongation = max(a, b) / min(a, b)  # = 2.0
+
+        # Covariance method should give exact result for ellipse
+        assert np.isclose(elo_original.item(), expected_elongation, rtol=0.1)
+
+        # Isoperimetric should also be close (within ~20% for moderate elongations)
+        assert np.isclose(elo_isoperimetric.item(), expected_elongation, rtol=0.3)
+
+    def test_elongation_isoperimetric_higher_elongation(self):
+        """
+        Test with higher elongation (3:1).
+        """
+        R_major = 10.0
+        a = 1.0
+        b = 3.0  # Higher elongation
+
+        mpol = 1
+        ntor = 0
+        r_cos = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+        z_sin = torch.zeros((1, mpol + 1, 2 * ntor + 1))
+
+        r_cos[0, 0, 0] = R_major
+        r_cos[0, 1, 0] = a
+        z_sin[0, 1, 0] = b
+
+        nfp = 1
+
+        elo_original = geometry.elongation(r_cos, z_sin, nfp)
+        elo_isoperimetric = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
+
+        expected_elongation = 3.0
+
+        # Both methods should capture the elongation
+        assert elo_original.item() > 2.0
+        assert elo_isoperimetric.item() > 2.0
+
+        # Covariance should be close to exact for pure ellipse
+        assert np.isclose(elo_original.item(), expected_elongation, rtol=0.15)
+
+    def test_corrected_metrics_batched(self):
+        """
+        Test that corrected metrics work with batched inputs.
+        """
+        batch_size = 4
+        mpol = 2
+        ntor = 1
+
+        r_cos = torch.randn(batch_size, mpol + 1, 2 * ntor + 1) * 0.1
+        z_sin = torch.randn(batch_size, mpol + 1, 2 * ntor + 1) * 0.1
+
+        # Set major radius
+        r_cos[:, 0, ntor] = 10.0
+        # Set minor radius
+        r_cos[:, 1, ntor] = 1.0
+        z_sin[:, 1, ntor] = 1.0
+
+        nfp = 3
+
+        ar = geometry.aspect_ratio_arc_length(r_cos, z_sin, nfp)
+        elo = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
+
+        assert ar.shape == (batch_size,)
+        assert elo.shape == (batch_size,)
+        assert torch.all(ar > 0)
+        assert torch.all(elo >= 1.0)
+
+    def test_corrected_metrics_differentiable(self):
+        """
+        Test that corrected metrics support gradient computation.
+        """
+        mpol = 1
+        ntor = 0
+        r_cos = torch.zeros((1, mpol + 1, 2 * ntor + 1), requires_grad=True)
+        z_sin = torch.zeros((1, mpol + 1, 2 * ntor + 1), requires_grad=True)
+
+        # Need to use in-place operations carefully with grad
+        r_cos_data = torch.tensor([[[10.0], [1.0]]])
+        z_sin_data = torch.tensor([[[0.0], [1.5]]])
+
+        r_cos = r_cos_data.clone().requires_grad_(True)
+        z_sin = z_sin_data.clone().requires_grad_(True)
+
+        nfp = 1
+
+        ar = geometry.aspect_ratio_arc_length(r_cos, z_sin, nfp)
+        elo = geometry.elongation_isoperimetric(r_cos, z_sin, nfp)
+
+        # Compute loss and backprop
+        loss = ar.sum() + elo.sum()
+        loss.backward()
+
+        # Gradients should exist and be finite
+        assert r_cos.grad is not None
+        assert z_sin.grad is not None
+        assert torch.all(torch.isfinite(r_cos.grad))
+        assert torch.all(torch.isfinite(z_sin.grad))

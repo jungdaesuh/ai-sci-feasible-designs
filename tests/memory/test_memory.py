@@ -165,6 +165,74 @@ def test_world_model_surrogate_training_data(tmp_path):
         assert all(value >= 1.0 for _, value in objective_history)
 
 
+def test_surrogate_training_data_experiment_isolation(tmp_path):
+    """A3 FIX: Verify experiment_id filters training data correctly.
+
+    This test ensures that surrogate training data is isolated per experiment
+    for experimental hygiene, preventing transfer learning across experiments
+    unless explicitly desired.
+    """
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        # Create two experiments
+        exp1 = wm.start_experiment({"problem": "p3"}, "sha_exp1")
+        exp2 = wm.start_experiment({"problem": "p3"}, "sha_exp2")
+
+        # Log candidates to experiment 1 with distinct hv values
+        wm.log_candidate(
+            experiment_id=exp1,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.1]]},
+            seed=1,
+            status="promote",
+            evaluation={
+                "stage": "promote",
+                "objective": 1.0,
+                "feasibility": 0.0,
+                "metrics": {"aspect_ratio": 8.0},
+                "design_hash": "exp1_hash",
+            },
+            design_hash="exp1_hash",
+        )
+        wm.log_metrics(1, {"aspect_ratio": 8.0}, hv=0.5, objective=1.0)
+
+        # Log candidates to experiment 2 with different hv values
+        wm.log_candidate(
+            experiment_id=exp2,
+            problem="p3",
+            params={"r_cos": [[2.0]], "z_sin": [[0.2]]},
+            seed=2,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 2.0,
+                "feasibility": 0.01,
+                "metrics": {"aspect_ratio": 10.0},
+                "design_hash": "exp2_hash",
+            },
+            design_hash="exp2_hash",
+        )
+        wm.log_metrics(2, {"aspect_ratio": 10.0}, hv=0.8, objective=2.0)
+
+        # Test isolation: filter by exp1
+        data_exp1 = wm.surrogate_training_data(problem="p3", experiment_id=exp1)
+        assert len(data_exp1) == 1, f"Expected 1 entry for exp1, got {len(data_exp1)}"
+        assert data_exp1[0][1] == 0.5, "Exp1 should have hv=0.5"
+
+        # Test isolation: filter by exp2
+        data_exp2 = wm.surrogate_training_data(problem="p3", experiment_id=exp2)
+        assert len(data_exp2) == 1, f"Expected 1 entry for exp2, got {len(data_exp2)}"
+        assert data_exp2[0][1] == 0.8, "Exp2 should have hv=0.8"
+
+        # Test no filter: returns all experiments
+        data_all = wm.surrogate_training_data(problem="p3")
+        assert len(data_all) == 2, f"Expected 2 entries total, got {len(data_all)}"
+
+        # Verify _stage injection (A4.3 helper fix)
+        for metrics, _ in data_all:
+            assert "_stage" in metrics, "Should inject _stage key for fidelity"
+
+
 def test_record_cycle_hv_and_pareto_archive(tmp_path):
     db_path = tmp_path / "world.db"
     with memory.WorldModel(db_path) as wm:

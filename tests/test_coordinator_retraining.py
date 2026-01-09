@@ -1,42 +1,74 @@
 # ruff: noqa: E402
 """Tests for periodic retraining in coordinator."""
 
-import importlib
+import dataclasses
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock dependencies at module level to avoid environment issues
-sys.modules["vmecpp"] = MagicMock()
-sys.modules["vmecpp.cpp"] = MagicMock()
-sys.modules["vmecpp.cpp._vmecpp"] = MagicMock()
+# Check if real constellaration is available BEFORE any mocking
+_CONSTELLARATION_AVAILABLE = False
+try:
+    import constellaration.forward_model as _check_fm
 
-constellaration = MagicMock()
-sys.modules["constellaration"] = constellaration
-sys.modules["constellaration.forward_model"] = MagicMock()
-sys.modules["constellaration.boozer"] = MagicMock()
-sys.modules["constellaration.mhd"] = MagicMock()
-sys.modules["constellaration.geometry"] = MagicMock()
-sys.modules["constellaration.geometry.surface_rz_fourier"] = MagicMock()
-sys.modules["constellaration.optimization"] = MagicMock()
-sys.modules["constellaration.optimization.augmented_lagrangian"] = MagicMock()
-sys.modules[
-    "constellaration.optimization.augmented_lagrangian"
-].AugmentedLagrangianState = MagicMock
-sys.modules["constellaration.optimization.settings"] = MagicMock()
-sys.modules["constellaration.utils"] = MagicMock()
-sys.modules["constellaration.utils.pytree"] = MagicMock()
-sys.modules["constellaration.problems"] = MagicMock()
-sys.modules["constellaration.initial_guess"] = MagicMock()
+    _CONSTELLARATION_AVAILABLE = True
+    del _check_fm
+except ImportError:
+    pass
 
-# Reload coordinator to ensure it picks up the mocked dependencies
-if "ai_scientist.coordinator" in sys.modules:
-    import ai_scientist.coordinator
 
-    importlib.reload(ai_scientist.coordinator)
+@pytest.fixture(autouse=True, scope="module")
+def mock_constellaration_modules():
+    """Mock constellaration modules for testing when not available.
 
-import dataclasses
+    Uses patch.dict context manager to ensure cleanup after tests.
+    This prevents pollution of sys.modules for subsequent test files.
+
+    Note on scope="module":
+    - Module scope is appropriate here because tests only READ from mocks
+    - If any test needs to MUTATE mock state, consider using scope="function"
+      or create test-specific mocks to avoid cross-test pollution
+    - The patch.dict context ensures all mocks are removed at module teardown
+    """
+    if _CONSTELLARATION_AVAILABLE:
+        # Real modules available, no mocking needed
+        yield
+        return
+
+    # Create mock modules
+    mock_constellaration = MagicMock()
+    mock_alm = MagicMock()
+    mock_alm.AugmentedLagrangianState = MagicMock
+
+    mock_modules = {
+        "vmecpp": MagicMock(),
+        "vmecpp.cpp": MagicMock(),
+        "vmecpp.cpp._vmecpp": MagicMock(),
+        "constellaration": mock_constellaration,
+        "constellaration.forward_model": MagicMock(),
+        "constellaration.boozer": MagicMock(),
+        "constellaration.mhd": MagicMock(),
+        "constellaration.geometry": MagicMock(),
+        "constellaration.geometry.surface_rz_fourier": MagicMock(),
+        "constellaration.optimization": MagicMock(),
+        "constellaration.optimization.augmented_lagrangian": mock_alm,
+        "constellaration.optimization.settings": MagicMock(),
+        "constellaration.utils": MagicMock(),
+        "constellaration.utils.pytree": MagicMock(),
+        "constellaration.problems": MagicMock(),
+        "constellaration.initial_guess": MagicMock(),
+    }
+
+    with patch.dict(sys.modules, mock_modules):
+        # Force re-import of coordinator to pick up mocks
+        if "ai_scientist.coordinator" in sys.modules:
+            del sys.modules["ai_scientist.coordinator"]
+        yield
+        # Cleanup: remove coordinator so it gets re-imported fresh next time
+        if "ai_scientist.coordinator" in sys.modules:
+            del sys.modules["ai_scientist.coordinator"]
+
 
 from ai_scientist.config import RetrainingConfig, load_experiment_config
 from ai_scientist.coordinator import Coordinator
@@ -170,3 +202,53 @@ class TestShouldRetrain:
 
         assert should is False
         assert reason == "no_trigger"
+
+
+class TestPeriodicRetrainTargets:
+    """Regression tests for target semantics in _periodic_retrain()."""
+
+    @pytest.fixture
+    def mock_cfg(self):
+        cfg = load_experiment_config("configs/experiment.example.yaml")
+        # Ensure retraining triggers immediately for the test.
+        retraining = RetrainingConfig(enabled=True, cycle_cadence=1, min_elites=1)
+        return dataclasses.replace(cfg, retraining=retraining, problem="p1")
+
+    def test_periodic_retrain_p1_trains_on_objective_not_negated(self, mock_cfg):
+        """P1 surrogate trains on max_elongation (objective) and ranks with minimize=True.
+
+        If we negate the objective during training but still call rank_candidates with
+        minimize_objective=True, the ranking inverts and prefers *worse* elongation.
+        """
+        with (
+            patch("ai_scientist.coordinator.OptimizationWorker"),
+            patch("ai_scientist.coordinator.ExplorationWorker"),
+            patch("ai_scientist.coordinator.GeometerWorker"),
+            patch("ai_scientist.coordinator.PreRelaxWorker"),
+            patch("ai_scientist.coordinator.RLRefinementWorker"),
+        ):
+            world_model = MagicMock()
+            world_model.average_recent_hv_delta.return_value = None
+            planner = MagicMock()
+            surrogate = MagicMock()
+            coord = Coordinator(
+                cfg=mock_cfg,
+                world_model=world_model,
+                planner=planner,
+                surrogate=surrogate,
+            )
+
+            # Candidate already has a real evaluation (ASO-style path).
+            candidate = {
+                "params": {"r_cos": [[1.0]], "z_sin": [[0.0]], "n_field_periods": 3},
+                "evaluation": {
+                    "objective": 2.0,  # max_elongation in P1 (lower is better)
+                    "metrics": {"max_elongation": 2.0},
+                },
+            }
+
+            coord._periodic_retrain(cycle=1, experiment_id=1, candidates=[candidate])
+
+            assert surrogate.fit.call_count == 1
+            _metrics_list, target_values = surrogate.fit.call_args.args[:2]
+            assert target_values == [2.0]

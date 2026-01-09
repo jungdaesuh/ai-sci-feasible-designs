@@ -26,6 +26,22 @@ class ProblemEvaluator(Protocol):
 
 @dataclass
 class CycleSummary:
+    """Summary of a single optimization cycle.
+
+    A5.4 FIX: Documented field semantics to prevent confusion.
+
+    Attributes:
+        cycle: Cycle number (1-indexed).
+        objective: Physics objective value. Direction varies by problem:
+                   P1/P3: minimize (lower is better)
+                   P2: maximize (higher is better)
+                   See ai_scientist.objective_types for full semantics.
+        feasibility: Max constraint violation (0 = feasible, >0 = infeasible).
+        hv: Hypervolume score (P3 Pareto front metric). For single-objective
+            problems (P1/P2), this may store gradient_proxy instead.
+        stage: Fidelity stage used for evaluation (e.g., "screen", "promote", "p3").
+    """
+
     cycle: int
     objective: float | None
     feasibility: float | None
@@ -103,15 +119,33 @@ def _crowding_distance(
 
 
 def _relative_objective_improvement(
-    history: list[CycleSummary], lookback: int
+    history: list[CycleSummary], lookback: int, *, minimize: bool = True
 ) -> float:
+    """Compute relative improvement in objective over recent history.
+
+    A5.3 FIX: Added `minimize` parameter to handle objective directionality.
+    For P2 (maximize gradient), pass minimize=False to invert the comparison.
+
+    Args:
+        history: List of cycle summaries.
+        lookback: Number of cycles to look back.
+        minimize: If True, lower objective is better (P1/P3).
+                  If False, higher objective is better (P2).
+
+    Returns:
+        Relative improvement as a fraction (positive = improvement).
+    """
     if len(history) <= lookback:
         return 0.0
     earlier = history[-lookback - 1].objective
     latest = history[-1].objective
     if earlier is None or latest is None:
         return 0.0
+    # diff > 0 means improvement for minimize=True (lower is better)
     diff = earlier - latest
+    if not minimize:
+        # A5.3 FIX: For maximize objectives (P2), invert the comparison
+        diff = -diff
     denom = abs(earlier) if abs(earlier) > 1e-6 else 1.0
     return float(diff / denom)
 
@@ -132,8 +166,7 @@ class FidelityController:
         stage: str,
         budgets: ai_config.BudgetConfig,
         cycle_start: float,
-        evaluate_fn: ProblemEvaluator
-        | None = None,  # Deprecated/Unused if using forward_model
+        evaluate_fn: ProblemEvaluator | None = None,
         *,
         sleep_per_eval: float = 0.0,
         tool_name: str | None = None,
@@ -150,22 +183,51 @@ class FidelityController:
         if _time_exceeded(cycle_start, wall_limit):
             return []
 
-        # Prepare settings
-        # We use tools._settings_for_stage to get the correct config
-        # This assumes tools is available and has this helper.
-        # If not, we should replicate logic or import from where it lives.
-        # For now, we rely on tools.
+        # Optional injection point: if an evaluator is provided, use it instead of
+        # the centralized forward model. This keeps integration tests fast (they can
+        # patch the evaluator) while production can rely on forward_model_batch.
+        if evaluate_fn is not None:
+            if tool_name:
+                adapter.prepare_peft_hook(tool_name, stage)
+
+            results: list[dict[str, Any]] = []
+            for candidate in candidate_list:
+                if _time_exceeded(cycle_start, wall_limit):
+                    break
+
+                evaluation = evaluate_fn(
+                    candidate["params"], stage=stage, use_cache=True
+                )
+                design_id = (
+                    candidate.get("design_hash")
+                    or evaluation.get("design_hash")
+                    or tools.design_hash(candidate["params"])
+                )
+                results.append(
+                    {
+                        "params": candidate["params"],
+                        "evaluation": evaluation,
+                        "seed": int(candidate.get("seed", -1)),
+                        "design_hash": str(design_id),
+                    }
+                )
+
+                if sleep_per_eval > 0:
+                    time.sleep(sleep_per_eval)
+
+            if tool_name:
+                adapter.apply_lora_updates(tool_name, stage)
+
+            return results
+
+        # Default (production) path: use the centralized forward model.
         fm_settings = tools._settings_for_stage(stage, self.config.problem)
 
-        # Prepare PEFT hook
         if tool_name:
             adapter.prepare_peft_hook(tool_name, stage)
 
-        # Extract boundaries
         boundaries = [c["params"] for c in candidate_list]
 
-        # Run Batch Evaluation
-        # We use the budgets.n_workers for parallelism
         batch_results = forward_model_batch(
             boundaries,
             fm_settings,
@@ -174,11 +236,9 @@ class FidelityController:
             use_cache=True,
         )
 
-        # Apply PEFT updates
         if tool_name:
             adapter.apply_lora_updates(tool_name, stage)
 
-        # Process Results
         results: list[dict[str, Any]] = []
 
         for i, result in enumerate(batch_results):
@@ -232,7 +292,11 @@ class FidelityController:
                 "max_violation": result.feasibility,
                 "cache_hit": result.cache_hit,
                 "vmec_status": "ok" if not result.error_message else "exception",
-                "settings": result.settings.constellaration_settings.model_dump(),
+                "settings": (
+                    result.settings.constellaration_settings.model_dump()
+                    if result.settings.constellaration_settings is not None
+                    else {}
+                ),
             }
 
             # Add derived fields
@@ -246,20 +310,31 @@ class FidelityController:
                 pass
             elif self.config.problem in ["p2", "p3"]:
                 eval_dict["minimize_objective"] = self.config.problem == "p3"
-                # Score logic
-                grad = float(
-                    metrics_dict.get(
-                        "minimum_normalized_magnetic_gradient_scale_length", 0.0
-                    )
-                )
-                aspect = float(metrics_dict.get("aspect_ratio", 1.0))
-                score = grad / max(1.0, aspect)
+                # Use canonical ranking score for consistency across codebase
+                # See ai_scientist.objective_types for semantics documentation
+                from ai_scientist.objective_types import compute_ranking_score
+
+                score = compute_ranking_score(metrics_dict, self.config.problem)
                 eval_dict["score"] = score
 
                 if self.config.problem == "p2":
-                    eval_dict["hv"] = max(0.0, grad - 1.0)
+                    grad = float(
+                        metrics_dict.get(
+                            "minimum_normalized_magnetic_gradient_scale_length", 0.0
+                        )
+                    )
+                    # H2 FIX: Renamed from "hv" to "gradient_proxy" - this is NOT hypervolume
+                    # This is a per-candidate proxy score = max(0, gradient - 1)
+                    # True hypervolume is computed at cycle level from the Pareto front
+                    eval_dict["gradient_proxy"] = max(0.0, grad - 1.0)
                 else:  # p3
-                    eval_dict["hv"] = max(0.0, grad - 1.0)
+                    grad = float(
+                        metrics_dict.get(
+                            "minimum_normalized_magnetic_gradient_scale_length", 0.0
+                        )
+                    )
+                    # H2 FIX: See comment above
+                    eval_dict["gradient_proxy"] = max(0.0, grad - 1.0)
 
             if result.error_message:
                 eval_dict["error"] = result.error_message
@@ -352,8 +427,11 @@ class FidelityController:
             )
             if triggered:
                 return True
+        # A5.3 FIX: Pass objective direction based on problem type
+        # P1/P3: minimize=True (lower is better), P2: minimize=False (higher is better)
+        minimize_objective = not self.config.problem.lower().startswith("p2")
         improvement = _relative_objective_improvement(
-            history, gate_cfg.s1_to_s2_lookback_cycles
+            history, gate_cfg.s1_to_s2_lookback_cycles, minimize=minimize_objective
         )
         triggered_improvement = improvement >= gate_cfg.s1_to_s2_objective_improvement
         print(

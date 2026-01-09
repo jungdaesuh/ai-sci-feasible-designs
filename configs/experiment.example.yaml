@@ -36,6 +36,7 @@ proposal_mix:
   exploration_ratio: 0.3
   jitter_scale: 0.01
   surrogate_pool_multiplier: 2.0
+  rl_refinement_enabled: true
 fidelity_ladder:
   screen: screen
   promote: promote

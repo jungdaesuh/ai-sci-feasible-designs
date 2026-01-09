@@ -10,11 +10,11 @@ Handles the core orchestration of a single governance cycle:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import platform
 import sys
-import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -44,9 +44,11 @@ from ai_scientist.optim.samplers import NearAxisSampler
 from ai_scientist.optim.surrogate import BaseSurrogate, SurrogatePrediction
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from constellaration import forward_model
+from ai_scientist import forward_model as centralized_fm
 from orchestration import adaptation as adaptation_helpers
 from ai_scientist.prefilter import FeasibilityPrefilter
 from ai_scientist.optim import geometry
+from ai_scientist.objective_types import get_training_target
 
 # Constants
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -161,14 +163,12 @@ class CycleExecutor:
         config: ai_config.ExperimentConfig,
         world_model: memory.WorldModel,
         planner: Any,  # ai_planner.PlanningAgent or similar
-        coordinator: Coordinator | None,
         budget_controller: BudgetController,
         fidelity_controller: FidelityController,
     ):
         self.config = config
         self.world_model = world_model
         self.planner = planner
-        self.coordinator = coordinator
         self.budget_controller = budget_controller
         self.fidelity_controller = fidelity_controller
         self.prefilter = FeasibilityPrefilter()
@@ -193,7 +193,16 @@ class CycleExecutor:
     ) -> CycleResult:
         tool_name = _problem_tool_name(self.config.problem)
         base_evaluate = _problem_evaluator(self.config.problem)
-        evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
+        verifier_evaluate_fn = adapter.with_peft(base_evaluate, tool_name=tool_name)
+        # Keep the centralized batch evaluator as the default (forward_model_batch),
+        # but allow tests to inject a lightweight evaluator by patching
+        # `_problem_evaluator` to return a different callable.
+        fidelity_evaluate_fn = (
+            None
+            if base_evaluate
+            in (tools.evaluate_p1, tools.evaluate_p2, tools.evaluate_p3)
+            else base_evaluate
+        )
         cycle_start = time.perf_counter()
         cycle_number = cycle_index + 1
         global _LAST_SURROGATE_FIT_SEC
@@ -319,8 +328,12 @@ class CycleExecutor:
         )
 
         if generative_model:
+            # P3 is multi-objective: surrogate predicts hypervolume contribution for
+            # ranking, not the single physics objective (aspect_ratio). This is
+            # intentional—see forward_model.compute_objective() docstring.
+            # Use SSOT function to determine target (avoids semantic drift).
             gen_history = self.world_model.surrogate_training_data(
-                target="hv" if self.config.problem == "p3" else "objective",
+                target=get_training_target(self.config.problem).value,
                 problem=self.config.problem,
             )
             if gen_history:
@@ -533,7 +546,9 @@ class CycleExecutor:
                         nfp_t = torch.tensor(nfp_list, dtype=torch.float32)
 
                         ar_batch = geometry.aspect_ratio(r_cos_t, z_sin_t, nfp_t)
-                        elo_batch = geometry.elongation(r_cos_t, z_sin_t, nfp_t)
+                        elo_batch = geometry.elongation_isoperimetric(
+                            r_cos_t, z_sin_t, nfp_t
+                        )
 
                         for k, idx in enumerate(indices_to_compute):
                             candidate_pool[idx]["aspect_ratio"] = float(
@@ -570,7 +585,7 @@ class CycleExecutor:
                 stage=screen_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=None,  # Deprecated
+                evaluate_fn=fidelity_evaluate_fn,
                 sleep_per_eval=sleep_per_eval,
                 tool_name=tool_name,
             )
@@ -641,7 +656,7 @@ class CycleExecutor:
                 stage=promote_stage,
                 budgets=active_budgets,
                 cycle_start=cycle_start,
-                evaluate_fn=None,  # Deprecated
+                evaluate_fn=fidelity_evaluate_fn,
                 sleep_per_eval=sleep_per_eval,
                 tool_name=tool_name,
             )
@@ -730,7 +745,23 @@ class CycleExecutor:
             summary=p3_summary,
         )
 
-        best_entry = min(latest_by_design.values(), key=_oriented_objective)
+        # M3 FIX: Prefer feasible candidates for best selection (scientific correctness)
+        feasible_entries = [
+            e
+            for e in latest_by_design.values()
+            if e.get("evaluation", {}).get("is_feasible", False)
+        ]
+        if feasible_entries:
+            best_entry = min(feasible_entries, key=_oriented_objective)
+        else:
+            # Fallback: use lowest max_violation if no feasible candidates
+            best_entry = min(
+                latest_by_design.values(),
+                key=lambda e: (
+                    e.get("evaluation", {}).get("max_violation", float("inf")),
+                    _oriented_objective(e),
+                ),
+            )
         best_eval: dict[str, Any] = dict(best_entry["evaluation"])
         metrics_payload = best_eval.setdefault("metrics", {})
         metrics_payload["cycle_hv"] = p3_summary.hv_score
@@ -901,6 +932,7 @@ class CycleExecutor:
                 "import json, sqlite3\n"
                 "from ai_scientist import tools\n"
                 f"conn = sqlite3.connect('{self.config.memory_db}')\n"
+                "row = conn.execute(\n"
                 '    "SELECT params_json FROM candidates WHERE design_hash = ? ORDER BY id DESC LIMIT 1",\n'
                 f"    ('{replay_entry.design_hash}',),\n"
                 ").fetchone()\n"
@@ -922,7 +954,7 @@ class CycleExecutor:
             cycle_number=cycle_number,
             best_entry=best_entry,
             best_eval=best_eval,
-            evaluation_fn=evaluate_fn,
+            evaluation_fn=verifier_evaluate_fn,
             tool_name=tool_name,
             best_seed=best_seed,
             git_sha=git_sha,
@@ -1125,6 +1157,18 @@ class CycleExecutor:
             title, content, out_dir=self.config.reporting_dir
         )
 
+        # Log cache info at cycle end (AoT recommendation for observability)
+        if log_cache_stats:
+            from ai_scientist import forward_model as fm
+
+            cache_info = fm.get_cache_info()
+            print(
+                f"[runner][cycle={cycle_number}] Cache stats: "
+                f"size={cache_info.get('currsize', 0)}/{cache_info.get('maxsize', 0)} "
+                f"hits={cache_info.get('hits', 0)} misses={cache_info.get('misses', 0)} "
+                f"rate={100 * cache_info.get('hits', 0) / (cache_info.get('hits', 0) + cache_info.get('misses', 0) + 1e-9):.1f}%"
+            )
+
         return CycleResult(
             cycle_index=cycle_index,
             candidates_evaluated=len(screen_results),
@@ -1214,9 +1258,15 @@ class CycleExecutor:
         ) = None
         if optimizer_mode == "sa-alm" or self.config.optimizer_backend == "sa-alm":
             problem = (self.config.problem or "").lower()
-            target_column = "hv" if problem == "p3" else "objective"
+            # P3 is multi-objective: surrogate predicts hypervolume contribution for
+            # ranking, not the single physics objective (aspect_ratio). This is
+            # intentional—see forward_model.compute_objective() docstring.
+            # Use SSOT function to determine target (avoids semantic drift).
+            target_column = get_training_target(self.config.problem).value
             history = self.world_model.surrogate_training_data(
-                target=target_column, problem=self.config.problem
+                target=target_column,
+                problem=self.config.problem,
+                experiment_id=experiment_id,
             )
             metrics_list: tuple[Mapping[str, Any], ...] = ()
             target_values: tuple[float, ...] = ()
@@ -1244,8 +1294,11 @@ class CycleExecutor:
                 params: Mapping[str, Any],
             ) -> Tuple[float, Sequence[float]]:
                 dummy_candidate = {"candidate_params": params}
+                p_key = (self.config.problem or "").lower()
                 predicted_list = surrogate_model.rank_candidates(
-                    [dummy_candidate], minimize_objective=False
+                    [dummy_candidate],
+                    minimize_objective=p_key.startswith("p1"),
+                    problem=p_key or "p3",
                 )
                 predicted = predicted_list[0]
 
@@ -1280,27 +1333,54 @@ class CycleExecutor:
                                 z_sin_list, dtype=torch.float32
                             ).unsqueeze(0)
                             elongation = float(
-                                geometry.elongation(r_cos_t, z_sin_t, nfp).item()
+                                geometry.elongation_isoperimetric(
+                                    r_cos_t, z_sin_t, nfp
+                                ).item()
                             )
                         else:
                             elongation = 1.0
                     except Exception:
                         elongation = 1.0
 
-                p_key = (self.config.problem or "").lower()
-
                 if p_key.startswith("p1"):
                     predicted_alm_constraints = [0.0, 0.0, 0.0]
-                elif p_key.startswith("p2"):
-                    c_elo = max(0.0, elongation - 5.0)
-                    qi_log = math.log10(qi) if qi > 0 else 10.0
-                    c_qi = max(0.0, qi_log - (-4.0))
-                    predicted_alm_constraints = [0.0, 0.0, 0.0, c_elo, c_qi]
                 else:
-                    c_mhd = max(0.0, -mhd)
-                    qi_log = math.log10(qi) if qi > 0 else 10.0
-                    c_qi = max(0.0, qi_log - (-3.5))
-                    predicted_alm_constraints = [0.0, 0.0, c_mhd, 0.0, c_qi]
+                    # IMPORTANT: These constraints must match the canonical order from
+                    # ai_scientist.constraints.get_constraint_names(problem). They are
+                    # normalized in the same way as forward_model.compute_constraint_margins.
+                    from ai_scientist.constraints import (
+                        get_constraint_bounds,
+                        get_constraint_names,
+                    )
+
+                    bounds = get_constraint_bounds(p_key)
+                    constraint_order = get_constraint_names(p_key)
+                    margins: dict[str, float] = {name: 0.0 for name in constraint_order}
+
+                    # QI: constraint is log10(qi) <= qi_log10_upper
+                    if "qi" in margins:
+                        qi_log_upper = float(bounds.get("qi_log10_upper", -3.5))
+                        qi_log = math.log10(qi) if qi > 0 else 10.0
+                        denom = abs(qi_log_upper) if abs(qi_log_upper) > 0.0 else 1.0
+                        margins["qi"] = (qi_log - qi_log_upper) / denom
+
+                    # Max elongation (P2 only): max_elongation <= max_elongation_upper
+                    if "max_elongation" in margins:
+                        elong_upper = float(bounds.get("max_elongation_upper", 5.0))
+                        denom = abs(elong_upper) if abs(elong_upper) > 0.0 else 1.0
+                        margins["max_elongation"] = (
+                            float(elongation) - elong_upper
+                        ) / denom
+
+                    # Vacuum well (P3 only): vacuum_well >= vacuum_well_lower
+                    if "vacuum_well" in margins:
+                        well_lower = float(bounds.get("vacuum_well_lower", 0.0))
+                        denom = max(0.1, abs(well_lower))
+                        margins["vacuum_well"] = (well_lower - float(mhd)) / denom
+
+                    predicted_alm_constraints = [
+                        margins[name] for name in constraint_order
+                    ]
 
                 return float(predicted.predicted_objective), predicted_alm_constraints
 
@@ -1329,28 +1409,10 @@ class CycleExecutor:
         num_alm_steps = max(1, active_budgets.screen_evals_per_cycle // budget_per_step)
 
         p_key = (self.config.problem or "").lower()
-        if p_key.startswith("p1"):
-            constraint_names = [
-                "aspect_ratio",
-                "average_triangularity",
-                "edge_rotational_transform",
-            ]
-        elif p_key.startswith("p2"):
-            constraint_names = [
-                "aspect_ratio",
-                "edge_rotational_transform",
-                "edge_magnetic_mirror_ratio",
-                "max_elongation",
-                "qi_log10",
-            ]
-        else:
-            constraint_names = [
-                "edge_rotational_transform",
-                "edge_magnetic_mirror_ratio",
-                "vacuum_well",
-                "flux_compression",
-                "qi_log10",
-            ]
+        # Use centralized constraint registry for consistent naming
+        from ai_scientist.constraints import get_constraint_names
+
+        constraint_names = get_constraint_names(p_key)
 
         import nevergrad
 
@@ -1372,7 +1434,9 @@ class CycleExecutor:
                     surrogate=surrogate_model,
                     alm_state=alm_state_dict,
                     n_field_periods_val=initial_params_map.get("n_field_periods", 1),
+                    problem=self.config.problem,
                     steps=budget_per_step,
+                    target=get_training_target(self.config.problem or "p3"),
                 )
                 x_new = jnp.array(x_new_np)
 
@@ -1392,7 +1456,9 @@ class CycleExecutor:
                     "is_stellarator_symmetric": cand_boundary.is_stellarator_symmetric,
                 }
                 if metrics:
-                    p3_margins = tools.compute_constraint_margins(metrics, "p3")
+                    p3_margins = tools.compute_constraint_margins(
+                        metrics, self.config.problem, stage=fm_settings.stage
+                    )
                     max_viol = tools._max_violation(p3_margins)
                 else:
                     max_viol = float(jnp.max(constr_new))
@@ -1451,7 +1517,9 @@ class CycleExecutor:
                     }
 
                     if metrics:
-                        p3_margins = tools.compute_constraint_margins(metrics, "p3")
+                        p3_margins = tools.compute_constraint_margins(
+                            metrics, self.config.problem, stage=fm_settings.stage
+                        )
                         max_viol = tools._max_violation(p3_margins)
                     else:
                         max_viol = float(jnp.max(constr))
@@ -1473,7 +1541,19 @@ class CycleExecutor:
                         }
                     )
 
-                    loss = augmented_lagrangian_function(obj, constr, state).item()
+                    # ALM minimizes by design. Convert maximization objectives into
+                    # a minimization form for the oracle loss.
+                    #
+                    # - P1: minimize elongation (already minimization)
+                    # - P2: maximize gradient -> minimize (20 - gradient) (matches
+                    #   constellaration.optimization.augmented_lagrangian_runner)
+                    obj_for_alm = obj
+                    if (self.config.problem or "").lower().startswith("p2"):
+                        obj_for_alm = 20.0 - obj
+
+                    loss = augmented_lagrangian_function(
+                        obj_for_alm, constr, state
+                    ).item()
                     oracle.tell(candidate, loss)
 
                 recommendation = oracle.provide_recommendation()
@@ -1562,6 +1642,49 @@ class CycleExecutor:
 # --- Helpers moved from runner.py ---
 
 
+def _expand_matrix_to_mode(
+    matrix: np.ndarray,
+    max_poloidal_mode: int,
+    max_toroidal_mode: int,
+) -> np.ndarray:
+    """Expand or validate Fourier coefficient matrix to target mode numbers.
+
+    Canonicalization Fix: Zero-pads if smaller, logs warning if larger.
+    The center column (n=0) is preserved during expansion.
+    """
+    target_rows = max_poloidal_mode + 1
+    target_cols = 2 * max_toroidal_mode + 1
+
+    if matrix.shape == (target_rows, target_cols):
+        return matrix
+
+    logging.info(
+        "[canonicalization] Expanding seed matrix from (%d, %d) to (%d, %d)",
+        matrix.shape[0],
+        matrix.shape[1],
+        target_rows,
+        target_cols,
+    )
+
+    expanded = np.zeros((target_rows, target_cols), dtype=float)
+
+    # Copy existing values, centering the toroidal modes
+    seed_ntor = (matrix.shape[1] - 1) // 2
+    target_ntor = max_toroidal_mode
+    col_offset = target_ntor - seed_ntor
+
+    rows_to_copy = min(matrix.shape[0], target_rows)
+    cols_to_copy = min(matrix.shape[1], target_cols)
+
+    for m in range(rows_to_copy):
+        for n_idx in range(cols_to_copy):
+            target_col = n_idx + col_offset
+            if 0 <= target_col < target_cols:
+                expanded[m, target_col] = matrix[m, n_idx]
+
+    return expanded
+
+
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
     resolved = path.resolve()
     cached = _BOUNDARY_SEED_CACHE.get(resolved)
@@ -1595,9 +1718,9 @@ def _load_seed_boundary(path: Path) -> dict[str, Any]:
 def _build_template_params_for_alm(
     template: ai_config.BoundaryTemplateConfig,
 ) -> Mapping[str, Any]:
-    n_poloidal = template.n_poloidal_modes
-    n_toroidal = template.n_toroidal_modes
-    center_idx = n_toroidal // 2
+    n_poloidal = template.n_poloidal_coefficients  # mpol + 1
+    n_toroidal = template.n_toroidal_coefficients  # 2*ntor + 1 (odd)
+    center_idx = template.max_toroidal_mode  # ntor
     r_cos = []
     z_sin = []
     for pol in range(n_poloidal):
@@ -1637,8 +1760,8 @@ def _generate_nae_candidate_params(
         rotational_transform=rotational_transform,
         mirror_ratio=mirror_ratio,
         n_field_periods=template.n_field_periods,
-        max_poloidal_mode=template.n_poloidal_modes - 1,
-        max_toroidal_mode=template.n_toroidal_modes - 1,
+        max_poloidal_mode=template.max_poloidal_mode,
+        max_toroidal_mode=template.max_toroidal_mode,
     )
     return {
         "r_cos": np.asarray(nae_boundary.r_cos).tolist(),
@@ -1656,9 +1779,15 @@ def _objective_constraints(
     problem_type: str,
     predictor: Callable[[Mapping[str, Any]], Tuple[float, Sequence[float]]]
     | None = None,
+    stage: str = "high",
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], forward_model.ConstellarationMetrics | None
 ]:
+    """Evaluate objective and constraints for a given boundary.
+
+    Uses the centralized ai_scientist.forward_model as SSOT for evaluation,
+    caching, and error handling.
+    """
     boundary_obj = unravel_and_unmask_fn(jnp.asarray(x * scale))
 
     boundary_params = {
@@ -1678,34 +1807,51 @@ def _objective_constraints(
             None,
         )
 
-    with tempfile.TemporaryDirectory() as _:
+    # Use centralized forward model (SSOT) with proper settings
+    # Fidelity mapping: promote/high/p2/p3 = high-fidelity VMEC
+    # (per forward_model.py:565 "promote: high-fidelity VMEC but skip QI")
+    stage_lower = stage.lower()
+    fidelity = (
+        "high"
+        if stage_lower in ("high", "promote", "p2", "p3", "high_fidelity")
+        else "low"
+    )
+    fm_settings = centralized_fm.ForwardModelSettings(
+        constellaration_settings=settings,
+        problem=problem_type,
+        stage=stage,
+        fidelity=fidelity,
+    )
+
+    try:
+        result = centralized_fm.forward_model(
+            boundary_params,
+            fm_settings,
+            use_cache=False,  # Disable cache for optimization inner loop
+        )
+        metrics = result.metrics
+        objective = jnp.array(result.objective)
+        constraints = jnp.array(result.constraints)
+    except Exception:
         metrics = None
-        try:
-            metrics, _ = forward_model.forward_model(
-                boundary=boundary_obj,
-                settings=settings,
-            )
-        except Exception as _:
-            pass
-
-        if metrics is None:
-            objective = jnp.array(NAN_TO_HIGH_VALUE)
-            p_key = (problem_type or "").lower()
-            if p_key.startswith("p1"):
-                c_size = 3
-            else:
-                c_size = 5
-            constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
+        # Failure penalties: constraints handle infeasibility (all set to NAN_TO_HIGH_VALUE)
+        # Objective: use semantically meaningful "worst" value per problem
+        # - P1: max elongation (minimize) -> use NAN_TO_HIGH_VALUE (large is bad)
+        # - P2: gradient scale length (maximize) -> use 0.0 (zero gradient is worst)
+        # - P3: aspect ratio (minimize) -> use NAN_TO_HIGH_VALUE (large is bad)
+        p_key = (problem_type or "").lower()
+        if p_key.startswith("p2"):
+            failure_penalty = 0.0  # Worst gradient is 0
         else:
-            if problem_type.lower().startswith("p1"):
-                objective = jnp.array(metrics.max_elongation)
-            else:
-                objective = jnp.array(metrics.aspect_ratio)
+            failure_penalty = NAN_TO_HIGH_VALUE
+        objective = jnp.array(failure_penalty)
+        if p_key.startswith("p1"):
+            c_size = 3
+        else:
+            c_size = 5
+        constraints = jnp.ones(c_size) * NAN_TO_HIGH_VALUE
 
-            margins = tools.compute_constraint_margins(metrics, problem_type)
-            constraints = jnp.array(list(margins.values()))
-
-        return ((objective, constraints), metrics)
+    return ((objective, constraints), metrics)
 
 
 def _generate_candidate_params(
@@ -1720,12 +1866,34 @@ def _generate_candidate_params(
 
     if seed_path is not None:
         seed_data = _load_seed_boundary(seed_path)
-        r_cos = seed_data["r_cos"]
-        z_sin = seed_data["z_sin"]
+        # Canonicalization Fix: Expand seed matrices to template's max modes
+        r_cos = _expand_matrix_to_mode(
+            seed_data["r_cos"],
+            template.max_poloidal_mode,
+            template.max_toroidal_mode,
+        )
+        z_sin = _expand_matrix_to_mode(
+            seed_data["z_sin"],
+            template.max_poloidal_mode,
+            template.max_toroidal_mode,
+        )
         r_sin = seed_data["r_sin"]
+        if r_sin is not None:
+            r_sin = _expand_matrix_to_mode(
+                r_sin,
+                template.max_poloidal_mode,
+                template.max_toroidal_mode,
+            )
         z_cos = seed_data["z_cos"]
+        if z_cos is not None:
+            z_cos = _expand_matrix_to_mode(
+                z_cos,
+                template.max_poloidal_mode,
+                template.max_toroidal_mode,
+            )
         n_field_periods = int(seed_data["n_field_periods"])
         is_stellarator_symmetric = bool(seed_data["is_stellarator_symmetric"])
+
     else:
         base_surface = generate_rotating_ellipse(
             aspect_ratio=4.0,
@@ -1733,8 +1901,8 @@ def _generate_candidate_params(
             rotational_transform=1.2,
             n_field_periods=template.n_field_periods,
         )
-        max_poloidal = max(1, template.n_poloidal_modes - 1)
-        max_toroidal = max(1, (template.n_toroidal_modes - 1) // 2)
+        max_poloidal = max(1, template.max_poloidal_mode)
+        max_toroidal = max(1, template.max_toroidal_mode)
         expanded = surface_module.set_max_mode_numbers(
             base_surface,
             max_poloidal_mode=max_poloidal,
@@ -1986,7 +2154,11 @@ def _surrogate_rank_screen_candidates(
         return candidates
 
     problem = (cfg.problem or "").lower()
-    target_column = "hv" if problem == "p3" else "objective"
+    # P3 is multi-objective: surrogate predicts hypervolume contribution for
+    # ranking, not the single physics objective (aspect_ratio). This is
+    # intentional—see forward_model.compute_objective() docstring.
+    # Use SSOT function to determine target (avoids semantic drift).
+    target_column = get_training_target(cfg.problem).value
     minimize_objective = problem == "p1"
 
     history = world_model.surrogate_training_data(
@@ -2033,10 +2205,21 @@ def _surrogate_rank_screen_candidates(
             }
         )
 
+    # Compute exploration ratio with UCB decay schedule (Issue #11)
+    from ai_scientist.exploration import compute_exploration_ratio_from_config
+
+    ucb_exploration_ratio = compute_exploration_ratio_from_config(
+        cycle,
+        ucb_exploration_initial=cfg.proposal_mix.ucb_exploration_initial,
+        ucb_exploration_final=cfg.proposal_mix.ucb_exploration_final,
+        ucb_decay_cycles=cfg.proposal_mix.ucb_decay_cycles,
+    )
+
     ranked_predictions = surrogate_model.rank_candidates(
         pool_entries,
         minimize_objective=minimize_objective,
-        exploration_ratio=cfg.proposal_mix.exploration_ratio,
+        exploration_ratio=ucb_exploration_ratio,
+        problem=problem,
     )
 
     restoration_active = len(history) > 10 and recent_feasibility < 0.05
@@ -2080,7 +2263,9 @@ def _surrogate_rank_screen_candidates(
                                 z_sin_list, dtype=torch.float32
                             ).unsqueeze(0)
                             elo_val = float(
-                                geometry.elongation(r_cos_t, z_sin_t, nfp).item()
+                                geometry.elongation_isoperimetric(
+                                    r_cos_t, z_sin_t, nfp
+                                ).item()
                             )
                     except Exception:
                         pass

@@ -144,21 +144,36 @@ def run_model_endpoint(
     resolved = config or load_model_config()
     provider = resolved.get_provider(provider_name)
     parsed = _normalize_base_url(resolved.base_url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 0
+
+    # Always serve over plain HTTP. The lightweight test server does not implement TLS,
+    # and many real provider base URLs are https://... which would be invalid here.
+    scheme = "http"
+
+    # Bind locally by default. If the configured base_url points at a local interface
+    # (e.g., for self-hosted K2), honor it; otherwise fall back to loopback.
+    configured_host = parsed.hostname
+    configured_port = parsed.port
+    local_hosts = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+    host = configured_host if configured_host in local_hosts else "127.0.0.1"
+
+    # Only honor an explicit port when binding locally; remote provider ports (e.g. 443)
+    # are not meaningful for this in-process server.
+    port = configured_port or 0
+    if configured_host not in local_hosts:
+        port = 0
     metadata = EndpointMetadata(
         context_length=resolved.context_length,
         dtype=resolved.dtype,
         tensor_parallel=resolved.tensor_parallel,
     )
     handler = _build_handler(
-        metadata, resolved.instruct_model, parsed.scheme, provider.chat_path
+        metadata, resolved.instruct_model, scheme, provider.chat_path
     )
     with _ThreadedServer((host, port), handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         live_netloc = f"{server.server_address[0]}:{server.server_address[1]}"
-        endpoint_url = urlunparse((parsed.scheme, live_netloc, "", "", "", ""))
+        endpoint_url = urlunparse((scheme, live_netloc, "", "", "", ""))
         _LOGGER.info(
             "Launched K2 endpoint %s (context=%d, dtype=%s, tp=%d)",
             endpoint_url,
