@@ -31,3 +31,8 @@ __pycache__/
 .vscode/
 
 .hypothesis/
+
+# Papers (PDFs and arXiv versioned markdown)
+*.pdf
+[0-9]*v[0-9]*.md
+docs/papers/
