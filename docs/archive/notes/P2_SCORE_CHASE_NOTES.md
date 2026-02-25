@@ -129,6 +129,6 @@ Right now, we’re stuck against **QI**. To go beyond ~0.512 without random luck
    - coarse grid → identify feasible ridge
    - fine grid / coordinate descent near the ridge
    - always validate with high‑fidelity scorer
-3) Use `scripts/p2_alm_ngopt_multifidelity.py` *starting from* the current best boundary so the optimizer explores more degrees of freedom than 2 scalars, while still promoting candidates to high‑fidelity regularly.
+3) Use `experiments/p1_p2/p2_alm_ngopt_multifidelity.py` *starting from* the current best boundary so the optimizer explores more degrees of freedom than 2 scalars, while still promoting candidates to high-fidelity regularly.
 
 The key is to keep the loop systematic: propose small structured deltas → evaluate → learn which constraint is active → introduce the minimum new knob needed to steer back.

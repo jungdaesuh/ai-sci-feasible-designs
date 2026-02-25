@@ -253,7 +253,7 @@ Updated: 2025‑11‑10
 - [x] Expand Phase 8/Wave X reporting: deterministic template sections, reproduction blocks, citations/figures, statements table, and verifier pipeline in `ai_scientist/reporting.py` + `ai_scientist/memory.py`.
 - [x] Harden Wave 9 runner CLI: add `--screen`/`--promote`/`--slow`, deterministic seeding, stage persistence, and the governance log mentioned in docs.
 - [x] Scope Phase 7 adaptation (SFT trajectories, PEFT/LoRA hooks, preference data) so the next developer sprint starts at Wave 7 requirements without extra discovery.
-- [x] Phase 7 optional RLAIF evidence chain — the harness now persists `adaptation/preference_pairs.jsonl`, `adaptation/summaries/cycle_<n>_p3_summary.json`, and the trajectory JSONL, the verifier statement records those anchors, and the “Positioning vs baselines” report section cites them so trainers can trace the P1/P2/HV gains before checking the box. Implementation details live in `ai_scientist/runner.py:660-1040`, `ai_scientist/reporting.py:184-373`, and `orchestration/adaptation.py:92-154` (see docs/MASTER_PLAN_AI_SCIENTIST.md:226-247 for the gating narrative).
+- [x] Phase 7 optional RLAIF evidence chain — the harness now persists `adaptation/preference_pairs.jsonl`, `adaptation/summaries/cycle_<n>_p3_summary.json`, and the trajectory JSONL, the verifier statement records those anchors, and the “Positioning vs baselines” report section cites them so trainers can trace the P1/P2/HV gains before checking the box. Implementation details live in `ai_scientist/runner.py:660-1040`, `ai_scientist/reporting.py:184-373`, and `orchestration/adaptation.py:92-154` (see docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md:226-247 for the gating narrative).
 
 ## Picking the Next Task
 1) Start at the lowest unchecked task in the earliest wave.
@@ -268,4 +268,4 @@ Updated: 2025‑11‑10
 
 ---
 
-Cross‑reference: high‑level plan lives at `docs/MASTER_PLAN_AI_SCIENTIST.md`.
+Cross‑reference: high‑level plan lives at `docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md`.

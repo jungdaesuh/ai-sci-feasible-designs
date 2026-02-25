@@ -25,8 +25,8 @@ from ai_scientist import rag
 sources = [
     'docs/papers/2506.19583v1.md',
     'docs/papers/2511.02824v2.md',
-    'docs/MASTER_PLAN_AI_SCIENTIST.md',
-    'docs/TASKS_CODEX_MINI.md',
+    'docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md',
+    'docs/archive/notes/TASKS_CODEX_MINI.md',
     'docs/AI_SCIENTIST_PRODUCTION_PLAN.md',
 ]
 rag.ensure_index(sources=sources, index_path='ai_scientist/rag_index.db')
