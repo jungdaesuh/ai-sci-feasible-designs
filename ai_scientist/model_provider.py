@@ -49,6 +49,7 @@ def build_chat_request(
     headers: dict[str, str] = {
         "Authorization": _resolve_auth_header(provider),
         "Content-Type": "application/json",
+        "X-AI-Scientist-Tool-Name": str(tool_call.get("name", "")),
     }
     for key, value in provider.extra_headers:
         headers[key] = value
@@ -57,8 +58,9 @@ def build_chat_request(
         "messages": list(messages)
         if messages
         else [{"role": "user", "content": "tool request"}],
-        "tool_call": tool_call,
     }
+    if provider.name != "codex_native":
+        payload["tool_call"] = tool_call
     _LOGGER.info(
         "Built chat request provider=%s path=%s model=%s tool=%s",
         provider.name,
