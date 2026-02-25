@@ -4,6 +4,7 @@
 - AI Scientist roadmap: `AI_SCIENTIST_UNIFIED_ROADMAP.md`
 - Repo structure: `REPOSITORY_STRUCTURE_AND_FLOW.md`
 - Onboarding: `ai_scientist_onboarding.md`
+- Codex-native subscription integration: `CODEX_NATIVE_SUBSCRIPTION_INTEGRATION.md`
 - Run protocol: `run_protocol.md`
 - Testing: `TESTING.md`
 - Local CI: `CI_LOCAL.md`
