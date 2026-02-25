@@ -95,4 +95,4 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - Feasibility-first loop, SurrogateBundle abstraction, SQLite world-model schema, budgets/HV phase: `docs/AI_SCIENTIST_UPDATED_PLAN.md` (Fast Wins, Architecture sections).
 - Planner/agent roles, PropertyGraph, daemon/checkpointing, adapter loop, multi-agent presets: `docs/AI_SCIENTIST_AUTONOMY_PLAN.md` (Planning Loop, Supervisor, Adaptation, Safety, CI sections).
 - RAG rebuild commands, rotating-ellipse seed preset, benchmark-aligned configs, literature/analysis role definitions, PEFT trainer steps: `docs/AI_SCIENTIST_RESEARCH_PRODUCTION_FIX.md` (Sections 1–5).
-- Additional context and constraints: `docs/MASTER_PLAN_AI_SCIENTIST.md`, `docs/ai_scientist_onboarding.md`, `docs/run_protocol.md` for run protocol and governance reminders.
+- Additional context and constraints: `docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md`, `docs/ai_scientist_onboarding.md`, `docs/run_protocol.md` for run protocol and governance reminders.

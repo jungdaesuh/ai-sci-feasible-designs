@@ -10,7 +10,7 @@ This note scopes the supervised fine-tuning (SFT) trajectory generation, PEFT/Lo
 
 ## PEFT/LoRA Hook Points
 
-1. **Adapter entry**: wrap the inference client (ai_scientist.agent + ai_scientist.tools) so the `agent_gates` dispatch can insert a PEFT adapter stack before every tool call (matching docs/TASKS_CODEX_MINI.md:157-190 expectations).
+1. **Adapter entry**: wrap the inference client (ai_scientist.agent + ai_scientist.tools) so the `agent_gates` dispatch can insert a PEFT adapter stack before every tool call (matching docs/archive/notes/TASKS_CODEX_MINI.md:157-190 expectations).
 2. **Checkpointing**: expose `ai_scientist.adapter_state` that proxies `load_lora_weights()` and `push_updates()` so the next sprint can pin stage-specific LoRA modules without touching constellaration/.
 3. **Runtime toggles**: guard PEFT activation with new env flags (e.g., `AI_SCIENTIST_PEFT=1`) so Wave 7 can flip adapters inside CI without editing the scheduler.
 
@@ -24,6 +24,6 @@ This note scopes the supervised fine-tuning (SFT) trajectory generation, PEFT/Lo
 
 1. The runner writes trajectory JSONL entries and preference pairs to `reports/adaptation/...` each cycle (Wave 9/X reporting depends on the same data).
 2. A stub `ai_scientist.adapter` module exposes `prepare_peft_hook()` and `apply_lora_updates()` without changing constellaration/ so Wave 7 engineers can plug in training variants.
-3. Stage history, statement status, and preference metadata persist in SQLite for every cycle (see docs/TASKS_CODEX_MINI.md:206-238 and docs/MASTER_PLAN_AI_SCIENTIST.md:247-368 for governance/reporting tie-ins).
+3. Stage history, statement status, and preference metadata persist in SQLite for every cycle (see docs/archive/notes/TASKS_CODEX_MINI.md:206-238 and docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md:247-368 for governance/reporting tie-ins).
 
 Maintaining these APIs and artifacts makes Wave 7 a matter of hooking the trainer onto the already-logged signals rather than re-inventing the data collection pipeline.

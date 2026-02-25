@@ -59,7 +59,8 @@ Per batch:
 
 ## 4.2 P2 (lightweight + feasibility-aware)
 
-- Keep `scripts/p2_alm_ngopt_multifidelity.py` unchanged as core optimizer.
+- Keep the runner-based P2 path (`python -m ai_scientist.runner --problem p2`) as the core optimizer.
+- Keep `experiments/p1_p2/p2_alm_ngopt_multifidelity.py` as an optional research harness, not production SSOT.
 - Reuse P1 seed selector with stricter feasibility neighborhood checks (QI + vacuum well focused).
 - Add constrained novelty gate to reduce expensive infeasible repeats.
 
