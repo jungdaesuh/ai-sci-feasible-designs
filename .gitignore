@@ -32,6 +32,11 @@ __pycache__/
 
 .hypothesis/
 
+# Local environment files (do not commit secrets/local overrides)
+.env
+.env.*
+!.env.example
+
 # Papers (PDFs and arXiv versioned markdown)
 *.pdf
 [0-9]*v[0-9]*.md
