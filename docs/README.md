@@ -5,6 +5,8 @@
 - Repo structure: `REPOSITORY_STRUCTURE_AND_FLOW.md`
 - Onboarding: `ai_scientist_onboarding.md`
 - Codex-native subscription integration: `CODEX_NATIVE_SUBSCRIPTION_INTEGRATION.md`
+- Implementation backlog: `IMPLEMENTATION_BACKLOG.md`
+- Integrated evolution plan: `INTEGRATED_EVOLUTION_PLAN_P1_P2_P3.md`
 - Run protocol: `run_protocol.md`
 - Testing: `TESTING.md`
 - Local CI: `CI_LOCAL.md`

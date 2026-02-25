@@ -10,6 +10,14 @@ This backlog converts the active plans into execution milestones:
 
 ## Epics and Milestones
 
+## Progress log
+
+- **2026-02-25:** Completed Epic 4 (provider swappability) baseline:
+  - `codex_native` provider entry + `codex-native-*` aliases exist in `configs/model.yaml`.
+  - Runtime supports role-level model alias overrides via env vars for `planning`, `literature`, `analysis`.
+  - Unit tests cover provider request building and role overrides.
+  - Remaining work for “native subscription” is still tracked in `docs/CODEX_NATIVE_SUBSCRIPTION_INTEGRATION.md` (auth/profile management + local adapter server).
+
 ## Epic 1 — Data plane foundation
 
 - **M1.1 Schema migration**: add lineage/novelty/operator/model-route fields required by adaptive evolution.
@@ -44,9 +52,9 @@ This backlog converts the active plans into execution milestones:
 
 ## Epic 4 — Provider swappability
 
-- **M4.1 Add `codex_native` provider wiring** in config/runtime.
-- **M4.2 Add codex-native aliases** for instruct/thinking tiers.
-- **M4.3 Smoke and planner validation** for Grok/Kwaipilot/Codex-native switching.
+- [x] **M4.1 Add `codex_native` provider wiring** in config/runtime. *(Done 2026-02-25)*
+- [x] **M4.2 Add codex-native aliases** for instruct/thinking tiers. *(Done 2026-02-25)*
+- [x] **M4.3 Smoke and planner validation** for Grok/Kwaipilot/Codex-native switching. *(Done 2026-02-25; unit tests + smoke harness path)*
 
 **Definition of done**
 - `MODEL_PROVIDER` and alias switching works without code edits.

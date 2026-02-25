@@ -54,7 +54,7 @@ This snippet assumes you are working inside `/Users/suhjungdae/code/software/pro
 ### ChatGPT subscription integration status
 - Target architecture is tracked in `CODEX_NATIVE_SUBSCRIPTION_INTEGRATION.md`.
 - Goal: native Codex/ChatGPT OAuth + profile management + local OpenAI-compatible adapter.
-- This integration is a planned upgrade and is not the default runtime path yet.
+- `codex_native` is partially wired (provider + aliases), but native OAuth/profile management and a bundled adapter server are not implemented yet.
 
 ### Live provider smoke test
 1. Choose one provider:
