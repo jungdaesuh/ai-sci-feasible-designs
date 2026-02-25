@@ -95,9 +95,15 @@ def _insert_candidate(
     boundary: dict,
     seed: int,
     design_hash: str,
+    operator_family: str,
+    model_route: str,
 ) -> int:
     cursor = conn.execute(
-        "INSERT INTO candidates (experiment_id, problem, params_json, seed, status, design_hash) VALUES (?, ?, ?, ?, ?, ?)",
+        """
+        INSERT INTO candidates
+        (experiment_id, problem, params_json, seed, status, design_hash, lineage_parent_hashes_json, novelty_score, operator_family, model_route)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
             experiment_id,
             "p3",
@@ -105,6 +111,10 @@ def _insert_candidate(
             int(seed),
             "pending",
             design_hash,
+            "[]",
+            None,
+            operator_family,
+            model_route,
         ),
     )
     candidate_id = cursor.lastrowid
@@ -147,6 +157,12 @@ def main() -> None:
         type=int,
         default=0,
         help="If >0, enqueue at most this many items from the submission list.",
+    )
+    parser.add_argument(
+        "--model-route",
+        type=str,
+        default="submission_seedlist",
+        help="Route label recorded in candidate metadata for governance/reporting.",
     )
     parser.add_argument("submission", type=Path, help="P3 submission JSON list.")
     args = parser.parse_args()
@@ -203,6 +219,8 @@ def main() -> None:
                     boundary=boundary,
                     seed=seed,
                     design_hash=design_hash,
+                    operator_family="seed",
+                    model_route=str(args.model_route),
                 )
 
                 _insert_artifacts(
@@ -219,8 +237,10 @@ def main() -> None:
                     "design_hash": design_hash,
                     "seed": seed,
                     "move_family": "seed",
+                    "model_route": str(args.model_route),
                     "parents": [],
                     "knobs": {"index": int(k)},
+                    "novelty_score": None,
                     "created_at": meta.created_at,
                 }
                 with batch_log.open("a", encoding="utf-8") as handle:

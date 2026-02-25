@@ -880,6 +880,12 @@ class CycleExecutor:
                     status=best_eval.get("stage", "unknown"),
                     evaluation=best_eval,
                     design_hash=best_entry["design_hash"],
+                    lineage_parent_hashes=cast(
+                        Sequence[str] | None, best_entry.get("lineage_parent_hashes")
+                    ),
+                    novelty_score=cast(float | None, best_entry.get("novelty_score")),
+                    operator_family=cast(str | None, best_entry.get("operator_family")),
+                    model_route=cast(str | None, best_entry.get("model_route")),
                     commit=False,
                 )
                 best_metrics_id = metrics_id
@@ -1016,7 +1022,9 @@ class CycleExecutor:
             f"Cycle {cycle_number} hypervolume {current_hv:.6f} vs baseline "
             f"{baseline_display} (delta {hv_delta:+.6f}) recorded in cycle_hv "
             f"and adaptation logs {preference_pairs_display} and {trajectory_display} "
-            f"with summary {p3_summary_display} (docs/TASKS_CODEX_MINI.md:238; docs/MASTER_PLAN_AI_SCIENTIST.md:226-247)."
+            "with summary "
+            f"{p3_summary_display} (docs/archive/notes/TASKS_CODEX_MINI.md:238; "
+            "docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md:226-247)."
         )
         hv_tool_input = {
             "cycle": cycle_number,
@@ -1093,6 +1101,13 @@ class CycleExecutor:
         )
         stage_history_entries = self.world_model.stage_history(experiment_id)
         property_graph_summary = self.world_model.property_graph_summary(experiment_id)
+        p3_data_plane_summary = self.world_model.candidate_data_plane_summary(
+            experiment_id,
+            problem="p3",
+        )
+        if property_graph_summary:
+            property_graph_summary = dict(property_graph_summary)
+            property_graph_summary["p3_data_plane"] = p3_data_plane_summary
         rag_citations = (
             property_graph_summary.get("citations") if property_graph_summary else None
         )
@@ -1110,9 +1125,9 @@ class CycleExecutor:
         if not positioning_artifacts:
             positioning_artifacts = None
         references = [
-            "docs/TASKS_CODEX_MINI.md:200-248",
-            "docs/TASKS_CODEX_MINI.md:206-238",
-            "docs/MASTER_PLAN_AI_SCIENTIST.md:247-368",
+            "docs/archive/notes/TASKS_CODEX_MINI.md:200-248",
+            "docs/archive/notes/TASKS_CODEX_MINI.md:206-238",
+            "docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md:247-368",
         ]
         for anchor in (preference_pairs_anchor, p3_summary_anchor, trajectory_anchor):
             if anchor:
@@ -2456,6 +2471,12 @@ def _persist_pareto_archive(
             status=evaluation.get("stage", "unknown"),
             evaluation=evaluation,
             design_hash=design_hash,
+            lineage_parent_hashes=cast(
+                Sequence[str] | None, latest.get("lineage_parent_hashes")
+            ),
+            novelty_score=cast(float | None, latest.get("novelty_score")),
+            operator_family=cast(str | None, latest.get("operator_family")),
+            model_route=cast(str | None, latest.get("model_route")),
             commit=False,
         )
         logged_hashes.add(design_hash)

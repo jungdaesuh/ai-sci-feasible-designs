@@ -19,7 +19,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 
@@ -203,9 +203,17 @@ def _insert_candidate(
     boundary: dict,
     seed: int,
     design_hash: str,
+    lineage_parent_hashes: list[str],
+    novelty_score: float | None,
+    operator_family: str,
+    model_route: str,
 ) -> int:
     cursor = conn.execute(
-        "INSERT INTO candidates (experiment_id, problem, params_json, seed, status, design_hash) VALUES (?, ?, ?, ?, ?, ?)",
+        """
+        INSERT INTO candidates
+        (experiment_id, problem, params_json, seed, status, design_hash, lineage_parent_hashes_json, novelty_score, operator_family, model_route)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
             experiment_id,
             "p3",
@@ -213,11 +221,34 @@ def _insert_candidate(
             int(seed),
             "pending",
             design_hash,
+            json.dumps([str(parent) for parent in lineage_parent_hashes]),
+            novelty_score,
+            operator_family,
+            model_route,
         ),
     )
     candidate_id = cursor.lastrowid
     assert candidate_id is not None
     return int(candidate_id)
+
+
+def _derive_novelty_score(
+    *,
+    knobs: Mapping[str, float],
+    override: float | None,
+) -> float:
+    if override is not None:
+        return float(override)
+    if not knobs:
+        return 0.0
+    magnitudes: list[float] = []
+    for key, value in knobs.items():
+        v = float(value)
+        if key == "t":
+            magnitudes.append(abs(v))
+        else:
+            magnitudes.append(abs(v - 1.0))
+    return float(max(magnitudes) if magnitudes else 0.0)
 
 
 def _insert_artifacts(
@@ -255,6 +286,18 @@ def main() -> None:
         choices=["blend", "scale_groups"],
         required=True,
         help="Move family used to generate candidates.",
+    )
+    parser.add_argument(
+        "--model-route",
+        type=str,
+        default="governor_static_recipe",
+        help="Route label recorded in candidate metadata for governance/reporting.",
+    )
+    parser.add_argument(
+        "--novelty-score",
+        type=float,
+        default=None,
+        help="Optional novelty score override for all candidates in this command.",
     )
 
     # blend args
@@ -364,6 +407,13 @@ def main() -> None:
                     boundary=boundary,
                     seed=seed,
                     design_hash=design_hash,
+                    lineage_parent_hashes=parents,
+                    novelty_score=_derive_novelty_score(
+                        knobs={k: float(v) for k, v in knobs.items()},
+                        override=args.novelty_score,
+                    ),
+                    operator_family=args.family,
+                    model_route=str(args.model_route),
                 )
 
                 _insert_artifacts(
@@ -380,8 +430,13 @@ def main() -> None:
                     "design_hash": design_hash,
                     "seed": seed,
                     "move_family": args.family,
+                    "model_route": str(args.model_route),
                     "parents": parents,
                     "knobs": knobs,
+                    "novelty_score": _derive_novelty_score(
+                        knobs={k: float(v) for k, v in knobs.items()},
+                        override=args.novelty_score,
+                    ),
                     "created_at": meta.created_at,
                 }
                 with batch_log.open("a", encoding="utf-8") as handle:

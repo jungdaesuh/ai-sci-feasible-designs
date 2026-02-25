@@ -19,9 +19,17 @@ Add an OpenClaw-like integration pattern in this repo, but without OpenClaw:
 
 - This architecture is **partially implemented**:
   - `codex_native` provider selection + `codex-native-*` aliases exist.
+  - Role-level model override env vars for planner/literature/analysis are wired.
   - Native OAuth + credential/profile management + a bundled local adapter server are still pending.
 - Existing runs should continue using current provider setup (e.g., OpenRouter) unless you have an adapter endpoint running for `codex_native`.
 - `openclaw` provider entries and related tests are still present for backward compatibility during transition.
+
+### Progress update (2026-02-25)
+
+- Provider/alias swappability milestone is complete and validated by unit tests.
+- Cutover to fully native codex subscription remains blocked on two implementation items:
+  1) local OpenAI-compatible adapter server
+  2) OAuth + credential/profile management primitives
 
 ### Runtime status matrix
 

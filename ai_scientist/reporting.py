@@ -21,8 +21,8 @@ _ALLOWED_REFERENCE_PREFIXES = (
     "tests/",
 )
 _POSITIONING_SOURCES = DEFAULT_INDEX_SOURCES + (
-    "docs/MASTER_PLAN_AI_SCIENTIST.md",
-    "docs/TASKS_CODEX_MINI.md",
+    "docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md",
+    "docs/archive/notes/TASKS_CODEX_MINI.md",
 )
 
 
@@ -192,6 +192,19 @@ def _format_property_graph_section(
         f"- Edges: {summary.get('edge_count', 0)}",
         f"- Citations tracked: {summary.get('citation_count', 0)}",
     ]
+    data_plane = summary.get("p3_data_plane")
+    if isinstance(data_plane, Mapping):
+        lines.extend(
+            [
+                "- P3 data plane:",
+                f"  - Candidate rows considered: {data_plane.get('candidate_rows', 0)}",
+                f"  - With lineage metadata: {data_plane.get('with_lineage', 0)}",
+                f"  - With novelty metadata: {data_plane.get('with_novelty', 0)}",
+                f"  - Avg novelty: {data_plane.get('avg_novelty')}",
+                f"  - Operator families: {data_plane.get('operator_families', {})}",
+                f"  - Model routes: {data_plane.get('model_routes', {})}",
+            ]
+        )
     citations = rag_citations or summary.get("citations") or []
     if citations:
         lines.append("- RAG citations:")
@@ -236,8 +249,8 @@ def _build_positioning_section(
         )
         if anchors:
             artifact_lines.append(
-                f"- RLAIF evidence anchored at {anchors}; the master plan calls this linkage out in docs/MASTER_PLAN_AI_SCIENTIST.md:226-247 "
-                "and docs/TASKS_CODEX_MINI.md:238 so reviewers can trace the HV claim."
+                f"- RLAIF evidence anchored at {anchors}; the master plan calls this linkage out in docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md:226-247 "
+                "and docs/archive/notes/TASKS_CODEX_MINI.md:238 so reviewers can trace the HV claim."
             )
     if artifact_lines:
         positioning_lines.extend(artifact_lines)
@@ -415,8 +428,8 @@ def build_cycle_report(
         citation_status,
         citation_table,
         "### References for governance",
-        "- docs/TASKS_CODEX_MINI.md:200-248",
-        "- docs/MASTER_PLAN_AI_SCIENTIST.md:247-368",
+        "- docs/archive/notes/TASKS_CODEX_MINI.md:200-248",
+        "- docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md:247-368",
     ]
     return "\n".join(str(line) for line in document)
 
