@@ -12,15 +12,16 @@ These dependencies are captured in the recommended Dockerfile (see Section 3); 
 
 ## 2. Environment variables
 
-Source `./.env` before launching any AI Scientist runner or training script:
+Create a local `./.env` from `./.env.example` once, then source it before launching any AI Scientist runner or training script:
 
 ```sh
+cp .env.example .env
 set -a
 source .env
 set +a
 ```
 
-The `.env` file enforces:
+The local `.env` file enforces:
 
 - threading caps (`OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`)
 - model-provider overrides (`MODEL_PROVIDER`, `AI_SCIENTIST_INSTRUCT_MODEL`, `AI_SCIENTIST_THINKING_MODEL`)

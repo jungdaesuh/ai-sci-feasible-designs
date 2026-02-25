@@ -24,7 +24,7 @@ This snippet assumes you are working inside `/Users/suhjungdae/code/software/pro
 ## Environment variables to note
 - `AI_SCIENTIST_PEFT=1` toggles LoRA/PEFT loading so the adapters in `reports/adapters/...` are materialized during inference (see Phase 2 in the roadmap).
 - Planner/cache/budget tuning currently uses CLI flags, not env vars: `--planner`, `--log-cache-stats`, `--eval-budget`, and `--workers`.
-- If you keep provider overrides in `.env` (for example `MODEL_PROVIDER`, `AI_SCIENTIST_INSTRUCT_MODEL`, `AI_SCIENTIST_THINKING_MODEL`), run `set -a; source .env` before launching the runner.
+- If you keep provider overrides in `.env`, create it from `.env.example` and then run `set -a; source .env` before launching the runner.
 - `AI_SCIENTIST_REMOTE_PROVIDER=1` toggles live provider calls for the gate smoke test (see below). For current live usage, set `OPENROUTER_API_KEY`.
 
 ### Provider switch recipes (today)
