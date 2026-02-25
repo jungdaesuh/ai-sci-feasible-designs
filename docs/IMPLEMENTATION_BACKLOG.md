@@ -22,18 +22,22 @@ This backlog converts the active plans into execution milestones:
   - WorldModel write/read hooks and report context now include P3 data-plane metadata.
   - `scripts/p3_propose.py`, `scripts/p3_enqueue_submission.py`, and `scripts/p3_governor.py` now write/read route/operator/lineage metadata.
   - Memory tests cover migration + persistence + summary aggregation.
-  - Remaining Epic 1 gap: shared enqueue SSOT module (M1.2).
+  - Remaining Epic 1 gaps were shared enqueue SSOT module (M1.2) and telemetry counters for novelty reject/fallback usage.
+- **2026-02-25:** Completed Epic 1 remaining work:
+  - Shared enqueue SSOT module landed in `ai_scientist/p3_enqueue.py`.
+  - `scripts/p3_propose.py` and `scripts/p3_enqueue_submission.py` now use the shared enqueue path.
+  - Telemetry baseline now includes novelty reject counters and static/adaptive/fallback path counters in governor summaries and cycle reporting.
 - **2026-02-25:** Epic 2 remains open:
-  - Governor still uses static recipe selection.
-  - Adaptive path is not yet behind an explicit feature flag.
+  - `--adaptive` feature flag scaffold is now landed in `scripts/p3_governor.py` with static rollback.
+  - Remaining Epic 2 work is adaptive policy logic (M2.2) + fixed-budget A/B validation (M2.3).
 - **2026-02-25:** Epic 3 remains open:
   - P1/P2 adaptive restart seed selection + novelty gating are not integrated yet.
 
 ## Epic 1 — Data plane foundation
 
 - [x] **M1.1 Schema migration**: add lineage/novelty/operator/model-route fields required by adaptive evolution. *(Done 2026-02-25)*
-- [ ] **M1.2 Shared enqueue library**: replace duplicated enqueue logic in `scripts/p3_propose.py` and `scripts/p3_enqueue_submission.py`.
-- [ ] **M1.3 Telemetry baseline**: record operator usage, novelty reject rate, fallback-path usage. *(Partial 2026-02-25: operator/model-route + novelty coverage reporting landed; reject-rate/fallback counters pending.)*
+- [x] **M1.2 Shared enqueue library**: replace duplicated enqueue logic in `scripts/p3_propose.py` and `scripts/p3_enqueue_submission.py`. *(Done 2026-02-25)*
+- [x] **M1.3 Telemetry baseline**: record operator usage, novelty reject rate, fallback-path usage. *(Done 2026-02-25)*
 
 **Definition of done**
 - New schema is backward-compatible and migration-tested.
@@ -42,7 +46,7 @@ This backlog converts the active plans into execution milestones:
 
 ## Epic 2 — P3 adaptive governor
 
-- [ ] **M2.1 Flagged adaptive governor path** in `scripts/p3_governor.py`.
+- [x] **M2.1 Flagged adaptive governor path** in `scripts/p3_governor.py`. *(Done 2026-02-25; scaffold delegates to static recipe while preserving rollback.)*
 - [ ] **M2.2 Parent-group selector + operator-family bandit + novelty gate**.
 - [ ] **M2.3 A/B validation** against static recipe path with fixed budget.
 
@@ -85,7 +89,7 @@ This backlog converts the active plans into execution milestones:
 
 - [ ] Remove temporary feature flags that are no longer needed.
 - [ ] Remove deprecated governor logic superseded by adaptive path.
-- [ ] Remove duplicate enqueue implementations and keep one SSOT module.
+- [x] Remove duplicate enqueue implementations and keep one SSOT module. *(Done 2026-02-25)*
 - [ ] Remove deprecated evaluation wrappers after all callers migrate.
 - [ ] Remove transitional provider/config notes once codex-native is fully live.
 - [ ] Delete stale docs/examples that reference retired commands or aliases.
