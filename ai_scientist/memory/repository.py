@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ..p3_data_plane import DataPlaneSample, summarize_data_plane
 from .graph import PropertyGraph
 from .schema import BudgetUsage, StageHistoryEntry, StatementRecord, init_db
 
@@ -1119,6 +1119,7 @@ class WorldModel:
         *,
         problem: str = "p3",
         limit: int = 500,
+        novelty_reject_threshold: float = 0.05,
     ) -> Mapping[str, Any]:
         rows = self._conn.execute(
             """
@@ -1131,10 +1132,7 @@ class WorldModel:
             (experiment_id, problem, int(limit)),
         ).fetchall()
 
-        operator_counts: dict[str, int] = {}
-        route_counts: dict[str, int] = {}
-        lineage_count = 0
-        novelty_values: list[float] = []
+        samples: list[DataPlaneSample] = []
 
         for row in rows:
             lineage_raw = row["lineage_parent_hashes_json"]
@@ -1142,37 +1140,23 @@ class WorldModel:
                 lineage_payload = json.loads(lineage_raw) if lineage_raw else []
             except (TypeError, json.JSONDecodeError):
                 lineage_payload = []
-            if isinstance(lineage_payload, list) and len(lineage_payload) > 0:
-                lineage_count += 1
 
             novelty = row["novelty_score"]
-            if novelty is not None:
-                novelty_float = float(novelty)
-                if math.isfinite(novelty_float):
-                    novelty_values.append(novelty_float)
+            novelty_value = float(novelty) if novelty is not None else None
+            has_lineage = isinstance(lineage_payload, list) and len(lineage_payload) > 0
+            samples.append(
+                DataPlaneSample(
+                    has_lineage=has_lineage,
+                    novelty_score=novelty_value,
+                    operator_family=str(row["operator_family"] or "unknown"),
+                    model_route=str(row["model_route"] or "unknown"),
+                )
+            )
 
-            operator = str(row["operator_family"] or "unknown")
-            route = str(row["model_route"] or "unknown")
-            operator_counts[operator] = operator_counts.get(operator, 0) + 1
-            route_counts[route] = route_counts.get(route, 0) + 1
-
-        avg_novelty = (
-            float(sum(novelty_values) / len(novelty_values))
-            if novelty_values
-            else None
+        return summarize_data_plane(
+            samples,
+            novelty_reject_threshold=float(novelty_reject_threshold),
         )
-        return {
-            "candidate_rows": len(rows),
-            "with_lineage": lineage_count,
-            "with_novelty": len(novelty_values),
-            "avg_novelty": avg_novelty,
-            "operator_families": dict(
-                sorted(operator_counts.items(), key=lambda item: item[1], reverse=True)
-            ),
-            "model_routes": dict(
-                sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
-            ),
-        }
 
     def surrogate_training_data(
         self,

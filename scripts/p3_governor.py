@@ -25,16 +25,17 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from pymoo.indicators import hv
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from ai_scientist.p3_data_plane import DataPlaneSample, summarize_data_plane
 from ai_scientist.memory.schema import init_db
 
 
 _DEFAULT_RECORD_HV = 135.15669906272515
+_NOVELTY_REJECT_THRESHOLD = 0.05
 
 
 def _utc_now_iso() -> str:
@@ -59,6 +60,8 @@ def _status_bucket(status: str) -> str:
 def _compute_hv(points: list[tuple[float, float]]) -> float:
     if not points:
         return 0.0
+    from pymoo.indicators import hv
+
     X = np.array([(-lgradb, aspect) for lgradb, aspect in points], dtype=float)
     indicator = hv.Hypervolume(ref_point=np.array([1.0, 20.0], dtype=float))
     out = indicator(X)
@@ -385,36 +388,24 @@ def _build_scale_cmd(
     return ProposalCommand(argv=argv)
 
 
-def _recent_data_plane_summary(candidates: list[CandidateRow]) -> dict:
-    operator_counts: dict[str, int] = {}
-    route_counts: dict[str, int] = {}
-    lineage_count = 0
-    novelty_values: list[float] = []
-    for candidate in candidates:
-        operator = candidate.operator_family or "unknown"
-        route = candidate.model_route or "unknown"
-        operator_counts[operator] = operator_counts.get(operator, 0) + 1
-        route_counts[route] = route_counts.get(route, 0) + 1
-        if candidate.lineage_parent_hashes:
-            lineage_count += 1
-        if candidate.novelty_score is not None and math.isfinite(candidate.novelty_score):
-            novelty_values.append(float(candidate.novelty_score))
-    return {
-        "candidate_rows": len(candidates),
-        "with_lineage": lineage_count,
-        "with_novelty": len(novelty_values),
-        "avg_novelty": (
-            float(sum(novelty_values) / len(novelty_values))
-            if novelty_values
-            else None
-        ),
-        "operator_families": dict(
-            sorted(operator_counts.items(), key=lambda item: item[1], reverse=True)
-        ),
-        "model_routes": dict(
-            sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
-        ),
-    }
+def _recent_data_plane_summary(
+    candidates: list[CandidateRow], *, novelty_reject_threshold: float
+) -> dict:
+    samples = [
+        DataPlaneSample(
+            has_lineage=bool(candidate.lineage_parent_hashes),
+            novelty_score=float(candidate.novelty_score)
+            if candidate.novelty_score is not None
+            else None,
+            operator_family=candidate.operator_family or "unknown",
+            model_route=candidate.model_route or "unknown",
+        )
+        for candidate in candidates
+    ]
+    return summarize_data_plane(
+        samples,
+        novelty_reject_threshold=float(novelty_reject_threshold),
+    )
 
 
 def _ensure_parent_file(run_dir: Path, *, design_hash: str, boundary: dict) -> Path:
@@ -677,7 +668,7 @@ def _select_adaptive_recipe_scaffold(
         seed_base=seed_base,
         focus=focus,
         partner=partner,
-        route_prefix="governor_adaptive_scaffold",
+        route_prefix="governor_adaptive_scaffold/static_delegate",
     )
     decision["recipe_mode"] = "adaptive_scaffold"
     decision["adaptive_policy"] = {
@@ -893,7 +884,10 @@ def main() -> None:
                 focus
             )  # traceability; includes violations/metrics/meta
             decision["partner_meta"] = None if partner is None else asdict(partner)
-            decision["recent_data_plane"] = _recent_data_plane_summary(candidates)
+            decision["recent_data_plane"] = _recent_data_plane_summary(
+                candidates,
+                novelty_reject_threshold=_NOVELTY_REJECT_THRESHOLD,
+            )
             decision["hv_at_decision"] = hv_value
             decision["record_hv"] = float(args.record_hv)
             decision["governor_mode"] = (

@@ -197,19 +197,53 @@ def test_candidate_data_plane_summary_counts_metadata(tmp_path):
             },
             design_hash="p3-hash-b",
             lineage_parent_hashes=[],
-            novelty_score=None,
+            novelty_score=0.01,
             operator_family="scale_groups",
-            model_route="governor_static_recipe/log10_qi",
+            model_route="governor_static_recipe",
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.2]], "z_sin": [[0.3]]},
+            seed=3,
+            status="pending",
+            evaluation={
+                "stage": "pending",
+                "objective": 1.2,
+                "feasibility": 0.4,
+                "metrics": {"aspect_ratio": 9.0},
+            },
+            design_hash="p3-hash-c",
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="blend",
+            model_route="governor_adaptive_scaffold/static_delegate",
         )
         summary = wm.candidate_data_plane_summary(experiment_id, problem="p3")
-        assert summary["candidate_rows"] == 2
+        assert summary["candidate_rows"] == 3
         assert summary["with_lineage"] == 1
-        assert summary["with_novelty"] == 1
-        assert summary["avg_novelty"] == pytest.approx(0.2)
-        assert summary["operator_families"]["blend"] == 1
+        assert summary["with_novelty"] == 2
+        assert summary["novelty_missing_count"] == 1
+        assert summary["avg_novelty"] == pytest.approx(0.105)
+        assert summary["novelty_reject_threshold"] == pytest.approx(0.05)
+        assert summary["novelty_reject_count"] == 1
+        assert summary["novelty_reject_rate"] == pytest.approx(0.5)
+        assert summary["operator_families"]["blend"] == 2
         assert summary["operator_families"]["scale_groups"] == 1
         assert summary["model_routes"]["governor_static_recipe/mirror"] == 1
-        assert summary["model_routes"]["governor_static_recipe/log10_qi"] == 1
+        assert summary["model_routes"]["governor_static_recipe"] == 1
+        assert summary["model_routes"]["governor_adaptive_scaffold/static_delegate"] == 1
+        assert summary["static_path_rows"] == 2
+        assert summary["adaptive_path_rows"] == 1
+        assert summary["fallback_static_delegate_rows"] == 1
+        strict_summary = wm.candidate_data_plane_summary(
+            experiment_id,
+            problem="p3",
+            novelty_reject_threshold=0.25,
+        )
+        assert strict_summary["novelty_reject_threshold"] == pytest.approx(0.25)
+        assert strict_summary["novelty_reject_count"] == 2
+        assert strict_summary["novelty_reject_rate"] == pytest.approx(1.0)
 
 
 def test_world_model_surrogate_training_data(tmp_path):
