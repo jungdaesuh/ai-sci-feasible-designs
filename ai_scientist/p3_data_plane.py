@@ -22,8 +22,11 @@ def is_static_route(route: str) -> bool:
 
 
 def is_adaptive_route(route: str) -> bool:
-    return route == "governor_adaptive_scaffold" or route.startswith(
-        "governor_adaptive_scaffold/"
+    return (
+        route == "governor_adaptive"
+        or route.startswith("governor_adaptive/")
+        or route == "governor_adaptive_scaffold"
+        or route.startswith("governor_adaptive_scaffold/")
     )
 
 

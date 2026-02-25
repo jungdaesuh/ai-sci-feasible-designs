@@ -26,18 +26,24 @@ def test_summarize_data_plane_counts_routes_and_fallback() -> None:
                 operator_family="blend",
                 model_route="governor_adaptive_scaffold/static_delegate/mirror",
             ),
+            DataPlaneSample(
+                has_lineage=True,
+                novelty_score=0.2,
+                operator_family="scale_groups",
+                model_route="governor_adaptive/near_feasible/mirror",
+            ),
         ],
         novelty_reject_threshold=0.05,
     )
 
-    assert summary["candidate_rows"] == 3
-    assert summary["with_lineage"] == 1
-    assert summary["with_novelty"] == 2
+    assert summary["candidate_rows"] == 4
+    assert summary["with_lineage"] == 2
+    assert summary["with_novelty"] == 3
     assert summary["novelty_missing_count"] == 1
     assert summary["novelty_reject_count"] == 1
-    assert summary["novelty_reject_rate"] == 0.5
+    assert summary["novelty_reject_rate"] == (1.0 / 3.0)
     assert summary["static_path_rows"] == 2
-    assert summary["adaptive_path_rows"] == 1
+    assert summary["adaptive_path_rows"] == 2
     assert summary["fallback_static_delegate_rows"] == 1
 
 
