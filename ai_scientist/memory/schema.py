@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS candidates (
     seed INTEGER NOT NULL,
     status TEXT NOT NULL,
     design_hash TEXT NOT NULL,
+    lineage_parent_hashes_json TEXT NOT NULL DEFAULT '[]',
+    novelty_score REAL,
+    operator_family TEXT NOT NULL DEFAULT '',
+    model_route TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
 
@@ -270,6 +274,28 @@ def init_db(path: str | Path) -> None:
         try:
             con.execute(
                 "ALTER TABLE candidates ADD COLUMN design_hash TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            con.execute(
+                "ALTER TABLE candidates ADD COLUMN lineage_parent_hashes_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            con.execute("ALTER TABLE candidates ADD COLUMN novelty_score REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            con.execute(
+                "ALTER TABLE candidates ADD COLUMN operator_family TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            con.execute(
+                "ALTER TABLE candidates ADD COLUMN model_route TEXT NOT NULL DEFAULT ''"
             )
         except sqlite3.OperationalError:
             pass

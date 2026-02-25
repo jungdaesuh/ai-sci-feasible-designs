@@ -105,6 +105,10 @@ class CandidateRow:
     violations: dict[str, float]
     metrics: dict
     meta: dict
+    lineage_parent_hashes: list[str]
+    novelty_score: float | None
+    operator_family: str
+    model_route: str
 
 
 def _fetch_candidates(
@@ -113,6 +117,10 @@ def _fetch_candidates(
     rows = conn.execute(
         """
         SELECT c.id AS candidate_id, c.design_hash AS design_hash, c.seed AS seed,
+               c.lineage_parent_hashes_json AS lineage_parent_hashes_json,
+               c.novelty_score AS novelty_score,
+               c.operator_family AS operator_family,
+               c.model_route AS model_route,
                m.feasibility AS feasibility, m.is_feasible AS is_feasible,
                m.objective AS objective, m.raw_json AS raw_json
         FROM metrics m
@@ -154,6 +162,23 @@ def _fetch_candidates(
                     vio_clean[str(k)] = float(v)
                 except (TypeError, ValueError):
                     continue
+        lineage_payload = []
+        lineage_raw = row["lineage_parent_hashes_json"]
+        if isinstance(lineage_raw, str) and lineage_raw:
+            try:
+                loaded_lineage = json.loads(lineage_raw)
+                if isinstance(loaded_lineage, list):
+                    lineage_payload = [str(item) for item in loaded_lineage]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                lineage_payload = []
+
+        novelty_score = None
+        novelty_raw = row["novelty_score"]
+        if novelty_raw is not None:
+            try:
+                novelty_score = float(novelty_raw)
+            except (TypeError, ValueError):
+                novelty_score = None
 
         out.append(
             CandidateRow(
@@ -167,6 +192,10 @@ def _fetch_candidates(
                 violations=vio_clean,
                 metrics=metrics if isinstance(metrics, dict) else {},
                 meta=meta if isinstance(meta, dict) else {},
+                lineage_parent_hashes=lineage_payload,
+                novelty_score=novelty_score,
+                operator_family=str(row["operator_family"] or ""),
+                model_route=str(row["model_route"] or ""),
             )
         )
     return out
@@ -275,6 +304,7 @@ def _build_blend_cmd(
     t_min: float,
     t_max: float,
     t_step: float,
+    model_route: str,
 ) -> ProposalCommand:
     return ProposalCommand(
         argv=[
@@ -292,6 +322,8 @@ def _build_blend_cmd(
             str(seed_base),
             "--family",
             "blend",
+            "--model-route",
+            str(model_route),
             "--parent-a",
             str(parent_a),
             "--parent-b",
@@ -318,6 +350,7 @@ def _build_scale_cmd(
     axisym_r: float | None = None,
     scale_abs_n: tuple[int, float] | None = None,
     scale_m_ge: tuple[int, float] | None = None,
+    model_route: str = "governor_static_recipe",
 ) -> ProposalCommand:
     argv = [
         "python",
@@ -334,6 +367,8 @@ def _build_scale_cmd(
         str(seed_base),
         "--family",
         "scale_groups",
+        "--model-route",
+        str(model_route),
         "--parent",
         str(parent),
     ]
@@ -348,6 +383,38 @@ def _build_scale_cmd(
         m_min, factor = scale_m_ge
         argv += ["--scale-m-ge", str(int(m_min)), f"{float(factor):.6f}"]
     return ProposalCommand(argv=argv)
+
+
+def _recent_data_plane_summary(candidates: list[CandidateRow]) -> dict:
+    operator_counts: dict[str, int] = {}
+    route_counts: dict[str, int] = {}
+    lineage_count = 0
+    novelty_values: list[float] = []
+    for candidate in candidates:
+        operator = candidate.operator_family or "unknown"
+        route = candidate.model_route or "unknown"
+        operator_counts[operator] = operator_counts.get(operator, 0) + 1
+        route_counts[route] = route_counts.get(route, 0) + 1
+        if candidate.lineage_parent_hashes:
+            lineage_count += 1
+        if candidate.novelty_score is not None and math.isfinite(candidate.novelty_score):
+            novelty_values.append(float(candidate.novelty_score))
+    return {
+        "candidate_rows": len(candidates),
+        "with_lineage": lineage_count,
+        "with_novelty": len(novelty_values),
+        "avg_novelty": (
+            float(sum(novelty_values) / len(novelty_values))
+            if novelty_values
+            else None
+        ),
+        "operator_families": dict(
+            sorted(operator_counts.items(), key=lambda item: item[1], reverse=True)
+        ),
+        "model_routes": dict(
+            sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
+        ),
+    }
 
 
 def _ensure_parent_file(run_dir: Path, *, design_hash: str, boundary: dict) -> Path:
@@ -388,6 +455,7 @@ def _select_recipe(
     worst = str(worst_name) if worst_name is not None else ""
 
     cmds: list[ProposalCommand] = []
+    route_label = f"governor_static_recipe/{worst or 'unknown'}"
 
     # Scale sweep around the focus point (1D, ~4-6 candidates).
     if worst == "mirror":
@@ -413,6 +481,7 @@ def _select_recipe(
                     seed_base=seed_base + 10 + i,
                     parent=focus_path,
                     axisym_z=sz,
+                    model_route=route_label,
                 )
             )
         for j, factor in enumerate([0.85, 0.9, 0.95]):
@@ -425,6 +494,7 @@ def _select_recipe(
                     seed_base=seed_base + 40 + j,
                     parent=focus_path,
                     scale_m_ge=(3, factor),
+                    model_route=route_label,
                 )
             )
         combo_index = 0
@@ -440,6 +510,7 @@ def _select_recipe(
                         parent=focus_path,
                         axisym_z=sz,
                         scale_m_ge=(3, factor),
+                        model_route=route_label,
                     )
                 )
                 combo_index += 1
@@ -454,6 +525,7 @@ def _select_recipe(
                     seed_base=seed_base + 10 + i,
                     parent=focus_path,
                     scale_m_ge=(3, factor),
+                    model_route=route_label,
                 )
             )
         for i, factor in enumerate([0.96, 0.98]):
@@ -466,6 +538,7 @@ def _select_recipe(
                     seed_base=seed_base + 20 + i,
                     parent=focus_path,
                     scale_abs_n=(1, factor),
+                    model_route=route_label,
                 )
             )
         for i, factor in enumerate([1.02, 1.04, 1.06]):
@@ -478,6 +551,7 @@ def _select_recipe(
                     seed_base=seed_base + 30 + i,
                     parent=focus_path,
                     scale_abs_n=(3, factor),
+                    model_route=route_label,
                 )
             )
     elif worst == "flux":
@@ -491,6 +565,7 @@ def _select_recipe(
                     seed_base=seed_base + 10 + i,
                     parent=focus_path,
                     scale_m_ge=(3, factor),
+                    model_route=route_label,
                 )
             )
     elif worst == "vacuum":
@@ -504,6 +579,7 @@ def _select_recipe(
                     seed_base=seed_base + 10 + i,
                     parent=focus_path,
                     scale_m_ge=(2, factor),
+                    model_route=route_label,
                 )
             )
     elif worst == "iota":
@@ -517,6 +593,7 @@ def _select_recipe(
                     seed_base=seed_base + 10 + i,
                     parent=focus_path,
                     scale_abs_n=(1, factor),
+                    model_route=route_label,
                 )
             )
 
@@ -550,6 +627,7 @@ def _select_recipe(
                     t_min=0.0,
                     t_max=0.1,
                     t_step=0.02,
+                    model_route=route_label,
                 )
             )
 
@@ -573,6 +651,7 @@ def _select_recipe(
             "lgradb": partner.lgradb,
         },
         "commands": [_cmd_str(c) for c in cmds],
+        "model_route": route_label,
         "created_at": _utc_now_iso(),
     }
     return cmds, decision
@@ -708,11 +787,13 @@ def main() -> None:
                     t_min=float(args.bootstrap_t_min),
                     t_max=float(args.bootstrap_t_max),
                     t_step=float(args.bootstrap_t_step),
+                    model_route="governor_bootstrap",
                 )
                 decision = {
                     "batch_id": batch_id,
                     "bootstrap": True,
                     "commands": [_cmd_str(cmd)],
+                    "model_route": "governor_bootstrap",
                     "created_at": _utc_now_iso(),
                 }
                 artifact_path = (
@@ -763,6 +844,7 @@ def main() -> None:
                 focus
             )  # traceability; includes violations/metrics/meta
             decision["partner_meta"] = None if partner is None else asdict(partner)
+            decision["recent_data_plane"] = _recent_data_plane_summary(candidates)
             decision["hv_at_decision"] = hv_value
             decision["record_hv"] = float(args.record_hv)
 

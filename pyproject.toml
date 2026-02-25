@@ -35,11 +35,14 @@ optimization = [
 datasets = [
     "datasets>=2.0.0",
 ]
+experiments = [
+    "ai_scientist[ml,optimization,datasets]",
+]
 rl = [
     "gymnasium>=0.29.0",
 ]
 full = [
-    "ai_scientist[test,ml,optimization,datasets,rl]",
+    "ai_scientist[test,experiments,rl]",
     "PyYAML>=6.0",
 ]
 

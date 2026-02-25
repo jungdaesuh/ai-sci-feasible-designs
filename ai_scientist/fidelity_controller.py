@@ -209,6 +209,12 @@ class FidelityController:
                         "evaluation": evaluation,
                         "seed": int(candidate.get("seed", -1)),
                         "design_hash": str(design_id),
+                        "lineage_parent_hashes": candidate.get(
+                            "lineage_parent_hashes"
+                        ),
+                        "novelty_score": candidate.get("novelty_score"),
+                        "operator_family": candidate.get("operator_family"),
+                        "model_route": candidate.get("model_route"),
                     }
                 )
 
@@ -351,6 +357,10 @@ class FidelityController:
                     "evaluation": eval_dict,
                     "seed": int(candidate["seed"]),
                     "design_hash": design_id,
+                    "lineage_parent_hashes": candidate.get("lineage_parent_hashes"),
+                    "novelty_score": candidate.get("novelty_score"),
+                    "operator_family": candidate.get("operator_family"),
+                    "model_route": candidate.get("model_route"),
                 }
             )
 

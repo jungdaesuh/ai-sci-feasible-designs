@@ -19,9 +19,10 @@ Build one robust optimization stack that integrates ideas from AlphaEvolve, Shin
 
 1. **No adaptive control plane yet**
    - No novelty service, no model-router bandit, no parent-group policy in runtime.
-2. **DB schema cannot support novelty/group evolution signals**
-   - Current `candidates`/`metrics` tables store params, objective/HV/feasibility only.
-   - No parent lineage, novelty score, operator family score, trace embedding, or model-route decision fields.
+2. **Data plane is only partially complete**
+   - `candidates` now persists lineage/novelty/operator/model-route fields.
+   - Runtime now reads/writes those fields in governor/propose/enqueue/reporting paths.
+   - Shared enqueue SSOT module is still missing and there are still duplicate enqueue callsites.
 3. **Deprecated wrappers still sit on the active path**
    - Main cycle execution already routes through `forward_model_batch`.
    - Deprecated `tools.evaluate_*` wrappers still persist in bootstrap/tooling/experimental paths and block clean removal.
@@ -174,7 +175,7 @@ Per batch:
 
 ## 9) Immediate Next Actions
 
-1. Implement schema migration and shared enqueue library.
+1. Implement shared enqueue library and switch both enqueue callsites to it.
 2. Add telemetry for currently deprecated/legacy paths.
 3. Integrate adaptive governor behind flag and run A/B.
 4. Migrate remaining bootstrap/tooling/experimental evaluation calls to `forward_model_batch`.
@@ -184,7 +185,8 @@ Per batch:
 
 ## 10) Reviewer-Verified Open Gaps (Current State)
 
-1. Schema still lacks lineage/novelty/operator persistence fields required by adaptive selection.
-2. Duplicate enqueue implementations still exist in `p3_propose` and `p3_enqueue_submission`.
-3. P3 governor still uses static `_select_recipe` flow.
-4. Deprecated wrappers are no longer primary runtime path but are still used in bootstrap/tooling/experimental paths.
+1. Schema/data plane persistence is landed, but enqueue logic is still duplicated in `p3_propose` and `p3_enqueue_submission`.
+2. P3 governor still uses static `_select_recipe` flow; adaptive branch and explicit feature flag are not landed.
+3. P1/P2 lightweight adaptive restart/novelty layer is not landed.
+4. Native codex subscription integration is still partial: local adapter server + OAuth/profile management remain pending.
+5. Deprecated wrappers are no longer primary runtime path but are still used in bootstrap/tooling/experimental paths.

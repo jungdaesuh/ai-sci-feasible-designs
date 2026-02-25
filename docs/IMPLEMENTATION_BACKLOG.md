@@ -17,12 +17,23 @@ This backlog converts the active plans into execution milestones:
   - Runtime supports role-level model alias overrides via env vars for `planning`, `literature`, `analysis`.
   - Unit tests cover provider request building and role overrides.
   - Remaining work for “native subscription” is still tracked in `docs/CODEX_NATIVE_SUBSCRIPTION_INTEGRATION.md` (auth/profile management + local adapter server).
+- **2026-02-25:** Completed Epic 1 data-plane core (M1.1) and partial telemetry (M1.3):
+  - `candidates` schema now persists `lineage_parent_hashes_json`, `novelty_score`, `operator_family`, `model_route`.
+  - WorldModel write/read hooks and report context now include P3 data-plane metadata.
+  - `scripts/p3_propose.py`, `scripts/p3_enqueue_submission.py`, and `scripts/p3_governor.py` now write/read route/operator/lineage metadata.
+  - Memory tests cover migration + persistence + summary aggregation.
+  - Remaining Epic 1 gap: shared enqueue SSOT module (M1.2).
+- **2026-02-25:** Epic 2 remains open:
+  - Governor still uses static recipe selection.
+  - Adaptive path is not yet behind an explicit feature flag.
+- **2026-02-25:** Epic 3 remains open:
+  - P1/P2 adaptive restart seed selection + novelty gating are not integrated yet.
 
 ## Epic 1 — Data plane foundation
 
-- **M1.1 Schema migration**: add lineage/novelty/operator/model-route fields required by adaptive evolution.
-- **M1.2 Shared enqueue library**: replace duplicated enqueue logic in `scripts/p3_propose.py` and `scripts/p3_enqueue_submission.py`.
-- **M1.3 Telemetry baseline**: record operator usage, novelty reject rate, fallback-path usage.
+- [x] **M1.1 Schema migration**: add lineage/novelty/operator/model-route fields required by adaptive evolution. *(Done 2026-02-25)*
+- [ ] **M1.2 Shared enqueue library**: replace duplicated enqueue logic in `scripts/p3_propose.py` and `scripts/p3_enqueue_submission.py`.
+- [ ] **M1.3 Telemetry baseline**: record operator usage, novelty reject rate, fallback-path usage. *(Partial 2026-02-25: operator/model-route + novelty coverage reporting landed; reject-rate/fallback counters pending.)*
 
 **Definition of done**
 - New schema is backward-compatible and migration-tested.
@@ -31,9 +42,9 @@ This backlog converts the active plans into execution milestones:
 
 ## Epic 2 — P3 adaptive governor
 
-- **M2.1 Flagged adaptive governor path** in `scripts/p3_governor.py`.
-- **M2.2 Parent-group selector + operator-family bandit + novelty gate**.
-- **M2.3 A/B validation** against static recipe path with fixed budget.
+- [ ] **M2.1 Flagged adaptive governor path** in `scripts/p3_governor.py`.
+- [ ] **M2.2 Parent-group selector + operator-family bandit + novelty gate**.
+- [ ] **M2.3 A/B validation** against static recipe path with fixed budget.
 
 **Definition of done**
 - Deterministic evaluator remains unchanged (`scripts/p3_worker.py`).
@@ -42,9 +53,9 @@ This backlog converts the active plans into execution milestones:
 
 ## Epic 3 — P1/P2 lightweight adaptation
 
-- **M3.1 Adaptive restart seed selector** for P1/P2.
-- **M3.2 Constrained novelty gating** around restarts.
-- **M3.3 Fixed-budget comparison** against current ALM/NGOpt loops.
+- [ ] **M3.1 Adaptive restart seed selector** for P1/P2.
+- [ ] **M3.2 Constrained novelty gating** around restarts.
+- [ ] **M3.3 Fixed-budget comparison** against current ALM/NGOpt loops.
 
 **Definition of done**
 - No regression on best feasible objective at fixed budget.

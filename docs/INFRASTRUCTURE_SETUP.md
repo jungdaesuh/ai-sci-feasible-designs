@@ -51,7 +51,7 @@ ENV OMP_NUM_THREADS=1 \
     AI_SCIENTIST_INSTRUCT_MODEL="grok-planning-short-loop" \
     AI_SCIENTIST_THINKING_MODEL="grok-planning-full"
 
-RUN pip install -e ".[test]" && \
+RUN pip install -e ".[test,experiments]" && \
     pip install -e constellaration[test,lint]
 
 CMD ["python", "-m", "ai_scientist.runner"]

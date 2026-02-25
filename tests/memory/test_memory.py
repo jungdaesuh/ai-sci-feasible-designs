@@ -124,6 +124,94 @@ def test_memory_helpers_graph_and_metrics(tmp_path):
         assert any(edge[2].get("relation") == "produces" for edge in graph.edges)
 
 
+def test_log_candidate_persists_p3_data_plane_metadata(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.1]]},
+            seed=5,
+            status="pending",
+            evaluation={
+                "stage": "pending",
+                "objective": 1.0,
+                "feasibility": 0.5,
+                "metrics": {"aspect_ratio": 9.0},
+            },
+            design_hash="metadata-hash",
+            lineage_parent_hashes=["parent-a", "parent-b"],
+            novelty_score=0.12,
+            operator_family="blend",
+            model_route="governor_static_recipe/mirror",
+        )
+        row = wm._conn.execute(
+            """
+            SELECT lineage_parent_hashes_json, novelty_score, operator_family, model_route
+            FROM candidates
+            WHERE experiment_id = ?
+            """,
+            (experiment_id,),
+        ).fetchone()
+        assert row is not None
+        assert json.loads(row["lineage_parent_hashes_json"]) == ["parent-a", "parent-b"]
+        assert row["novelty_score"] == pytest.approx(0.12)
+        assert row["operator_family"] == "blend"
+        assert row["model_route"] == "governor_static_recipe/mirror"
+
+
+def test_candidate_data_plane_summary_counts_metadata(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.1]]},
+            seed=1,
+            status="pending",
+            evaluation={
+                "stage": "pending",
+                "objective": 0.9,
+                "feasibility": 0.2,
+                "metrics": {"aspect_ratio": 8.0},
+            },
+            design_hash="p3-hash-a",
+            lineage_parent_hashes=["p0"],
+            novelty_score=0.2,
+            operator_family="blend",
+            model_route="governor_static_recipe/mirror",
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.1]], "z_sin": [[0.2]]},
+            seed=2,
+            status="pending",
+            evaluation={
+                "stage": "pending",
+                "objective": 1.1,
+                "feasibility": 0.3,
+                "metrics": {"aspect_ratio": 10.0},
+            },
+            design_hash="p3-hash-b",
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="scale_groups",
+            model_route="governor_static_recipe/log10_qi",
+        )
+        summary = wm.candidate_data_plane_summary(experiment_id, problem="p3")
+        assert summary["candidate_rows"] == 2
+        assert summary["with_lineage"] == 1
+        assert summary["with_novelty"] == 1
+        assert summary["avg_novelty"] == pytest.approx(0.2)
+        assert summary["operator_families"]["blend"] == 1
+        assert summary["operator_families"]["scale_groups"] == 1
+        assert summary["model_routes"]["governor_static_recipe/mirror"] == 1
+        assert summary["model_routes"]["governor_static_recipe/log10_qi"] == 1
+
+
 def test_world_model_surrogate_training_data(tmp_path):
     db_path = tmp_path / "world.db"
     with memory.WorldModel(db_path) as wm:

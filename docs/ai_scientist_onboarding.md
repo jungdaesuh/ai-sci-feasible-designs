@@ -6,7 +6,9 @@ This snippet assumes you are working inside `/Users/suhjungdae/code/software/pro
 1. Create/activate the virtualenv if it is not already active:
    ```bash
    python -m venv .venv && source .venv/bin/activate
-   pip install -e ".[test]"
+   pip install -e ".[test,experiments]"
+   # or with uv:
+   uv sync --extra test --extra experiments
    ```
 2. Launch a baseline deterministic run (Phase 1 entry point):
    ```bash

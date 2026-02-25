@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -498,12 +499,38 @@ class WorldModel:
         evaluation: Mapping[str, Any],
         *,
         design_hash: str,
+        lineage_parent_hashes: Sequence[str] | None = None,
+        novelty_score: float | None = None,
+        operator_family: str | None = None,
+        model_route: str | None = None,
         commit: bool = True,
     ) -> tuple[int, int]:
         params_json = json.dumps(_normalize_to_json(params), separators=(",", ":"))
+        lineage_json = json.dumps(
+            [str(parent) for parent in (lineage_parent_hashes or [])],
+            separators=(",", ":"),
+        )
+        novelty_value = float(novelty_score) if novelty_score is not None else None
+        operator_family_value = str(operator_family or "")
+        model_route_value = str(model_route or "")
         cursor = self._conn.execute(
-            "INSERT INTO candidates (experiment_id, problem, params_json, seed, status, design_hash) VALUES (?, ?, ?, ?, ?, ?)",
-            (experiment_id, problem, params_json, seed, status, design_hash),
+            """
+            INSERT INTO candidates
+            (experiment_id, problem, params_json, seed, status, design_hash, lineage_parent_hashes_json, novelty_score, operator_family, model_route)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                experiment_id,
+                problem,
+                params_json,
+                seed,
+                status,
+                design_hash,
+                lineage_json,
+                novelty_value,
+                operator_family_value,
+                model_route_value,
+            ),
         )
         candidate_id = cursor.lastrowid
         assert candidate_id is not None
@@ -961,6 +988,10 @@ class WorldModel:
                 status=candidate["status"],
                 seed=candidate["seed"],
                 params=candidate["params_json"],
+                operator_family=candidate["operator_family"],
+                model_route=candidate["model_route"],
+                novelty_score=candidate["novelty_score"],
+                lineage_parent_hashes_json=candidate["lineage_parent_hashes_json"],
             )
             graph.add_edge(exp_node, candidate_node, relation="contains")
         metrics_rows = self._conn.execute(
@@ -1080,6 +1111,67 @@ class WorldModel:
             "edge_count": len(graph.edges),
             "citation_count": len(citations),
             "citations": citations,
+        }
+
+    def candidate_data_plane_summary(
+        self,
+        experiment_id: int,
+        *,
+        problem: str = "p3",
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        rows = self._conn.execute(
+            """
+            SELECT lineage_parent_hashes_json, novelty_score, operator_family, model_route
+            FROM candidates
+            WHERE experiment_id = ? AND problem = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (experiment_id, problem, int(limit)),
+        ).fetchall()
+
+        operator_counts: dict[str, int] = {}
+        route_counts: dict[str, int] = {}
+        lineage_count = 0
+        novelty_values: list[float] = []
+
+        for row in rows:
+            lineage_raw = row["lineage_parent_hashes_json"]
+            try:
+                lineage_payload = json.loads(lineage_raw) if lineage_raw else []
+            except (TypeError, json.JSONDecodeError):
+                lineage_payload = []
+            if isinstance(lineage_payload, list) and len(lineage_payload) > 0:
+                lineage_count += 1
+
+            novelty = row["novelty_score"]
+            if novelty is not None:
+                novelty_float = float(novelty)
+                if math.isfinite(novelty_float):
+                    novelty_values.append(novelty_float)
+
+            operator = str(row["operator_family"] or "unknown")
+            route = str(row["model_route"] or "unknown")
+            operator_counts[operator] = operator_counts.get(operator, 0) + 1
+            route_counts[route] = route_counts.get(route, 0) + 1
+
+        avg_novelty = (
+            float(sum(novelty_values) / len(novelty_values))
+            if novelty_values
+            else None
+        )
+        return {
+            "candidate_rows": len(rows),
+            "with_lineage": lineage_count,
+            "with_novelty": len(novelty_values),
+            "avg_novelty": avg_novelty,
+            "operator_families": dict(
+                sorted(operator_counts.items(), key=lambda item: item[1], reverse=True)
+            ),
+            "model_routes": dict(
+                sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
+            ),
         }
 
     def surrogate_training_data(
