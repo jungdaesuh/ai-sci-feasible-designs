@@ -36,6 +36,10 @@ from ai_scientist.memory.schema import init_db
 
 _DEFAULT_RECORD_HV = 135.15669906272515
 _NOVELTY_REJECT_THRESHOLD = 0.05
+_ADAPTIVE_NOVELTY_GATE = 0.03
+_ADAPTIVE_MAX_COMMANDS = 8
+_ADAPTIVE_EXPLORATION_WEIGHT = 0.35
+_ADAPTIVE_PARENT_SATURATION_PENALTY = 0.15
 
 
 def _utc_now_iso() -> str:
@@ -286,6 +290,108 @@ def _choose_partner(
     return min(pool, key=metric_value)
 
 
+def _lineage_child_counts(candidates: list[CandidateRow]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        for parent_hash in candidate.lineage_parent_hashes:
+            counts[parent_hash] = counts.get(parent_hash, 0) + 1
+    return counts
+
+
+def _candidate_parent_score(
+    candidate: CandidateRow,
+    *,
+    child_counts: dict[str, int],
+) -> float:
+    if candidate.lgradb is None or candidate.aspect is None:
+        return -float("inf")
+    if candidate.is_feasible:
+        base = _potential_area(candidate.lgradb, candidate.aspect)
+    else:
+        base = _focus_score(candidate)
+    saturation_penalty = (
+        float(child_counts.get(candidate.design_hash, 0))
+        * _ADAPTIVE_PARENT_SATURATION_PENALTY
+    )
+    return float(base) - saturation_penalty
+
+
+@dataclass(frozen=True)
+class ParentGroupSelection:
+    group: str
+    focus: CandidateRow
+    partner: CandidateRow | None
+    score: float
+    candidate_count: int
+
+
+def _select_parent_group(
+    candidates: list[CandidateRow],
+    *,
+    max_feasibility: float,
+) -> ParentGroupSelection | None:
+    child_counts = _lineage_child_counts(candidates)
+
+    near_feasible = [
+        c
+        for c in candidates
+        if (not c.is_feasible)
+        and c.lgradb is not None
+        and c.aspect is not None
+        and c.feasibility > 1e-2
+        and c.feasibility <= max_feasibility
+    ]
+    feasible = [
+        c
+        for c in candidates
+        if c.is_feasible and c.lgradb is not None and c.aspect is not None
+    ]
+    assigned_ids = {
+        *(candidate.candidate_id for candidate in near_feasible),
+        *(candidate.candidate_id for candidate in feasible),
+    }
+    broad = [
+        c
+        for c in candidates
+        if c.lgradb is not None
+        and c.aspect is not None
+        and c.candidate_id not in assigned_ids
+    ]
+
+    groups: list[tuple[str, list[CandidateRow]]] = [
+        ("near_feasible", near_feasible),
+        ("feasible", feasible),
+        ("broad", broad),
+    ]
+
+    best_group: ParentGroupSelection | None = None
+    for group_name, pool in groups:
+        if not pool:
+            continue
+        focus = max(
+            pool,
+            key=lambda candidate: _candidate_parent_score(
+                candidate, child_counts=child_counts
+            ),
+        )
+        focus_score = _candidate_parent_score(focus, child_counts=child_counts)
+        worst_name, _ = _worst_constraint(focus.violations)
+        worst_constraint = str(worst_name) if worst_name is not None else ""
+        partner = _choose_partner(candidates, worst_constraint=worst_constraint)
+        if partner is not None and partner.design_hash == focus.design_hash:
+            partner = None
+        selection = ParentGroupSelection(
+            group=group_name,
+            focus=focus,
+            partner=partner,
+            score=focus_score,
+            candidate_count=len(pool),
+        )
+        if best_group is None or selection.score > best_group.score:
+            best_group = selection
+    return best_group
+
+
 @dataclass(frozen=True)
 class ProposalCommand:
     argv: list[str]
@@ -293,6 +399,88 @@ class ProposalCommand:
 
 def _cmd_str(cmd: ProposalCommand) -> str:
     return " ".join(cmd.argv)
+
+
+def _cmd_flag_value(cmd: ProposalCommand, flag: str) -> str | None:
+    argv = cmd.argv
+    if flag not in argv:
+        return None
+    idx = argv.index(flag)
+    if idx + 1 >= len(argv):
+        return None
+    return str(argv[idx + 1])
+
+
+def _command_family(cmd: ProposalCommand) -> str:
+    value = _cmd_flag_value(cmd, "--family")
+    return str(value) if value is not None else "unknown"
+
+
+def _command_novelty(cmd: ProposalCommand) -> float:
+    family = _command_family(cmd)
+    if family == "blend":
+        t_min = _cmd_flag_value(cmd, "--t-min")
+        t_max = _cmd_flag_value(cmd, "--t-max")
+        t_values = [
+            abs(float(value))
+            for value in (t_min, t_max)
+            if value is not None
+        ]
+        return float(max(t_values) if t_values else 0.0)
+
+    if family != "scale_groups":
+        return 0.0
+
+    novelty = 0.0
+    axisym_z = _cmd_flag_value(cmd, "--axisym-z")
+    axisym_r = _cmd_flag_value(cmd, "--axisym-r")
+    if axisym_z is not None:
+        novelty = max(novelty, abs(float(axisym_z) - 1.0))
+    if axisym_r is not None:
+        novelty = max(novelty, abs(float(axisym_r) - 1.0))
+
+    argv = cmd.argv
+    for idx, token in enumerate(argv):
+        if token == "--scale-abs-n" and idx + 2 < len(argv):
+            novelty = max(novelty, abs(float(argv[idx + 2]) - 1.0))
+        if token == "--scale-m-ge" and idx + 2 < len(argv):
+            novelty = max(novelty, abs(float(argv[idx + 2]) - 1.0))
+    return float(novelty)
+
+
+def _operator_reward(candidate: CandidateRow) -> float:
+    if candidate.lgradb is None or candidate.aspect is None:
+        return 0.0
+    area = _potential_area(candidate.lgradb, candidate.aspect)
+    if candidate.is_feasible:
+        return area
+    return (0.1 * area) - (10.0 * float(candidate.feasibility))
+
+
+def _operator_bandit_scores(
+    candidates: list[CandidateRow],
+    *,
+    families: set[str],
+) -> dict[str, float]:
+    counts: dict[str, int] = {}
+    rewards: dict[str, float] = {}
+    for candidate in candidates:
+        family = str(candidate.operator_family or "unknown")
+        counts[family] = counts.get(family, 0) + 1
+        rewards[family] = rewards.get(family, 0.0) + _operator_reward(candidate)
+
+    total = sum(counts.values())
+    family_count = max(len(families), 1)
+    scores: dict[str, float] = {}
+    for family in sorted(families):
+        c = counts.get(family, 0)
+        reward_sum = rewards.get(family, 0.0)
+        mean_reward = reward_sum / float(c) if c > 0 else 0.0
+        exploration = _ADAPTIVE_EXPLORATION_WEIGHT * math.sqrt(
+            math.log(float(total + family_count + 1)) / float(c + 1)
+        )
+        scores[family] = float(mean_reward + exploration)
+    return scores
 
 
 def _build_blend_cmd(
@@ -589,6 +777,30 @@ def _select_static_recipe(
                 )
             )
 
+    # Objective-only exploration fallback when no explicit worst-constraint recipe
+    # applies (for example, feasible parents with empty violations).
+    if not cmds:
+        objective_sweep: list[tuple[float | None, tuple[int, float] | None]] = [
+            (0.96, None),
+            (1.04, None),
+            (None, (3, 0.92)),
+            (None, (3, 1.08)),
+        ]
+        for i, (axisym_z, scale_m_ge) in enumerate(objective_sweep):
+            cmds.append(
+                _build_scale_cmd(
+                    db=db,
+                    experiment_id=experiment_id,
+                    run_dir=run_dir,
+                    batch_id=batch_id,
+                    seed_base=seed_base + 10 + i,
+                    parent=focus_path,
+                    axisym_z=axisym_z,
+                    scale_m_ge=scale_m_ge,
+                    model_route=route_label,
+                )
+            )
+
     # Blend sweep towards a partner that is better on the worst constraint.
     if partner is not None:
         conn2 = _connect(db)
@@ -650,7 +862,7 @@ def _select_static_recipe(
     return cmds, decision
 
 
-def _select_adaptive_recipe_scaffold(
+def _select_adaptive_recipe(
     *,
     db: Path,
     experiment_id: int,
@@ -659,6 +871,8 @@ def _select_adaptive_recipe_scaffold(
     seed_base: int,
     focus: CandidateRow,
     partner: CandidateRow | None,
+    history_candidates: list[CandidateRow],
+    parent_group: str,
 ) -> tuple[list[ProposalCommand], dict]:
     cmds, decision = _select_static_recipe(
         db=db,
@@ -668,14 +882,74 @@ def _select_adaptive_recipe_scaffold(
         seed_base=seed_base,
         focus=focus,
         partner=partner,
-        route_prefix="governor_adaptive_scaffold/static_delegate",
+        route_prefix=f"governor_adaptive/{str(parent_group)}",
     )
-    decision["recipe_mode"] = "adaptive_scaffold"
+    families = {_command_family(cmd) for cmd in cmds}
+    bandit_scores = _operator_bandit_scores(
+        history_candidates,
+        families=families,
+    )
+
+    scored: list[tuple[float, ProposalCommand, str, float]] = []
+    novelty_rejects = 0
+    for cmd in cmds:
+        family = _command_family(cmd)
+        novelty = _command_novelty(cmd)
+        if novelty < _ADAPTIVE_NOVELTY_GATE:
+            novelty_rejects += 1
+            continue
+        score = bandit_scores.get(family, 0.0) + novelty
+        scored.append((score, cmd, family, novelty))
+
+    if not scored:
+        fallback_cmds, fallback_decision = _select_static_recipe(
+            db=db,
+            experiment_id=experiment_id,
+            run_dir=run_dir,
+            batch_id=batch_id,
+            seed_base=seed_base,
+            focus=focus,
+            partner=partner,
+            route_prefix="governor_adaptive_scaffold/static_delegate",
+        )
+        fallback_decision["recipe_mode"] = "adaptive"
+        fallback_decision["adaptive_policy"] = {
+            "version": "v1",
+            "strategy": "static_delegate_fallback",
+            "parent_group": str(parent_group),
+            "bandit_scores": bandit_scores,
+            "novelty_gate": float(_ADAPTIVE_NOVELTY_GATE),
+            "novelty_reject_count": novelty_rejects,
+            "candidate_command_count": len(cmds),
+            "selected_command_count": len(fallback_cmds),
+        }
+        return fallback_cmds, fallback_decision
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected = scored[: min(_ADAPTIVE_MAX_COMMANDS, len(scored))]
+    selected_cmds = [item[1] for item in selected]
+    selected_families = sorted({item[2] for item in selected})
+    selected_novelties = [item[3] for item in selected]
+
+    decision["commands"] = [_cmd_str(cmd) for cmd in selected_cmds]
+    decision["recipe_mode"] = "adaptive"
     decision["adaptive_policy"] = {
-        "version": "v0",
-        "strategy": "static_delegate",
+        "version": "v1",
+        "strategy": "parent_group_operator_bandit_novelty_gate",
+        "parent_group": str(parent_group),
+        "bandit_scores": bandit_scores,
+        "novelty_gate": float(_ADAPTIVE_NOVELTY_GATE),
+        "novelty_reject_count": novelty_rejects,
+        "candidate_command_count": len(cmds),
+        "selected_command_count": len(selected_cmds),
+        "selected_operator_families": selected_families,
+        "selected_avg_novelty": (
+            float(sum(selected_novelties) / len(selected_novelties))
+            if selected_novelties
+            else None
+        ),
     }
-    return cmds, decision
+    return selected_cmds, decision
 
 
 def _run_cmds(cmds: Iterable[ProposalCommand]) -> None:
@@ -721,7 +995,7 @@ def main() -> None:
     parser.add_argument(
         "--adaptive",
         action="store_true",
-        help="Enable adaptive governor scaffolding path (currently delegates to static recipe).",
+        help="Enable adaptive parent-group + operator-bandit + novelty-gate policy.",
     )
     parser.add_argument(
         "--bootstrap-parent-a",
@@ -820,9 +1094,7 @@ def main() -> None:
                     "bootstrap": True,
                     "commands": [_cmd_str(cmd)],
                     "model_route": "governor_bootstrap",
-                    "governor_mode": (
-                        "adaptive_scaffold" if bool(args.adaptive) else "static"
-                    ),
+                    "governor_mode": "adaptive" if bool(args.adaptive) else "static",
                     "created_at": _utc_now_iso(),
                 }
                 artifact_path = (
@@ -843,24 +1115,44 @@ def main() -> None:
                 time.sleep(float(args.sleep_sec))
                 continue
 
-            focus = _choose_focus(
-                candidates, max_feasibility=float(args.max_focus_feas)
-            )
-            if focus is None:
-                print("No near-feasible focus candidate found in recent window.")
-                if not args.loop:
-                    break
-                time.sleep(float(args.sleep_sec))
-                continue
-
-            worst_name, _worst_val = _worst_constraint(focus.violations)
-            worst = str(worst_name) if worst_name is not None else ""
-            partner = _choose_partner(candidates, worst_constraint=worst)
+            parent_group_meta: dict[str, object] | None = None
+            if args.adaptive:
+                parent_selection = _select_parent_group(
+                    candidates,
+                    max_feasibility=float(args.max_focus_feas),
+                )
+                if parent_selection is None:
+                    print("No parent-group candidate found in recent window.")
+                    if not args.loop:
+                        break
+                    time.sleep(float(args.sleep_sec))
+                    continue
+                focus = parent_selection.focus
+                partner = parent_selection.partner
+                parent_group_meta = {
+                    "group": parent_selection.group,
+                    "score": parent_selection.score,
+                    "candidate_count": parent_selection.candidate_count,
+                }
+            else:
+                focus = _choose_focus(
+                    candidates, max_feasibility=float(args.max_focus_feas)
+                )
+                if focus is None:
+                    print("No near-feasible focus candidate found in recent window.")
+                    if not args.loop:
+                        break
+                    time.sleep(float(args.sleep_sec))
+                    continue
+                worst_name, _worst_val = _worst_constraint(focus.violations)
+                worst = str(worst_name) if worst_name is not None else ""
+                partner = _choose_partner(candidates, worst_constraint=worst)
 
             batch_id = _next_batch_id(args.run_dir)
             seed_base = int(args.experiment_id) * 10_000_000 + int(batch_id) * 1_000
             if args.adaptive:
-                cmds, decision = _select_adaptive_recipe_scaffold(
+                assert parent_group_meta is not None
+                cmds, decision = _select_adaptive_recipe(
                     db=args.db,
                     experiment_id=exp_id,
                     run_dir=args.run_dir,
@@ -868,6 +1160,8 @@ def main() -> None:
                     seed_base=seed_base,
                     focus=focus,
                     partner=partner,
+                    history_candidates=candidates,
+                    parent_group=str(parent_group_meta["group"]),
                 )
             else:
                 cmds, decision = _select_static_recipe(
@@ -888,11 +1182,11 @@ def main() -> None:
                 candidates,
                 novelty_reject_threshold=_NOVELTY_REJECT_THRESHOLD,
             )
+            if parent_group_meta is not None:
+                decision["parent_group"] = parent_group_meta
             decision["hv_at_decision"] = hv_value
             decision["record_hv"] = float(args.record_hv)
-            decision["governor_mode"] = (
-                "adaptive_scaffold" if bool(args.adaptive) else "static"
-            )
+            decision["governor_mode"] = "adaptive" if bool(args.adaptive) else "static"
 
             artifact_path = (
                 args.run_dir

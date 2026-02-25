@@ -29,7 +29,11 @@ This backlog converts the active plans into execution milestones:
   - Telemetry baseline now includes novelty reject counters and static/adaptive/fallback path counters in governor summaries and cycle reporting.
 - **2026-02-25:** Epic 2 remains open:
   - `--adaptive` feature flag scaffold is now landed in `scripts/p3_governor.py` with static rollback.
-  - Remaining Epic 2 work is adaptive policy logic (M2.2) + fixed-budget A/B validation (M2.3).
+  - Remaining Epic 2 work is fixed-budget A/B validation (M2.3).
+- **2026-02-25:** Completed Epic 2 policy core (M2.2):
+  - Adaptive path now uses parent-group selection + operator-family bandit ranking + novelty gate.
+  - Adaptive path preserves static-delegate fallback when novelty gate rejects all candidates.
+  - Decision artifacts include adaptive policy metadata (`parent_group`, selected operators, reject counts).
 - **2026-02-25:** Epic 3 remains open:
   - P1/P2 adaptive restart seed selection + novelty gating are not integrated yet.
 
@@ -47,7 +51,7 @@ This backlog converts the active plans into execution milestones:
 ## Epic 2 — P3 adaptive governor
 
 - [x] **M2.1 Flagged adaptive governor path** in `scripts/p3_governor.py`. *(Done 2026-02-25; scaffold delegates to static recipe while preserving rollback.)*
-- [ ] **M2.2 Parent-group selector + operator-family bandit + novelty gate**.
+- [x] **M2.2 Parent-group selector + operator-family bandit + novelty gate**. *(Done 2026-02-25)*
 - [ ] **M2.3 A/B validation** against static recipe path with fixed budget.
 
 **Definition of done**
