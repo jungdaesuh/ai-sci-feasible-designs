@@ -18,7 +18,7 @@ import torch
 from datasets import load_dataset
 from sklearn.ensemble import RandomForestRegressor
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 VMEC_BUILD = ROOT / "vmecpp" / "build"
 skip_paths = os.environ.get("SKBUILD_EDITABLE_SKIP", "").split(os.pathsep)
 if str(VMEC_BUILD) not in skip_paths:
@@ -27,7 +27,8 @@ if str(VMEC_BUILD) not in skip_paths:
     os.environ["SKBUILD_EDITABLE_SKIP"] = os.pathsep.join(skip_paths)
 os.environ.setdefault("SKBUILD_EDITABLE_VERBOSE", "0")
 
-sys.path.append(os.getcwd())
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from ai_scientist.forward_model import forward_model_batch, get_backend
 from ai_scientist.tools.evaluation import (

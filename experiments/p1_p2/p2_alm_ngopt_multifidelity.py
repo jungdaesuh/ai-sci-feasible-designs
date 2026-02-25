@@ -30,7 +30,7 @@ from constellaration.mhd import vmec_settings as vmec_settings_module
 from constellaration.optimization import augmented_lagrangian as al
 from constellaration.utils import pytree
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
