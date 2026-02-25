@@ -14,7 +14,13 @@ from ai_scientist.model_provider import build_chat_request, invoke_chat_completi
 
 @pytest.fixture(autouse=True)
 def _clear_env() -> None:
-    for key in ("OPENROUTER_API_KEY", "MOONSHOT_API_KEY", "WQ_API_KEY"):
+    for key in (
+        "OPENROUTER_API_KEY",
+        "MOONSHOT_API_KEY",
+        "WQ_API_KEY",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "CODEX_NATIVE_BEARER_TOKEN",
+    ):
         os.environ.pop(key, None)
 
 
@@ -29,6 +35,8 @@ def test_openrouter_chat_request_includes_extra_headers() -> None:
     )
     assert request.path == provider.chat_path
     assert request.headers["Authorization"] == "Bearer open-token"
+    assert request.headers["X-AI-Scientist-Tool-Name"] == "make_boundary"
+    assert request.body["tool_call"]["name"] == "make_boundary"
     assert request.headers.get("HTTP-Referer") == "https://openrouter.ai/docs"
     assert request.headers.get("X-Title") == "ConStellaration Grok"
 
@@ -56,8 +64,29 @@ def test_moonshot_requests_can_override_messages() -> None:
         messages=custom_messages,
     )
     assert request.headers["Authorization"] == "Bearer moon-token"
+    assert request.headers["X-AI-Scientist-Tool-Name"] == "evaluate_p1"
     assert request.body["messages"] == custom_messages
-    assert request.body["tool_call"]["name"] == "evaluate_p1"
+
+
+def test_openclaw_uses_gateway_token_auth() -> None:
+    os.environ["OPENCLAW_GATEWAY_TOKEN"] = "gateway-token"
+    config = load_model_config()
+    provider = config.get_provider("openclaw")
+    request = build_chat_request(provider, tool_call={"name": "evaluate_p3", "arguments": {}})
+    assert request.headers["Authorization"] == "Bearer gateway-token"
+    assert request.headers["X-AI-Scientist-Tool-Name"] == "evaluate_p3"
+    assert request.path == "/chat/completions"
+
+
+def test_codex_native_uses_bearer_token_auth() -> None:
+    os.environ["CODEX_NATIVE_BEARER_TOKEN"] = "codex-token"
+    config = load_model_config()
+    provider = config.get_provider("codex_native")
+    request = build_chat_request(provider, tool_call={"name": "evaluate_p3", "arguments": {}})
+    assert request.headers["Authorization"] == "Bearer codex-token"
+    assert request.headers["X-AI-Scientist-Tool-Name"] == "evaluate_p3"
+    assert "tool_call" not in request.body
+    assert request.path == "/chat/completions"
 
 
 def test_invoke_chat_completion_hits_mock_endpoint() -> None:

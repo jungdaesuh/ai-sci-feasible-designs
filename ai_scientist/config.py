@@ -94,6 +94,15 @@ def load_model_config(path: str | Path | None = None) -> ModelConfig:
     role_map = model_data.get("role_map") or {}
     if not isinstance(role_map, dict):
         role_map = {}
+    role_map = dict(role_map)
+    for role, env_key in (
+        ("planning", "AI_SCIENTIST_ROLE_PLANNING_MODEL"),
+        ("literature", "AI_SCIENTIST_ROLE_LITERATURE_MODEL"),
+        ("analysis", "AI_SCIENTIST_ROLE_ANALYSIS_MODEL"),
+    ):
+        override = os.getenv(env_key)
+        if override:
+            role_map[role] = override
     return ModelConfig(
         base_url=str(model_data.get("base_url", "http://localhost:8000")),
         instruct_model=instruct_alias,

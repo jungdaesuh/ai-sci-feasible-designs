@@ -71,6 +71,9 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b"{}"
         payload = json.loads(body.decode("utf-8"))
+        tool_name = self.headers.get("X-AI-Scientist-Tool-Name") or payload.get(
+            "tool_call", {}
+        ).get("name")
         response = {
             "id": "mock-k2",
             "object": "chat.completion",
@@ -82,12 +85,12 @@ class _Handler(BaseHTTPRequestHandler):
                         "role": "assistant",
                         "content": {
                             "type": "tool_call",
-                            "tool": payload.get("tool_call", {}).get("name"),
+                            "tool": tool_name,
                             "confirmation": "endpoint-ready",
                         },
                     },
                     "finish_reason": "function_call",
-                    "function_call": payload.get("tool_call"),
+                    "function_call": {"name": tool_name},
                 }
             ],
             "usage": {
