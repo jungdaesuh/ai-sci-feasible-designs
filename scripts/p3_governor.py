@@ -424,7 +424,7 @@ def _ensure_parent_file(run_dir: Path, *, design_hash: str, boundary: dict) -> P
     return path
 
 
-def _select_recipe(
+def _select_static_recipe(
     *,
     db: Path,
     experiment_id: int,
@@ -433,6 +433,7 @@ def _select_recipe(
     seed_base: int,
     focus: CandidateRow,
     partner: CandidateRow | None,
+    route_prefix: str = "governor_static_recipe",
 ) -> tuple[list[ProposalCommand], dict]:
     # Ensure parent boundary JSONs exist (we can pull from DB if needed).
     conn = _connect(db)
@@ -455,7 +456,7 @@ def _select_recipe(
     worst = str(worst_name) if worst_name is not None else ""
 
     cmds: list[ProposalCommand] = []
-    route_label = f"governor_static_recipe/{worst or 'unknown'}"
+    route_label = f"{str(route_prefix)}/{worst or 'unknown'}"
 
     # Scale sweep around the focus point (1D, ~4-6 candidates).
     if worst == "mirror":
@@ -652,7 +653,36 @@ def _select_recipe(
         },
         "commands": [_cmd_str(c) for c in cmds],
         "model_route": route_label,
+        "recipe_mode": "static",
         "created_at": _utc_now_iso(),
+    }
+    return cmds, decision
+
+
+def _select_adaptive_recipe_scaffold(
+    *,
+    db: Path,
+    experiment_id: int,
+    run_dir: Path,
+    batch_id: int,
+    seed_base: int,
+    focus: CandidateRow,
+    partner: CandidateRow | None,
+) -> tuple[list[ProposalCommand], dict]:
+    cmds, decision = _select_static_recipe(
+        db=db,
+        experiment_id=experiment_id,
+        run_dir=run_dir,
+        batch_id=batch_id,
+        seed_base=seed_base,
+        focus=focus,
+        partner=partner,
+        route_prefix="governor_adaptive_scaffold",
+    )
+    decision["recipe_mode"] = "adaptive_scaffold"
+    decision["adaptive_policy"] = {
+        "version": "v0",
+        "strategy": "static_delegate",
     }
     return cmds, decision
 
@@ -696,6 +726,11 @@ def main() -> None:
         "--loop",
         action="store_true",
         help="Run continuously: keep queue filled and adjust batches over time.",
+    )
+    parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="Enable adaptive governor scaffolding path (currently delegates to static recipe).",
     )
     parser.add_argument(
         "--bootstrap-parent-a",
@@ -794,6 +829,9 @@ def main() -> None:
                     "bootstrap": True,
                     "commands": [_cmd_str(cmd)],
                     "model_route": "governor_bootstrap",
+                    "governor_mode": (
+                        "adaptive_scaffold" if bool(args.adaptive) else "static"
+                    ),
                     "created_at": _utc_now_iso(),
                 }
                 artifact_path = (
@@ -830,15 +868,26 @@ def main() -> None:
 
             batch_id = _next_batch_id(args.run_dir)
             seed_base = int(args.experiment_id) * 10_000_000 + int(batch_id) * 1_000
-            cmds, decision = _select_recipe(
-                db=args.db,
-                experiment_id=exp_id,
-                run_dir=args.run_dir,
-                batch_id=batch_id,
-                seed_base=seed_base,
-                focus=focus,
-                partner=partner,
-            )
+            if args.adaptive:
+                cmds, decision = _select_adaptive_recipe_scaffold(
+                    db=args.db,
+                    experiment_id=exp_id,
+                    run_dir=args.run_dir,
+                    batch_id=batch_id,
+                    seed_base=seed_base,
+                    focus=focus,
+                    partner=partner,
+                )
+            else:
+                cmds, decision = _select_static_recipe(
+                    db=args.db,
+                    experiment_id=exp_id,
+                    run_dir=args.run_dir,
+                    batch_id=batch_id,
+                    seed_base=seed_base,
+                    focus=focus,
+                    partner=partner,
+                )
 
             decision["focus_meta"] = asdict(
                 focus
@@ -847,6 +896,9 @@ def main() -> None:
             decision["recent_data_plane"] = _recent_data_plane_summary(candidates)
             decision["hv_at_decision"] = hv_value
             decision["record_hv"] = float(args.record_hv)
+            decision["governor_mode"] = (
+                "adaptive_scaffold" if bool(args.adaptive) else "static"
+            )
 
             artifact_path = (
                 args.run_dir
