@@ -17,8 +17,10 @@ Add an OpenClaw-like integration pattern in this repo, but without OpenClaw:
 
 ## Current status
 
-- This architecture is **planned** and not yet fully implemented.
-- Existing runs should continue using current provider setup (e.g., OpenRouter) until rollout completes.
+- This architecture is **partially implemented**:
+  - `codex_native` provider selection + `codex-native-*` aliases exist.
+  - Native OAuth + credential/profile management + a bundled local adapter server are still pending.
+- Existing runs should continue using current provider setup (e.g., OpenRouter) unless you have an adapter endpoint running for `codex_native`.
 - `openclaw` provider entries and related tests are still present for backward compatibility during transition.
 
 ### Runtime status matrix
@@ -72,7 +74,7 @@ Note: `codex_native` calls send standard OpenAI chat payloads and use `X-AI-Scie
 - Smoke validation: `tools/ci_tools_smoke.py`
 - Tests:
   - `tests/test_model_provider.py`
-  - new tests for auth profiles and adapter endpoint
+  - `tests/test_agent_role_overrides.py`
 
 ## Rollout plan
 
