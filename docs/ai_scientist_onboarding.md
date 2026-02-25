@@ -1,49 +1,75 @@
 # AI Scientist Onboarding
 
-This snippet assumes you are working inside `/Users/suhjungdae/code/software/proxima_fusion/RL-feasible-designs` and have followed the repository README. It summarizes how to bootstrap the agent stack, what knobs to watch, and how the planner-driven workflow differs from the deterministic runner described in `ai_scientist/roadmap.md` (see especially Phase 3).
+This snippet assumes you are working inside `/Users/suhjungdae/code/software/proxima_fusion/ai-sci-feasible-designs` and have followed the repository setup docs. It summarizes how to bootstrap the agent stack, what knobs to watch, and how the planner-driven workflow differs from the deterministic runner described in `docs/AI_SCIENTIST_UNIFIED_ROADMAP.md`.
 
 ## Quickstart commands
 1. Create/activate the virtualenv if it is not already active:
    ```bash
    python -m venv .venv && source .venv/bin/activate
-   pip install -e .
+   pip install -e ".[test]"
    ```
-2. Run `hatch` shells (optional, but keeps dependencies isolated):
+2. Launch a baseline deterministic run (Phase 1 entry point):
    ```bash
-   hatch shell
-   hatch run lint
+   python -m ai_scientist.runner --config configs/experiment.yaml --problem p1 --planner deterministic
    ```
-3. Launch a baseline deterministic run (Phase 1 entry point):
+3. Try the agent planner once the basics are stable:
    ```bash
-   python -m ai_scientist.runner --config configs/default.yaml --problem p1 --planner deterministic
+   python -m ai_scientist.runner --config configs/experiment.yaml --problem p2 --planner agent
    ```
-4. Try the agent planner once the basics are stable:
+4. Validate local behavior with tests once setup works:
    ```bash
-   python -m ai_scientist.runner --config configs/default.yaml --problem p2 --planner agent
+   python -m pytest tests/
    ```
-5. Repeat or script runs via `npm run test` (invokes `python -m pytest`) once the setup works.
 
 ## Environment variables to note
 - `AI_SCIENTIST_PEFT=1` toggles LoRA/PEFT loading so the adapters in `reports/adapters/...` are materialized during inference (see Phase 2 in the roadmap).
-- `AI_SCIENTIST_PLANNER_MODE=agent|deterministic` (optional) mirrors the `--planner` flag and lets shell wrappers persist the choice.
-- `AI_SCIENTIST_LOG_CACHE_STATS=1` enables the cache telemetry mentioned in Phase 5’s observability work.
-- `AI_SCIENTIST_BUDGET_MULTIPLIER=<float>` can be used to temporarily scale `cfg.budgets.screen_evals_per_cycle`/`promote_top_k` while tuning the adaptive budget controller from Phase 4.
-- The repo-level `.env` file now ships ready-to-source overrides for `MODEL_PROVIDER`, `AI_SCIENTIST_INSTRUCT_MODEL`, and `AI_SCIENTIST_THINKING_MODEL`. Run `set -a; source .env` (or copy those lines into your shell profile) so the runner automatically aims at the Kat Coder tiers without editing `configs/model.yaml` again.
-- `AI_SCIENTIST_REMOTE_PROVIDER=1` toggles live OpenRouter calls for the gate smoke test (see below). Supply `OPENROUTER_API_KEY` from the Kat Coder Pro listing and optionally `AI_SCIENTIST_ENDPOINT_URL=https://openrouter.ai/api/v1` to force a specific base URL.
+- Planner/cache/budget tuning currently uses CLI flags, not env vars: `--planner`, `--log-cache-stats`, `--eval-budget`, and `--workers`.
+- If you keep provider overrides in `.env` (for example `MODEL_PROVIDER`, `AI_SCIENTIST_INSTRUCT_MODEL`, `AI_SCIENTIST_THINKING_MODEL`), run `set -a; source .env` before launching the runner.
+- `AI_SCIENTIST_REMOTE_PROVIDER=1` toggles live provider calls for the gate smoke test (see below). For current live usage, set `OPENROUTER_API_KEY`.
 
-### Live OpenRouter smoke test
-1. Export `OPENROUTER_API_KEY` after creating a key for [`kwaipilot/kat-coder-pro:free`](https://openrouter.ai/kwaipilot/kat-coder-pro:free).
-2. Run the smoke harness against the hosted `/chat/completions` endpoint:
+### Provider switch recipes (today)
+- **OpenRouter + Grok (current defaults):**
+  ```bash
+  export MODEL_PROVIDER=openrouter
+  export AI_SCIENTIST_INSTRUCT_MODEL=grok-planning-short-loop
+  export AI_SCIENTIST_THINKING_MODEL=grok-planning-full
+  ```
+- **OpenRouter + Kwaipilot:**
+  ```bash
+  export MODEL_PROVIDER=openrouter
+  export AI_SCIENTIST_INSTRUCT_MODEL=kwaipilot-planning-short-loop
+  export AI_SCIENTIST_THINKING_MODEL=kwaipilot-planning-full
+  ```
+- **Codex-native (requires a local OpenAI-compatible adapter endpoint):**
+  ```bash
+  export MODEL_PROVIDER=codex_native
+  export AI_SCIENTIST_INSTRUCT_MODEL=codex-native-short-loop
+  export AI_SCIENTIST_THINKING_MODEL=codex-native-full
+  export AI_SCIENTIST_ROLE_PLANNING_MODEL=codex-native-full
+  export AI_SCIENTIST_ROLE_LITERATURE_MODEL=codex-native-full
+  export AI_SCIENTIST_ROLE_ANALYSIS_MODEL=codex-native-full
+  export CODEX_NATIVE_BEARER_TOKEN="..."
+  ```
+
+### ChatGPT subscription integration status
+- Target architecture is tracked in `CODEX_NATIVE_SUBSCRIPTION_INTEGRATION.md`.
+- Goal: native Codex/ChatGPT OAuth + profile management + local OpenAI-compatible adapter.
+- This integration is a planned upgrade and is not the default runtime path yet.
+
+### Live provider smoke test
+1. Choose one provider:
+   - **OpenRouter**: export `OPENROUTER_API_KEY` and use the provider/model defaults from `configs/model.yaml` (currently `x-ai/grok-4.1-fast:free`).
+2. Run the smoke harness against the configured provider endpoint:
    ```bash
    AI_SCIENTIST_REMOTE_PROVIDER=1 python tools/ci_tools_smoke.py
    ```
-3. Use `AI_SCIENTIST_ENDPOINT_URL=<custom URL>` if you need to explicitly override the base URL (e.g., a relay or proxy). Otherwise the script falls back to the local stub endpoint described in Phase 1.
+3. Use `AI_SCIENTIST_ENDPOINT_URL=<custom URL>` if you need to explicitly override the base URL. Otherwise the script uses the selected provider's `base_url` from `configs/model.yaml`.
 
 ## Supervisor / Daemon Usage
-For long-running, unattended jobs (Phase 4), use `scripts/daemon.py`. This wrapper ensures the runner respects wall-clock limits, restarts automatically after crashes, and resumes from the latest checkpoint.
+For long-running runs (Phase 4), use `scripts/daemon.py`. This wrapper sets `OMP_NUM_THREADS=1`, auto-selects the latest checkpoint at startup when available, and performs one conditional retry on failure (only when a newer checkpoint appears).
 
 ```bash
-# Run for 50 cycles with a 12-hour wall-clock limit, auto-resuming if interrupted
+# Run for 50 cycles with a 12-hour wall-clock notice threshold; restart the command to resume from latest checkpoint
 python scripts/daemon.py \
   --config configs/experiment.p3.prod.yaml \
   --problem p3 \
@@ -52,15 +78,15 @@ python scripts/daemon.py \
   --planner agent
 ```
 
-The daemon will:
+The daemon currently:
 - Check `reports/` for the latest `cycle_*.json` checkpoint.
-- Restart the runner process if it crashes (non-zero exit code).
+- Retry once if the runner exits non-zero and a newer checkpoint is available.
 - Force `OMP_NUM_THREADS=1` to prevent thread contention in workers.
-- Terminate gracefully if the wall-clock limit is exceeded.
+- Print an overrun message if elapsed wall-clock exceeds `--wall-clock-minutes` after the run finishes.
 
 ## Planner vs deterministic runner (Phase 3 reference)
 - **Deterministic runner:** Hard-coded loops generate candidates, evaluate them, and promote stages based on fixed logic. This pathway is great for reproducing legacy comparison baselines (Exercises in Phases 1 and 5).
-- **Agent planner:** Reads `world_model` summaries, Pareto snapshots, and RAG-context chunks, then calls gated tools through `ai_scientist/tools_api` (including `make_boundary`, `evaluate_p3`, and `retrieve_rag`). It is driven by the `--planner agent` flag and reflects the multi-agent architecture described in Section 3 of `ai_scientist/roadmap.md`.
+- **Agent planner:** Reads `world_model` summaries, Pareto snapshots, and RAG-context chunks, then calls gated tools through `ai_scientist/tools_api` (including `make_boundary`, `evaluate_p3`, and `retrieve_rag`). It is driven by the `--planner agent` flag and reflects the multi-agent architecture described in `docs/AI_SCIENTIST_UNIFIED_ROADMAP.md`.
 - Running both modes side by side lets you compare how the planning agent adapts the curriculum and surrogate-enhanced proposals introduced in Phases 1–3.
 
 ## Phase order (Phase 1 → Phase 6)
@@ -74,7 +100,8 @@ The daemon will:
 ## What success looks like
 - You can run the deterministic runner and the planner agent locally with the commands above.
 - You understand the knobs from the roadmap (Phases 1–6) and can cite the motivation for each and where the documentation lives.
-- The onboarding doc links back to `ai_scientist/roadmap.md`, lists the recommended phase order, and explains how to reproduce both workflows.
+- The onboarding doc links back to `docs/AI_SCIENTIST_UNIFIED_ROADMAP.md`, lists the recommended phase order, and explains how to reproduce both workflows.
 
 ## References
-- `ai_scientist/roadmap.md` (official phase-by-phase checklist, including the Phase 6 documentation tasks you are reading about now)
+- `docs/AI_SCIENTIST_UNIFIED_ROADMAP.md` (active phase-by-phase checklist)
+- `docs/archive/plans/roadmap.md` (historical roadmap snapshot)
