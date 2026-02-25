@@ -468,6 +468,18 @@ def _select_recipe(
                     scale_abs_n=(1, factor),
                 )
             )
+        for i, factor in enumerate([1.02, 1.04, 1.06]):
+            cmds.append(
+                _build_scale_cmd(
+                    db=db,
+                    experiment_id=experiment_id,
+                    run_dir=run_dir,
+                    batch_id=batch_id,
+                    seed_base=seed_base + 30 + i,
+                    parent=focus_path,
+                    scale_abs_n=(3, factor),
+                )
+            )
     elif worst == "flux":
         for i, factor in enumerate([0.7, 0.8, 0.9]):
             cmds.append(
