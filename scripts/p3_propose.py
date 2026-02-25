@@ -14,12 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Mapping
 
 import numpy as np
 
@@ -28,22 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from ai_scientist.memory import hash_payload
-from ai_scientist.memory.schema import init_db
-
-
-@dataclass(frozen=True)
-class CandidateMeta:
-    experiment_id: int
-    batch_id: int
-    seed: int
-    move_family: str
-    parents: list[str]
-    knobs: dict[str, float]
-    created_at: str
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from ai_scientist.p3_enqueue import candidate_seed, connect_queue_db, enqueue_candidate
 
 
 def _load_json(path: Path) -> object:
@@ -179,59 +161,6 @@ def _iter_t_values(
     return out
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _already_present(
-    conn: sqlite3.Connection, *, experiment_id: int, design_hash: str
-) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
-        (experiment_id, design_hash),
-    ).fetchone()
-    return row is not None
-
-
-def _insert_candidate(
-    conn: sqlite3.Connection,
-    *,
-    experiment_id: int,
-    boundary: dict,
-    seed: int,
-    design_hash: str,
-    lineage_parent_hashes: list[str],
-    novelty_score: float | None,
-    operator_family: str,
-    model_route: str,
-) -> int:
-    cursor = conn.execute(
-        """
-        INSERT INTO candidates
-        (experiment_id, problem, params_json, seed, status, design_hash, lineage_parent_hashes_json, novelty_score, operator_family, model_route)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            experiment_id,
-            "p3",
-            json.dumps(boundary, separators=(",", ":")),
-            int(seed),
-            "pending",
-            design_hash,
-            json.dumps([str(parent) for parent in lineage_parent_hashes]),
-            novelty_score,
-            operator_family,
-            model_route,
-        ),
-    )
-    candidate_id = cursor.lastrowid
-    assert candidate_id is not None
-    return int(candidate_id)
-
-
 def _derive_novelty_score(
     *,
     knobs: Mapping[str, float],
@@ -249,19 +178,6 @@ def _derive_novelty_score(
         else:
             magnitudes.append(abs(v - 1.0))
     return float(max(magnitudes) if magnitudes else 0.0)
-
-
-def _insert_artifacts(
-    conn: sqlite3.Connection,
-    *,
-    experiment_id: int,
-    artifacts: Iterable[tuple[Path, str]],
-) -> None:
-    for path, kind in artifacts:
-        conn.execute(
-            "INSERT INTO artifacts (experiment_id, path, kind) VALUES (?, ?, ?)",
-            (experiment_id, str(path), kind),
-        )
 
 
 def main() -> None:
@@ -331,13 +247,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    candidates_dir = args.run_dir / "candidates"
-    batches_dir = args.run_dir / "batches"
-    candidates_dir.mkdir(parents=True, exist_ok=True)
-    batches_dir.mkdir(parents=True, exist_ok=True)
-    batch_log = batches_dir / f"batch_{int(args.batch_id):03}.jsonl"
-
-    conn = _connect(args.db)
+    conn = connect_queue_db(args.db)
     inserted = 0
     skipped = 0
 
@@ -378,69 +288,32 @@ def main() -> None:
 
         with conn:
             for k, (boundary, knobs, parents) in enumerate(proposals):
-                seed = int(args.seed_base) + int(args.batch_id) * 1_000_000 + int(k)
-                design_hash = hash_payload(boundary)
-                if _already_present(
-                    conn, experiment_id=int(args.experiment_id), design_hash=design_hash
-                ):
-                    skipped += 1
-                    continue
-
-                candidate_path = candidates_dir / f"{design_hash}.json"
-                meta_path = candidates_dir / f"{design_hash}_meta.json"
-
-                candidate_path.write_text(json.dumps(boundary, indent=2))
-                meta = CandidateMeta(
-                    experiment_id=int(args.experiment_id),
+                seed = candidate_seed(
+                    seed_base=int(args.seed_base),
                     batch_id=int(args.batch_id),
+                    index=int(k),
+                )
+                novelty_score = _derive_novelty_score(
+                    knobs={key: float(value) for key, value in knobs.items()},
+                    override=args.novelty_score,
+                )
+                record = enqueue_candidate(
+                    conn,
+                    experiment_id=int(args.experiment_id),
+                    run_dir=args.run_dir,
+                    batch_id=int(args.batch_id),
+                    boundary=boundary,
                     seed=seed,
                     move_family=args.family,
                     parents=parents,
-                    knobs={k: float(v) for k, v in knobs.items()},
-                    created_at=_utc_now_iso(),
-                )
-                meta_path.write_text(json.dumps(asdict(meta), indent=2))
-
-                candidate_id = _insert_candidate(
-                    conn,
-                    experiment_id=int(args.experiment_id),
-                    boundary=boundary,
-                    seed=seed,
-                    design_hash=design_hash,
-                    lineage_parent_hashes=parents,
-                    novelty_score=_derive_novelty_score(
-                        knobs={k: float(v) for k, v in knobs.items()},
-                        override=args.novelty_score,
-                    ),
+                    knobs={key: float(value) for key, value in knobs.items()},
+                    novelty_score=novelty_score,
                     operator_family=args.family,
                     model_route=str(args.model_route),
                 )
-
-                _insert_artifacts(
-                    conn,
-                    experiment_id=int(args.experiment_id),
-                    artifacts=[
-                        (candidate_path, "candidate_json"),
-                        (meta_path, "candidate_meta"),
-                    ],
-                )
-
-                record = {
-                    "candidate_id": candidate_id,
-                    "design_hash": design_hash,
-                    "seed": seed,
-                    "move_family": args.family,
-                    "model_route": str(args.model_route),
-                    "parents": parents,
-                    "knobs": knobs,
-                    "novelty_score": _derive_novelty_score(
-                        knobs={k: float(v) for k, v in knobs.items()},
-                        override=args.novelty_score,
-                    ),
-                    "created_at": meta.created_at,
-                }
-                with batch_log.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(record) + "\n")
+                if record is None:
+                    skipped += 1
+                    continue
 
                 inserted += 1
 
