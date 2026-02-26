@@ -246,6 +246,60 @@ def test_candidate_data_plane_summary_counts_metadata(tmp_path):
         assert strict_summary["novelty_reject_rate"] == pytest.approx(1.0)
 
 
+def test_model_router_reward_event_persistence_and_summary(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_model_router_reward_event(
+            experiment_id=experiment_id,
+            problem="p3",
+            model_route="governor_adaptive/near_feasible/mirror",
+            window_size=20,
+            previous_feasible_yield=10.0,
+            current_feasible_yield=15.0,
+            previous_hv=1.0,
+            current_hv=1.5,
+            reward=0.3,
+            reward_components={"reward": 0.3, "relative_hv": 0.5},
+        )
+        summary = wm.model_router_reward_summary(experiment_id, problem="p3")
+        assert summary["event_count"] == 1
+        assert summary["sampled_event_count"] == 1
+        assert summary["avg_reward"] == pytest.approx(0.3)
+        assert summary["last_reward"] == pytest.approx(0.3)
+        assert (
+            summary["model_routes"]["governor_adaptive/near_feasible/mirror"] == 1
+        )
+        plane = wm.candidate_data_plane_summary(experiment_id, problem="p3")
+        reward_summary = plane["model_router_reward"]
+        assert reward_summary["event_count"] == 1
+        assert reward_summary["sampled_event_count"] == 1
+        assert reward_summary["last_reward"] == pytest.approx(0.3)
+
+
+def test_model_router_reward_summary_reports_total_count_beyond_limit(tmp_path):
+    db_path = tmp_path / "world_limit.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        for idx, reward in enumerate([0.1, 0.2, 0.3]):
+            wm.log_model_router_reward_event(
+                experiment_id=experiment_id,
+                problem="p3",
+                model_route="governor_adaptive/near_feasible/mirror",
+                window_size=20,
+                previous_feasible_yield=10.0 + idx,
+                current_feasible_yield=11.0 + idx,
+                previous_hv=1.0 + idx,
+                current_hv=1.1 + idx,
+                reward=reward,
+                reward_components={"reward": reward},
+            )
+
+        summary = wm.model_router_reward_summary(experiment_id, problem="p3", limit=2)
+        assert summary["event_count"] == 3
+        assert summary["sampled_event_count"] == 2
+
+
 def test_world_model_surrogate_training_data(tmp_path):
     db_path = tmp_path / "world.db"
     with memory.WorldModel(db_path) as wm:
@@ -669,3 +723,36 @@ def test_record_surrogate_checkpoint_minimal(tmp_path):
         assert row is not None
         assert row["metrics_json"] is None
         conn.close()
+
+
+def test_recent_failures_include_error_taxonomy_fields(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p2"}, "deadbeef")
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p2",
+            params={"r_cos": [[1.0]], "z_sin": [[0.1]]},
+            seed=11,
+            status="promote",
+            evaluation={
+                "stage": "p2",
+                "objective": -1e9,
+                "feasibility": float("inf"),
+                "metrics": {"aspect_ratio": 9.0},
+                "constraint_margins": {"qi": 0.2},
+                "error": "JACOBIAN IS BAD, 75 TIMES BAD",
+                "failure_label": "vmec_jacobian_bad",
+                "failure_source": "vmec",
+                "failure_signature": "vmec_jacobian_bad:abc12345",
+                "vmec_status": "exception",
+            },
+            design_hash="failure-taxonomy-hash",
+        )
+        failures = wm.recent_failures(experiment_id, "p2", limit=5)
+        assert len(failures) == 1
+        assert failures[0]["failure_label"] == "vmec_jacobian_bad"
+        assert failures[0]["failure_source"] == "vmec"
+        assert failures[0]["failure_signature"] == "vmec_jacobian_bad:abc12345"
+        assert failures[0]["vmec_status"] == "exception"
+        assert failures[0]["error"] == "JACOBIAN IS BAD, 75 TIMES BAD"

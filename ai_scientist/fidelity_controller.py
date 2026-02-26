@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping, Protocol, Tuple
 
 from ai_scientist import adapter, memory, tools
 from ai_scientist import config as ai_config
+from ai_scientist.failure_taxonomy import classify_failure
 from ai_scientist.forward_model import forward_model_batch
 
 FEASIBILITY_CUTOFF = getattr(tools, "_DEFAULT_RELATIVE_TOLERANCE", 1e-2)
@@ -154,6 +155,21 @@ def _feasibility_value(entry: Mapping[str, Any]) -> float:
     return float(entry["evaluation"].get("feasibility", float("inf")))
 
 
+def _with_failure_metadata(evaluation: Mapping[str, Any]) -> dict[str, Any]:
+    """Attach deterministic failure labels/signatures to evaluation payloads."""
+    payload = dict(evaluation)
+    classification = classify_failure(payload.get("error"))
+    payload.setdefault("failure_label", classification.failure_label)
+    payload.setdefault("failure_source", classification.failure_source)
+    payload.setdefault("failure_signature", classification.failure_signature)
+    if classification.normalized_error is not None:
+        payload.setdefault("error_normalized", classification.normalized_error)
+    payload.setdefault(
+        "vmec_status", "ok" if classification.failure_label == "ok" else "exception"
+    )
+    return payload
+
+
 class FidelityController:
     """Manages candidate evaluation, fidelity ladders, and promotion gates."""
 
@@ -198,6 +214,7 @@ class FidelityController:
                 evaluation = evaluate_fn(
                     candidate["params"], stage=stage, use_cache=True
                 )
+                evaluation = _with_failure_metadata(evaluation)
                 design_id = (
                     candidate.get("design_hash")
                     or evaluation.get("design_hash")
@@ -350,6 +367,7 @@ class FidelityController:
                 eval_dict["objective"] = (
                     1e9 if eval_dict.get("minimize_objective", True) else -1e9
                 )
+            eval_dict = _with_failure_metadata(eval_dict)
 
             results.append(
                 {
