@@ -541,6 +541,18 @@ class WorldModel:
         metrics_payload = dict(evaluation.get("metrics", {}))
         if "constraint_margins" in evaluation:
             metrics_payload["constraint_margins"] = evaluation["constraint_margins"]
+        for key in (
+            "error",
+            "error_normalized",
+            "failure_label",
+            "failure_source",
+            "failure_signature",
+            "vmec_status",
+            "stage",
+        ):
+            value = evaluation.get(key)
+            if value is not None:
+                metrics_payload[key] = value
         metrics_id = self.log_metrics(
             candidate_id,
             metrics_payload,
@@ -571,6 +583,54 @@ class WorldModel:
         )
         if commit:
             self._conn.commit()
+
+    def log_model_router_reward_event(
+        self,
+        *,
+        experiment_id: int,
+        problem: str,
+        model_route: str,
+        window_size: int,
+        previous_feasible_yield: float,
+        current_feasible_yield: float,
+        previous_hv: float,
+        current_hv: float,
+        reward: float,
+        reward_components: Mapping[str, Any] | None = None,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(
+            _normalize_to_json(reward_components or {}), separators=(",", ":")
+        )
+        cursor = self._conn.execute(
+            """
+            INSERT INTO model_router_reward_events
+            (experiment_id, problem, model_route, window_size, previous_feasible_yield,
+             current_feasible_yield, previous_hv, current_hv, reward, reward_components_json,
+             created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                experiment_id,
+                str(problem),
+                str(model_route),
+                int(window_size),
+                float(previous_feasible_yield),
+                float(current_feasible_yield),
+                float(previous_hv),
+                float(current_hv),
+                float(reward),
+                payload,
+                timestamp,
+            ),
+        )
+        event_id = cursor.lastrowid
+        assert event_id is not None
+        if commit:
+            self._conn.commit()
+        return event_id
 
     def log_statement(
         self,
@@ -818,13 +878,25 @@ class WorldModel:
                 # Only include significant violations to keep context clean
                 violations = {k: v for k, v in constraint_margins.items() if v > 0}
 
-                failures.append(
-                    {
-                        "params": params,
-                        "feasibility": float(row["feasibility"]),
-                        "violations": violations,
-                    }
-                )
+                failure_entry: dict[str, Any] = {
+                    "params": params,
+                    "feasibility": float(row["feasibility"]),
+                    "violations": violations,
+                }
+                for key in (
+                    "error",
+                    "error_normalized",
+                    "failure_label",
+                    "failure_source",
+                    "failure_signature",
+                    "vmec_status",
+                    "stage",
+                ):
+                    value = metrics_raw.get(key)
+                    if value is not None:
+                        failure_entry[key] = value
+
+                failures.append(failure_entry)
             except (json.JSONDecodeError, ValueError):
                 continue
 
@@ -1153,10 +1225,68 @@ class WorldModel:
                 )
             )
 
-        return summarize_data_plane(
+        summary = summarize_data_plane(
             samples,
             novelty_reject_threshold=float(novelty_reject_threshold),
         )
+        summary["model_router_reward"] = self.model_router_reward_summary(
+            experiment_id,
+            problem=problem,
+        )
+        return summary
+
+    def model_router_reward_summary(
+        self,
+        experiment_id: int,
+        *,
+        problem: str = "p3",
+        limit: int = 200,
+    ) -> Mapping[str, Any]:
+        total_row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM model_router_reward_events
+            WHERE experiment_id = ? AND problem = ?
+            """,
+            (experiment_id, str(problem)),
+        ).fetchone()
+        total_events = int(total_row["n"]) if total_row is not None else 0
+        rows = self._conn.execute(
+            """
+            SELECT model_route, reward
+            FROM model_router_reward_events
+            WHERE experiment_id = ? AND problem = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (experiment_id, str(problem), int(limit)),
+        ).fetchall()
+        if not rows:
+            return {
+                "event_count": total_events,
+                "sampled_event_count": 0,
+                "avg_reward": None,
+                "last_reward": None,
+                "model_routes": {},
+            }
+
+        rewards: list[float] = []
+        route_counts: dict[str, int] = {}
+        for row in rows:
+            reward = float(row["reward"])
+            rewards.append(reward)
+            route = str(row["model_route"] or "unknown")
+            route_counts[route] = route_counts.get(route, 0) + 1
+
+        return {
+            "event_count": total_events,
+            "sampled_event_count": len(rows),
+            "avg_reward": float(sum(rewards) / len(rewards)),
+            "last_reward": rewards[0],
+            "model_routes": dict(
+                sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
+            ),
+        }
 
     def surrogate_training_data(
         self,

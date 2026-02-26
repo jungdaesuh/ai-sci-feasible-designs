@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import Any, Callable, List, Mapping, Optional, Sequence
 
 import pydantic
 
@@ -370,31 +370,122 @@ class PlanningAgent:
             memory_db=self.world_model.db_path if self.world_model else None,
         )
 
+    def evaluate_p1(
+        self,
+        params: Mapping[str, Any],
+        *,
+        problem: str | None = None,
+        stage: str | None = None,
+    ) -> Mapping[str, Any]:
+        del problem
+        return self._evaluate_problem_tool(
+            params=params,
+            stage=stage,
+            problem_key="p1",
+            tool_name="evaluate_p1",
+            default_stage="screen",
+            evaluator=tools.evaluate_p1,
+        )
+
+    def evaluate_p2(
+        self,
+        params: Mapping[str, Any],
+        *,
+        problem: str | None = None,
+        stage: str | None = None,
+    ) -> Mapping[str, Any]:
+        del problem
+        return self._evaluate_problem_tool(
+            params=params,
+            stage=stage,
+            problem_key="p2",
+            tool_name="evaluate_p2",
+            default_stage="p2",
+            evaluator=tools.evaluate_p2,
+        )
+
     def evaluate_p3(
         self,
         params: Mapping[str, Any],
         *,
+        problem: str | None = None,
         stage: str | None = None,
+    ) -> Mapping[str, Any]:
+        del problem
+        return self._evaluate_problem_tool(
+            params=params,
+            stage=stage,
+            problem_key="p3",
+            tool_name="evaluate_p3",
+            default_stage="p3",
+            evaluator=tools.evaluate_p3,
+        )
+
+    def _evaluate_problem_tool(
+        self,
+        *,
+        params: Mapping[str, Any],
+        stage: str | None,
+        problem_key: str,
+        tool_name: str,
+        default_stage: str,
+        evaluator: Callable[..., Mapping[str, Any]],
     ) -> Mapping[str, Any]:
         args = {
             "params": params,
-            "problem": "p3",
+            "problem": problem_key,
         }
         if stage is not None:
             args["stage"] = stage
-        self._validate_tool_call(self.planning_gate, "evaluate_p3", args)
+        self._validate_tool_call(self.planning_gate, tool_name, args)
         try:
-            return tools.evaluate_p3(params, stage=stage or "p3")
+            return evaluator(params, stage=stage or default_stage)
         except Exception as exc:  # pragma: no cover - smoke-run safety
-            message = f"planning-stage evaluate_p3 failed: {exc}"
+            message = f"planning-stage {tool_name} failed: {exc}"
             print(f"[planner] {message}")
             return {
-                "stage": stage or "p3",
+                "stage": stage or default_stage,
                 "error": message,
                 "objective": None,
                 "feasibility": None,
                 "gradient_proxy": None,
             }
+
+    def evaluate_for_problem(
+        self,
+        problem: str,
+        params: Mapping[str, Any],
+        *,
+        stage: str | None = None,
+    ) -> Mapping[str, Any]:
+        problem_key = str(problem or "p3").lower()
+        evaluators: dict[str, Callable[..., Mapping[str, Any]]] = {
+            "p1": self.evaluate_p1,
+            "p2": self.evaluate_p2,
+        }
+        return evaluators.get(problem_key, self.evaluate_p3)(params, stage=stage)
+
+    def _execute_planning_tool(
+        self, tool_name: str, tool_args: Mapping[str, Any]
+    ) -> Any:
+        if tool_name == "make_boundary":
+            # make_boundary returns a non-serializable object; return params echo.
+            return {
+                "status": "success",
+                "params": tool_args.get("params"),
+            }
+        handlers: dict[str, Callable[..., Any]] = {
+            "retrieve_rag": self.retrieve_rag,
+            "evaluate_p1": self.evaluate_p1,
+            "evaluate_p2": self.evaluate_p2,
+            "evaluate_p3": self.evaluate_p3,
+            "propose_boundary": self.propose_boundary,
+            "recombine_designs": self.recombine_designs,
+        }
+        handler = handlers.get(tool_name)
+        if handler is not None:
+            return handler(**tool_args)
+        return f"Error: Tool '{tool_name}' not supported or permitted."
 
     def make_boundary(
         self, params: Mapping[str, Any]
@@ -518,7 +609,8 @@ class PlanningAgent:
 
         # Planning Role Actions
         params = self._build_template_params(cfg.boundary_template)
-        evaluation = self.evaluate_p3(
+        evaluation = self.evaluate_for_problem(
+            cfg.problem,
             params,
             stage=cfg.fidelity_ladder.screen,
         )
@@ -604,7 +696,7 @@ class PlanningAgent:
                 f"{json.dumps(available_tools, indent=2)}\n\n"
                 "PROTOCOL:\n"
                 "1. Analyze the context, specifically 'failure_cases' (to see what constraints are being violated) and 'rag_snippets'.\n"
-                "2. You may use tools to gather more info or test hypotheses (e.g., 'retrieve_rag', 'evaluate_p3', 'propose_boundary').\n"
+                "2. You may use tools to gather more info or test hypotheses (e.g., 'retrieve_rag', 'evaluate_p1', 'evaluate_p2', 'evaluate_p3', 'propose_boundary').\n"
                 '3. To call a tool, output a JSON object with {"tool": "<name>", "arguments": {<args>}}.\n'
                 '4. To finish and commit to a plan, output a JSON object with {"suggested_params": {...}, "config_overrides": {...}}.\n'
                 "   - 'suggested_params' (optional): A dictionary matching the structure of 'current_boundary' for the next candidate seed.\n"
@@ -692,28 +784,9 @@ class PlanningAgent:
                         )
                         tool_result = "Tool execution failed."
                         try:
-                            if tool_name == "retrieve_rag":
-                                tool_result = self.retrieve_rag(**tool_args)
-                            elif tool_name == "evaluate_p3":
-                                tool_result = self.evaluate_p3(**tool_args)
-                            elif tool_name == "propose_boundary":
-                                tool_result = self.propose_boundary(**tool_args)
-                            elif tool_name == "recombine_designs":
-                                tool_result = self.recombine_designs(**tool_args)
-                            elif tool_name == "make_boundary":
-                                # Helper: just return the object representation for the agent to see structure
-                                # We can't pass the actual object back to LLM easily, so serialize parameters
-                                # or just confirm it works. make_boundary in tools.py returns SurfaceRZFourier
-                                # which isn't JSON serializable.
-                                # Let's skip or serialize params.
-                                # Actually, the agent might use this to validate params.
-                                # For now, let's just echo params back or similar.
-                                tool_result = {
-                                    "status": "success",
-                                    "params": tool_args.get("params"),
-                                }
-                            else:
-                                tool_result = f"Error: Tool '{tool_name}' not supported or permitted."
+                            tool_result = self._execute_planning_tool(
+                                tool_name, tool_args
+                            )
                         except Exception as tool_exc:
                             tool_result = f"Error executing tool: {tool_exc}"
 
