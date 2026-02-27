@@ -212,6 +212,16 @@ def _format_property_graph_section(
                 f"  - Model routes: {data_plane.get('model_routes', {})}",
             ]
         )
+        router_reward = data_plane.get("model_router_reward")
+        if isinstance(router_reward, Mapping):
+            lines.extend(
+                [
+                    f"  - Router reward events: {router_reward.get('event_count', 0)}",
+                    f"  - Router avg reward: {router_reward.get('avg_reward')}",
+                    f"  - Router last reward: {router_reward.get('last_reward')}",
+                    f"  - Router reward routes: {router_reward.get('model_routes', {})}",
+                ]
+            )
     citations = rag_citations or summary.get("citations") or []
     if citations:
         lines.append("- RAG citations:")

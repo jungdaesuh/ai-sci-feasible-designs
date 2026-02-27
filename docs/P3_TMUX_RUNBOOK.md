@@ -187,3 +187,26 @@ Optional local verification with the repo’s official scorer:
 ```bash
 python scripts/score_candidates.py --problem p3 <RUN_DIR>/submissions/submission.json
 ```
+
+---
+
+## 7) Run fixed-budget static vs adaptive A/B validation
+
+After running one static experiment and one adaptive experiment, generate a
+fixed-budget comparison report:
+
+```bash
+python scripts/p3_governor_ab.py \
+  --db reports/p3_world_model.sqlite \
+  --static-experiment-id <STATIC_EXPERIMENT_ID> \
+  --adaptive-experiment-id <ADAPTIVE_EXPERIMENT_ID> \
+  --budget 120 \
+  --require-m24-pass \
+  --max-error-rows-budget 0 \
+  --output-json <RUN_DIR>/ab_report.json \
+  --output-md <RUN_DIR>/ab_report.md
+```
+
+See `docs/P3_GOVERNOR_AB_VALIDATION.md` for metric definitions and gates.
+If you are comparing legacy experiments without route labels, add
+`--allow-legacy-route-metadata`.

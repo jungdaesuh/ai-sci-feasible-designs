@@ -22,6 +22,12 @@ def test_format_property_graph_section_includes_p3_telemetry_fields() -> None:
             "fallback_static_delegate_rows": 3,
             "operator_families": {"blend": 7},
             "model_routes": {"governor_static_recipe/mirror": 5},
+            "model_router_reward": {
+                "event_count": 4,
+                "avg_reward": 0.12,
+                "last_reward": 0.08,
+                "model_routes": {"governor_adaptive/near_feasible/mirror": 4},
+            },
         },
     }
 
@@ -34,3 +40,6 @@ def test_format_property_graph_section_includes_p3_telemetry_fields() -> None:
     assert "Static path usage: 9" in rendered
     assert "Adaptive path usage: 3" in rendered
     assert "Fallback static delegate usage: 3" in rendered
+    assert "Router reward events: 4" in rendered
+    assert "Router avg reward: 0.12" in rendered
+    assert "Router last reward: 0.08" in rendered
