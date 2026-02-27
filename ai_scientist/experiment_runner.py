@@ -140,7 +140,10 @@ def run_experiment(
         random.seed(cfg.random_seed + start_cycle_index)
 
         planning_agent = (
-            ai_planner.PlanningAgent(world_model=world_model)
+            ai_planner.PlanningAgent(
+                world_model=world_model,
+                random_seed=cfg.random_seed,
+            )
             if planner_mode == "agent"
             else None
         )
@@ -178,6 +181,7 @@ def run_experiment(
             suggested_params: list[dict[str, Any]] | None = None
             config_overrides: Mapping[str, Any] | None = None
             planner_intent: Mapping[str, Any] | None = None
+            planner_intent_list: list[Mapping[str, Any] | None] | None = None
             if planning_agent:
                 stage_payload = [
                     {
@@ -207,6 +211,8 @@ def run_experiment(
                     suggested_params = [dict(plan_outcome.suggested_params)]
                 if plan_outcome.config_overrides:
                     config_overrides = plan_outcome.config_overrides
+                if plan_outcome.planner_intent_list:
+                    planner_intent_list = list(plan_outcome.planner_intent_list)
                 if plan_outcome.planner_intent:
                     planner_intent = plan_outcome.planner_intent
 
@@ -222,6 +228,7 @@ def run_experiment(
                 suggested_params=suggested_params,
                 config_overrides=config_overrides,
                 planner_intent=planner_intent,
+                planner_intents=planner_intent_list,
                 verbose=bool(runtime and runtime.verbose),
                 slow=bool(runtime and runtime.slow),
                 screen_only=bool(runtime and runtime.screen_only),
@@ -421,6 +428,14 @@ def main(
     if planner_mode == "agent" and not experiment.aso.enabled:
         experiment = replace(experiment, aso=replace(experiment.aso, enabled=True))
         print("[runner] planner=agent detected; enabling ASO by default.")
+    if planner_mode == "agent" and experiment.aso.seed_fallback_policy != "forbid":
+        experiment = replace(
+            experiment,
+            aso=replace(experiment.aso, seed_fallback_policy="forbid"),
+        )
+        print(
+            "[runner] planner=agent detected; enforcing aso.seed_fallback_policy=forbid."
+        )
     if getattr(cli, "disable_rl", False):
         run_overrides = dict(experiment.run_overrides or {})
         proposal_mix_overrides: dict[str, Any] = {}

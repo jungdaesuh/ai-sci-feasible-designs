@@ -25,6 +25,11 @@ def test_run_experiment_threads_planner_intent_to_cycle_executor(
         "penalty_focus_indices": [0, 2],
         "confidence": 0.7,
     }
+    planner_intent_alt = {
+        "primary_constraint_order": ["qi", "aspect_ratio"],
+        "penalty_focus_indices": [2, 0],
+        "confidence": 0.5,
+    }
     seed_payload = {
         "r_cos": [[1.0, 0.0], [0.0, 0.2]],
         "z_sin": [[0.0, 0.0], [0.0, 0.1]],
@@ -63,6 +68,7 @@ def test_run_experiment_threads_planner_intent_to_cycle_executor(
                 suggested_params=None,
                 config_overrides=None,
                 planner_intent=planner_intent,
+                planner_intent_list=[planner_intent, planner_intent_alt],
             )
 
     class _FakeCycleExecutor:
@@ -71,6 +77,7 @@ def test_run_experiment_threads_planner_intent_to_cycle_executor(
 
         def run_cycle(self, **kwargs):
             captured["planner_intent"] = kwargs.get("planner_intent")
+            captured["planner_intents"] = kwargs.get("planner_intents")
             return CycleResult(
                 cycle_index=0,
                 candidates_evaluated=0,
@@ -114,3 +121,4 @@ def test_run_experiment_threads_planner_intent_to_cycle_executor(
     run_experiment(cfg)
 
     assert captured["planner_intent"] == planner_intent
+    assert captured["planner_intents"] == [planner_intent, planner_intent_alt]

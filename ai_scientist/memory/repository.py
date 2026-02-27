@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -38,6 +39,149 @@ def hash_payload(payload: Mapping[str, Any]) -> str:
     """Return a deterministic digest that mirrors the statements table hashing."""
 
     return _hash_payload(payload)
+
+
+def _parse_lineage_hashes(raw: Any) -> list[str]:
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    parsed: list[str] = []
+    for item in payload:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip()
+        if not normalized or normalized.lower() in {"none", "null"}:
+            continue
+        parsed.append(normalized)
+    return parsed
+
+
+def _flatten_boundary_params(params: Mapping[str, Any]) -> list[float]:
+    values: list[float] = []
+    for key in ("r_cos", "z_sin", "r_sin", "z_cos"):
+        matrix = params.get(key)
+        if not isinstance(matrix, list):
+            continue
+        for row in matrix:
+            if not isinstance(row, list):
+                continue
+            for entry in row:
+                if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+                    continue
+                value = float(entry)
+                if math.isfinite(value):
+                    values.append(value)
+    return values
+
+
+def _vector_l2_distance(left: Sequence[float], right: Sequence[float]) -> float:
+    if not left or not right:
+        return float("inf")
+    length = min(len(left), len(right))
+    acc = 0.0
+    for idx in range(length):
+        delta = float(left[idx]) - float(right[idx])
+        acc += delta * delta
+    if len(left) > length:
+        for value in left[length:]:
+            acc += float(value) * float(value)
+    if len(right) > length:
+        for value in right[length:]:
+            acc += float(value) * float(value)
+    return math.sqrt(acc)
+
+
+def _delta_summary(
+    left: Sequence[float],
+    right: Sequence[float],
+) -> tuple[float, float, int]:
+    if not left and not right:
+        return 0.0, 0.0, 0
+    length = min(len(left), len(right))
+    max_abs = 0.0
+    total_abs = 0.0
+    changed = 0
+    for idx in range(length):
+        delta = abs(float(left[idx]) - float(right[idx]))
+        total_abs += delta
+        if delta > max_abs:
+            max_abs = delta
+        if delta > 0.0:
+            changed += 1
+    for value in left[length:]:
+        delta = abs(float(value))
+        total_abs += delta
+        if delta > max_abs:
+            max_abs = delta
+        if delta > 0.0:
+            changed += 1
+    for value in right[length:]:
+        delta = abs(float(value))
+        total_abs += delta
+        if delta > max_abs:
+            max_abs = delta
+        if delta > 0.0:
+            changed += 1
+    denom = max(len(left), len(right), 1)
+    return total_abs / float(denom), max_abs, changed
+
+
+def _extract_delta_recipe(
+    *,
+    source_params: Mapping[str, Any],
+    target_params: Mapping[str, Any],
+    max_terms: int = 12,
+) -> Mapping[str, Any] | None:
+    terms: list[tuple[float, str, int, int, float]] = []
+    for field in ("r_cos", "z_sin", "r_sin", "z_cos"):
+        source_matrix = source_params.get(field)
+        target_matrix = target_params.get(field)
+        if not isinstance(source_matrix, list) or not isinstance(target_matrix, list):
+            continue
+        row_count = min(len(source_matrix), len(target_matrix))
+        for row_idx in range(row_count):
+            source_row = source_matrix[row_idx]
+            target_row = target_matrix[row_idx]
+            if not isinstance(source_row, list) or not isinstance(target_row, list):
+                continue
+            col_count = min(len(source_row), len(target_row))
+            for col_idx in range(col_count):
+                source_val = source_row[col_idx]
+                target_val = target_row[col_idx]
+                if (
+                    isinstance(source_val, bool)
+                    or isinstance(target_val, bool)
+                    or not isinstance(source_val, (int, float))
+                    or not isinstance(target_val, (int, float))
+                ):
+                    continue
+                delta = float(target_val) - float(source_val)
+                if not math.isfinite(delta) or delta == 0.0:
+                    continue
+                terms.append((abs(delta), field, row_idx, col_idx, delta))
+    if not terms:
+        return None
+    terms.sort(key=lambda item: item[0], reverse=True)
+    top_terms = terms[: max(1, int(max_terms))]
+    return {
+        "type": "sparse_additive_delta",
+        "changes": [
+            {
+                "field": field,
+                "row": row_idx,
+                "col": col_idx,
+                "delta": delta,
+            }
+            for _, field, row_idx, col_idx, delta in top_terms
+        ],
+        "max_abs_delta": float(top_terms[0][0]),
+        "term_count": len(top_terms),
+    }
 
 
 class WorldModel:
@@ -950,6 +1094,415 @@ class WorldModel:
             records.append((params, float(feasibility)))
         return records
 
+    def recent_candidate_snapshots(
+        self,
+        experiment_id: int,
+        problem: str,
+        *,
+        limit: int = 128,
+    ) -> list[Mapping[str, Any]]:
+        """Return recent candidate snapshots with params + metrics for staged planning."""
+
+        rows = self._conn.execute(
+            """
+            SELECT c.id,
+                   c.design_hash,
+                   c.seed,
+                   c.params_json,
+                   c.lineage_parent_hashes_json,
+                   c.novelty_score,
+                   c.operator_family,
+                   c.model_route,
+                   m.feasibility,
+                   m.objective,
+                   m.is_feasible,
+                   m.raw_json
+            FROM metrics m
+            JOIN candidates c ON m.candidate_id = c.id
+            WHERE c.experiment_id = ? AND c.problem = ?
+            ORDER BY m.id DESC
+            LIMIT ?
+            """,
+            (experiment_id, problem, int(limit)),
+        ).fetchall()
+
+        snapshots: list[Mapping[str, Any]] = []
+        for row in rows:
+            params = json.loads(str(row["params_json"]))
+            raw_metrics = json.loads(str(row["raw_json"]))
+            nested_metrics = raw_metrics.get("metrics")
+            metrics = (
+                nested_metrics
+                if isinstance(nested_metrics, Mapping)
+                else {
+                    key: value
+                    for key, value in raw_metrics.items()
+                    if key != "constraint_margins"
+                }
+            )
+            margins = raw_metrics.get("constraint_margins", {})
+
+            constraint_margins: dict[str, float] = {}
+            if isinstance(margins, Mapping):
+                for key, value in margins.items():
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        continue
+                    value_f = float(value)
+                    if value_f > 0.0 and math.isfinite(value_f):
+                        constraint_margins[str(key)] = value_f
+
+            lineage_parent_hashes = _parse_lineage_hashes(
+                row["lineage_parent_hashes_json"]
+            )
+
+            snapshots.append(
+                {
+                    "candidate_id": int(row["id"]),
+                    "design_hash": str(row["design_hash"] or ""),
+                    "seed": int(row["seed"] or 0),
+                    "params": params if isinstance(params, Mapping) else {},
+                    "feasibility": float(row["feasibility"]),
+                    "objective": (
+                        float(row["objective"])
+                        if row["objective"] is not None
+                        else None
+                    ),
+                    "is_feasible": int(row["is_feasible"]) == 1,
+                    "constraint_margins": constraint_margins,
+                    "metrics": metrics if isinstance(metrics, Mapping) else {},
+                    "operator_family": str(row["operator_family"] or ""),
+                    "model_route": str(row["model_route"] or ""),
+                    "lineage_parent_hashes": lineage_parent_hashes,
+                    "novelty_score": (
+                        float(row["novelty_score"])
+                        if row["novelty_score"] is not None
+                        else None
+                    ),
+                }
+            )
+        return snapshots
+
+    def select_parent_group_performance_novelty(
+        self,
+        experiment_id: int,
+        problem: str,
+        *,
+        group_size: int = 2,
+        limit: int = 128,
+        near_feasibility_threshold: float = 0.25,
+        worst_constraint: str | None = None,
+        focus_constraint_margin: float | None = None,
+        leverage_weight: float = 0.35,
+    ) -> list[Mapping[str, Any]]:
+        """Select parent group by combined performance + novelty score."""
+
+        snapshots = self.recent_candidate_snapshots(
+            experiment_id=experiment_id,
+            problem=problem,
+            limit=max(limit, group_size * 4),
+        )
+        if not snapshots:
+            return []
+
+        problem_key = (problem or "").lower()
+        focus_margin = (
+            float(focus_constraint_margin)
+            if isinstance(focus_constraint_margin, (int, float))
+            else None
+        )
+        leverage_w = max(0.0, float(leverage_weight))
+        scored: list[tuple[float, float, Mapping[str, Any]]] = []
+        for snapshot in snapshots:
+            feasibility = float(snapshot.get("feasibility", float("inf")))
+            objective = snapshot.get("objective")
+            is_feasible = bool(snapshot.get("is_feasible", False))
+            novelty = snapshot.get("novelty_score")
+            novelty_score = float(novelty) if isinstance(novelty, (int, float)) else 0.0
+            leverage_score = 0.0
+            margins = snapshot.get("constraint_margins")
+            if isinstance(worst_constraint, str) and worst_constraint:
+                margin_value = 0.0
+                if isinstance(margins, Mapping):
+                    raw_margin = margins.get(worst_constraint)
+                    if isinstance(raw_margin, (int, float)) and not isinstance(
+                        raw_margin, bool
+                    ):
+                        margin_value = max(0.0, float(raw_margin))
+                if focus_margin is not None and focus_margin > 0.0:
+                    leverage_score = (
+                        max(0.0, focus_margin - margin_value) / focus_margin
+                    )
+                else:
+                    leverage_score = 1.0 / (1.0 + margin_value)
+            if is_feasible:
+                if objective is None:
+                    performance_score = 1.0
+                else:
+                    objective_value = float(objective)
+                    if problem_key.startswith("p1"):
+                        performance_score = 1.0 / (1.0 + max(0.0, objective_value))
+                    else:
+                        performance_score = max(0.0, objective_value)
+            elif feasibility <= near_feasibility_threshold:
+                performance_score = 0.5 / max(feasibility, 1e-6)
+            else:
+                performance_score = 1.0 / (1.0 + max(feasibility, 0.0))
+            combined = (
+                performance_score
+                + (0.25 * max(0.0, novelty_score))
+                + (leverage_w * max(0.0, leverage_score))
+            )
+            scored.append((combined, leverage_score, snapshot))
+
+        scored.sort(key=lambda item: float(item[0]), reverse=True)
+        selected: list[Mapping[str, Any]] = []
+        seen_hashes: set[str] = set()
+        for score, leverage_score, snapshot in scored:
+            design_hash = str(snapshot.get("design_hash", ""))
+            if not design_hash or design_hash in seen_hashes:
+                continue
+            enriched = dict(snapshot)
+            enriched["parent_selection_score"] = float(score)
+            enriched["constraint_leverage_score"] = float(leverage_score)
+            selected.append(enriched)
+            seen_hashes.add(design_hash)
+            if len(selected) >= group_size:
+                break
+        return selected
+
+    def nearest_case_deltas(
+        self,
+        experiment_id: int,
+        problem: str,
+        *,
+        seed_params: Mapping[str, Any],
+        limit: int = 4,
+        near_feasibility_threshold: float = 0.25,
+        include_recipes: bool = True,
+    ) -> list[Mapping[str, Any]]:
+        """Return nearest feasible/near-feasible historical cases with parameter deltas."""
+
+        baseline_vector = _flatten_boundary_params(seed_params)
+        if not baseline_vector:
+            return []
+
+        snapshots = self.recent_candidate_snapshots(
+            experiment_id=experiment_id,
+            problem=problem,
+            limit=max(64, limit * 24),
+        )
+        nearest: list[tuple[float, Mapping[str, Any], str]] = []
+        for snapshot in snapshots:
+            snapshot_params = snapshot.get("params")
+            if not isinstance(snapshot_params, Mapping):
+                continue
+            feasibility = float(snapshot.get("feasibility", float("inf")))
+            is_feasible = bool(snapshot.get("is_feasible", False))
+            if is_feasible:
+                bucket = "feasible"
+            elif feasibility <= near_feasibility_threshold:
+                bucket = "near_feasible"
+            else:
+                continue
+            vector = _flatten_boundary_params(snapshot_params)
+            if not vector:
+                continue
+            distance = _vector_l2_distance(baseline_vector, vector)
+            mean_abs_delta, max_abs_delta, changed_count = _delta_summary(
+                baseline_vector, vector
+            )
+            nearest.append(
+                (
+                    distance,
+                    {
+                        "design_hash": str(snapshot.get("design_hash", "")),
+                        "feasibility": feasibility,
+                        "objective": snapshot.get("objective"),
+                        "worst_constraint": snapshot.get("constraint_margins", {}),
+                        "lineage_parent_hashes": list(
+                            snapshot.get("lineage_parent_hashes", [])
+                        ),
+                        "distance_l2": distance,
+                        "delta_summary": {
+                            "mean_abs_delta": mean_abs_delta,
+                            "max_abs_delta": max_abs_delta,
+                            "changed_coefficients": changed_count,
+                        },
+                        "delta_recipe": (
+                            _extract_delta_recipe(
+                                source_params=seed_params,
+                                target_params=snapshot_params,
+                            )
+                            if include_recipes
+                            else None
+                        ),
+                    },
+                    bucket,
+                )
+            )
+
+        nearest.sort(key=lambda item: float(item[0]))
+        selected: list[Mapping[str, Any]] = []
+        feasible_taken = 0
+        near_taken = 0
+        for _, payload, bucket in nearest:
+            if bucket == "feasible" and feasible_taken >= max(1, limit // 2):
+                continue
+            if bucket == "near_feasible" and near_taken >= max(1, limit // 2):
+                continue
+            item = dict(payload)
+            item["bucket"] = bucket
+            selected.append(item)
+            if bucket == "feasible":
+                feasible_taken += 1
+            else:
+                near_taken += 1
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def ancestor_chains(
+        self,
+        experiment_id: int,
+        problem: str,
+        design_hashes: Sequence[str],
+        *,
+        max_depth: int = 3,
+        max_ancestors_per_design: int = 8,
+    ) -> list[Mapping[str, Any]]:
+        """Return compact parent-chain context for selected design hashes."""
+
+        rows = self._conn.execute(
+            """
+            SELECT c.design_hash,
+                   c.seed,
+                   c.operator_family,
+                   c.model_route,
+                   c.lineage_parent_hashes_json,
+                   m.feasibility,
+                   m.objective,
+                   m.raw_json
+            FROM candidates c
+            LEFT JOIN metrics m ON m.candidate_id = c.id
+            WHERE c.experiment_id = ? AND c.problem = ?
+            ORDER BY c.id DESC, m.id DESC
+            """,
+            (experiment_id, problem),
+        ).fetchall()
+
+        by_hash: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            design_hash = str(row["design_hash"] or "")
+            if not design_hash or design_hash in by_hash:
+                continue
+            raw_payload = row["raw_json"]
+            if isinstance(raw_payload, str) and raw_payload:
+                try:
+                    metrics_raw = json.loads(raw_payload)
+                except (TypeError, json.JSONDecodeError):
+                    metrics_raw = {}
+            else:
+                metrics_raw = {}
+            margins_raw = (
+                metrics_raw.get("constraint_margins", {})
+                if isinstance(metrics_raw, Mapping)
+                else {}
+            )
+            violations: dict[str, float] = {}
+            if isinstance(margins_raw, Mapping):
+                for key, value in margins_raw.items():
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        continue
+                    value_f = float(value)
+                    if value_f > 0.0:
+                        violations[str(key)] = value_f
+            if violations:
+                worst_constraint = max(
+                    violations,
+                    key=lambda name: violations[name],
+                )
+                worst_violation = float(violations[worst_constraint])
+            else:
+                worst_constraint = None
+                worst_violation = 0.0
+
+            by_hash[design_hash] = {
+                "design_hash": design_hash,
+                "seed": int(row["seed"] or 0),
+                "operator_family": str(row["operator_family"] or ""),
+                "model_route": str(row["model_route"] or ""),
+                "lineage_parent_hashes": _parse_lineage_hashes(
+                    row["lineage_parent_hashes_json"]
+                ),
+                "feasibility": (
+                    float(row["feasibility"])
+                    if row["feasibility"] is not None
+                    else None
+                ),
+                "objective": (
+                    float(row["objective"]) if row["objective"] is not None else None
+                ),
+                "worst_constraint": worst_constraint,
+                "worst_constraint_violation": worst_violation,
+            }
+
+        unique_hashes: list[str] = []
+        seen_targets: set[str] = set()
+        for design_hash in design_hashes:
+            key = str(design_hash)
+            if key and key not in seen_targets:
+                unique_hashes.append(key)
+                seen_targets.add(key)
+
+        chains: list[Mapping[str, Any]] = []
+        for target_hash in unique_hashes:
+            target = by_hash.get(target_hash)
+            parent_frontier: list[tuple[str, int]] = []
+            if target is not None:
+                for parent_hash in target["lineage_parent_hashes"]:
+                    parent_frontier.append((str(parent_hash), 1))
+            ancestors: list[Mapping[str, Any]] = []
+            visited: set[str] = set()
+            while parent_frontier and len(ancestors) < max_ancestors_per_design:
+                current_hash, depth = parent_frontier.pop(0)
+                if current_hash in visited or depth > max_depth:
+                    continue
+                visited.add(current_hash)
+                record = by_hash.get(current_hash)
+                if record is None:
+                    ancestors.append(
+                        {
+                            "design_hash": current_hash,
+                            "depth": depth,
+                            "status": "missing",
+                        }
+                    )
+                    continue
+                ancestors.append(
+                    {
+                        "design_hash": record["design_hash"],
+                        "depth": depth,
+                        "feasibility": record["feasibility"],
+                        "objective": record["objective"],
+                        "worst_constraint": record["worst_constraint"],
+                        "worst_constraint_violation": record[
+                            "worst_constraint_violation"
+                        ],
+                        "operator_family": record["operator_family"],
+                        "model_route": record["model_route"],
+                    }
+                )
+                if depth < max_depth:
+                    for parent_hash in record["lineage_parent_hashes"]:
+                        parent_frontier.append((str(parent_hash), depth + 1))
+            chains.append(
+                {
+                    "target_design_hash": target_hash,
+                    "ancestors": ancestors,
+                }
+            )
+        return chains
+
     def recent_failures(
         self,
         experiment_id: int,
@@ -1063,9 +1616,7 @@ class WorldModel:
                         violations.items(), key=lambda item: item[1], reverse=True
                     )
                 }
-                worst_constraint = max(
-                    violations.items(), key=lambda item: item[1]
-                )[0]
+                worst_constraint = max(violations.items(), key=lambda item: item[1])[0]
                 worst_constraint_violation = float(violations[worst_constraint])
             else:
                 normalized_violations = {}
@@ -1318,6 +1869,7 @@ class WorldModel:
             "SELECT * FROM candidates WHERE experiment_id = ?",
             (experiment_id,),
         ).fetchall()
+        node_by_design_hash: dict[str, str] = {}
         for candidate in candidate_rows:
             candidate_node = f"candidate:{candidate['id']}"
             graph.add_node(
@@ -1332,7 +1884,25 @@ class WorldModel:
                 novelty_score=candidate["novelty_score"],
                 lineage_parent_hashes_json=candidate["lineage_parent_hashes_json"],
             )
+            design_hash = str(candidate["design_hash"] or "")
+            if design_hash:
+                node_by_design_hash[design_hash] = candidate_node
             graph.add_edge(exp_node, candidate_node, relation="contains")
+        for candidate in candidate_rows:
+            child_node = f"candidate:{candidate['id']}"
+            for parent_hash in _parse_lineage_hashes(
+                candidate["lineage_parent_hashes_json"]
+            ):
+                parent_node = node_by_design_hash.get(parent_hash)
+                if parent_node is None:
+                    parent_node = f"lineage_hash:{parent_hash}"
+                    if not graph.has_node(parent_node):
+                        graph.add_node(
+                            parent_node,
+                            type="lineage_stub",
+                            design_hash=parent_hash,
+                        )
+                graph.add_edge(parent_node, child_node, relation="lineage_parent_of")
         metrics_rows = self._conn.execute(
             "SELECT m.*, c.problem FROM metrics m JOIN candidates c ON m.candidate_id = c.id WHERE c.experiment_id = ?",
             (experiment_id,),
@@ -1508,6 +2078,7 @@ class WorldModel:
         *,
         problem: str = "p3",
         limit: int = 200,
+        reward_eligible_only: bool = False,
     ) -> Mapping[str, Any]:
         total_row = self._conn.execute(
             """
@@ -1517,10 +2088,10 @@ class WorldModel:
             """,
             (experiment_id, str(problem)),
         ).fetchone()
-        total_events = int(total_row["n"]) if total_row is not None else 0
+        total_events_all = int(total_row["n"]) if total_row is not None else 0
         rows = self._conn.execute(
             """
-            SELECT model_route, reward
+            SELECT model_route, reward, reward_components_json
             FROM model_router_reward_events
             WHERE experiment_id = ? AND problem = ?
             ORDER BY id DESC
@@ -1528,7 +2099,49 @@ class WorldModel:
             """,
             (experiment_id, str(problem), int(limit)),
         ).fetchall()
-        if not rows:
+
+        eligible_rows: list[sqlite3.Row] = []
+        if reward_eligible_only:
+            eligible_total_rows = self._conn.execute(
+                """
+                SELECT reward_components_json
+                FROM model_router_reward_events
+                WHERE experiment_id = ? AND problem = ?
+                """,
+                (experiment_id, str(problem)),
+            ).fetchall()
+            total_events = 0
+            for row in eligible_total_rows:
+                payload_raw = row["reward_components_json"]
+                if isinstance(payload_raw, str) and payload_raw:
+                    try:
+                        payload = json.loads(payload_raw)
+                    except (TypeError, json.JSONDecodeError):
+                        payload = {}
+                else:
+                    payload = {}
+                if isinstance(payload, Mapping) and bool(
+                    payload.get("reward_eligible")
+                ):
+                    total_events += 1
+            for row in rows:
+                payload_raw = row["reward_components_json"]
+                if isinstance(payload_raw, str) and payload_raw:
+                    try:
+                        payload = json.loads(payload_raw)
+                    except (TypeError, json.JSONDecodeError):
+                        payload = {}
+                else:
+                    payload = {}
+                if isinstance(payload, Mapping) and bool(
+                    payload.get("reward_eligible")
+                ):
+                    eligible_rows.append(row)
+            rows_to_use = eligible_rows
+        else:
+            total_events = total_events_all
+            rows_to_use = list(rows)
+        if not rows_to_use:
             return {
                 "event_count": total_events,
                 "sampled_event_count": 0,
@@ -1539,7 +2152,7 @@ class WorldModel:
 
         rewards: list[float] = []
         route_counts: dict[str, int] = {}
-        for row in rows:
+        for row in rows_to_use:
             reward = float(row["reward"])
             rewards.append(reward)
             route = str(row["model_route"] or "unknown")
@@ -1547,13 +2160,55 @@ class WorldModel:
 
         return {
             "event_count": total_events,
-            "sampled_event_count": len(rows),
+            "sampled_event_count": len(rows_to_use),
             "avg_reward": float(sum(rewards) / len(rewards)),
             "last_reward": rewards[0],
             "model_routes": dict(
                 sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
             ),
         }
+
+    def model_router_reward_eligible_history(
+        self,
+        experiment_id: int,
+        *,
+        problem: str = "p3",
+        limit: int = 200,
+    ) -> list[Mapping[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT model_route, window_size, reward, reward_components_json, created_at
+            FROM model_router_reward_events
+            WHERE experiment_id = ? AND problem = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (experiment_id, str(problem), int(limit)),
+        ).fetchall()
+        history: list[Mapping[str, Any]] = []
+        for row in rows:
+            payload_raw = row["reward_components_json"]
+            if isinstance(payload_raw, str) and payload_raw:
+                try:
+                    payload = json.loads(payload_raw)
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+            else:
+                payload = {}
+            if not isinstance(payload, Mapping):
+                payload = {}
+            if not bool(payload.get("reward_eligible")):
+                continue
+            history.append(
+                {
+                    "model_route": str(row["model_route"] or "unknown"),
+                    "window_size": int(row["window_size"]),
+                    "reward": float(row["reward"]),
+                    "reward_components": dict(payload),
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+        return history
 
     def surrogate_training_data(
         self,

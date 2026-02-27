@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Mapping
 
 
 def relative_improvement(*, previous: float, current: float) -> float:
@@ -68,3 +69,60 @@ def compute_model_router_reward(
         },
         "reward": float(reward),
     }
+
+
+def compute_ucb_score(
+    *,
+    mean_reward: float,
+    pulls: int,
+    total_pulls: int,
+    exploration_c: float,
+) -> float:
+    """Compute Upper Confidence Bound score for one arm."""
+    mean = float(mean_reward)
+    n = int(pulls)
+    total = int(total_pulls)
+    c = float(exploration_c)
+    if n < 0 or total < 0:
+        raise ValueError("pulls and total_pulls must be >= 0.")
+    if c < 0.0:
+        raise ValueError("exploration_c must be >= 0.")
+    if n == 0:
+        # Always try unseen arms first.
+        return float("inf")
+    return mean + (c * math.sqrt(math.log(float(max(total, 1))) / float(n)))
+
+
+def select_ucb_arm(
+    arm_stats: Mapping[str, Mapping[str, float | int]],
+    *,
+    exploration_c: float,
+) -> str | None:
+    """Select arm key with highest UCB score."""
+    if not arm_stats:
+        return None
+    total_pulls = 0
+    for stats in arm_stats.values():
+        pulls_raw = stats.get("pulls", 0)
+        pulls = int(pulls_raw) if isinstance(pulls_raw, (int, float)) else 0
+        if pulls > 0:
+            total_pulls += pulls
+    total_pulls = max(total_pulls, 1)
+
+    best_arm: str | None = None
+    best_score = -float("inf")
+    for arm, stats in arm_stats.items():
+        pulls_raw = stats.get("pulls", 0)
+        mean_raw = stats.get("mean_reward", 0.0)
+        pulls = int(pulls_raw) if isinstance(pulls_raw, (int, float)) else 0
+        mean_reward = float(mean_raw) if isinstance(mean_raw, (int, float)) else 0.0
+        score = compute_ucb_score(
+            mean_reward=mean_reward,
+            pulls=pulls,
+            total_pulls=total_pulls,
+            exploration_c=exploration_c,
+        )
+        if score > best_score:
+            best_score = score
+            best_arm = arm
+    return best_arm

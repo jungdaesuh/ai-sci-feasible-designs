@@ -453,6 +453,64 @@ def test_plan_cycle_uses_template_fallback_when_suggested_params_invalid(
     assert outcome.config_overrides == {"constraint_weights": {"mhd": 3.0}}
 
 
+def test_plan_cycle_strict_seed_policy_rejects_template_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _make_agent(monkeypatch, use_agent_gates=True)
+    base_cfg = dataclasses.replace(
+        ai_config.load_experiment_config(), problem="p1", cycles=1
+    )
+    cfg = dataclasses.replace(
+        base_cfg,
+        aso=dataclasses.replace(base_cfg.aso, seed_fallback_policy="forbid"),
+    )
+    response_payload = json.dumps({"seed_fallback": "template"})
+
+    monkeypatch.setattr(agent, "retrieve_rag", lambda query, k=3: [])
+    monkeypatch.setattr(
+        agent,
+        "make_boundary",
+        lambda params: SimpleNamespace(
+            n_poloidal_modes=2,
+            n_toroidal_modes=3,
+            n_field_periods=params.get("n_field_periods", 3),
+            is_stellarator_symmetric=True,
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "evaluate_p1",
+        lambda params, stage=None: {
+            "stage": stage or "screen",
+            "objective": 1.0,
+            "feasibility": 0.0,
+            "gradient_proxy": 0.1,
+        },
+    )
+
+    def _fake_invoke_chat_completion(*_args, **_kwargs):
+        return SimpleNamespace(
+            status_code=200,
+            body={"choices": [{"message": {"content": response_payload}}]},
+        )
+
+    from ai_scientist import model_provider
+
+    monkeypatch.setattr(
+        model_provider,
+        "invoke_chat_completion",
+        _fake_invoke_chat_completion,
+    )
+
+    with pytest.raises(RuntimeError, match="seed_fallback_policy='forbid'"):
+        agent.plan_cycle(
+            cfg=cfg,
+            cycle_index=0,
+            stage_history=[],
+            last_summary=None,
+        )
+
+
 def test_plan_cycle_accepts_multi_seed_finalize_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -519,6 +577,77 @@ def test_plan_cycle_accepts_multi_seed_finalize_payload(
 
     assert outcome.suggested_params == seed_a
     assert outcome.suggested_params_list == [seed_a, seed_b]
+
+
+def test_plan_cycle_respects_configured_offspring_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _make_agent(monkeypatch, use_agent_gates=True)
+    base_cfg = ai_config.load_experiment_config()
+    cfg = dataclasses.replace(
+        base_cfg,
+        problem="p1",
+        cycles=1,
+        aso=dataclasses.replace(base_cfg.aso, offspring_per_parent=1),
+    )
+    seed_a = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.3, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.2, 0.0]],
+        "n_field_periods": cfg.boundary_template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+    seed_b = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.25, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.15, 0.0]],
+        "n_field_periods": cfg.boundary_template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+    response_payload = json.dumps({"suggested_params_list": [seed_a, seed_b]})
+
+    monkeypatch.setattr(agent, "retrieve_rag", lambda query, k=3: [])
+    monkeypatch.setattr(
+        agent,
+        "make_boundary",
+        lambda params: SimpleNamespace(
+            n_poloidal_modes=2,
+            n_toroidal_modes=3,
+            n_field_periods=params.get("n_field_periods", 3),
+            is_stellarator_symmetric=True,
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "evaluate_p1",
+        lambda params, stage=None: {
+            "stage": stage or "screen",
+            "objective": 1.0,
+            "feasibility": 0.0,
+            "gradient_proxy": 0.1,
+        },
+    )
+
+    def _fake_invoke_chat_completion(*_args, **_kwargs):
+        return SimpleNamespace(
+            status_code=200,
+            body={"choices": [{"message": {"content": response_payload}}]},
+        )
+
+    from ai_scientist import model_provider
+
+    monkeypatch.setattr(
+        model_provider,
+        "invoke_chat_completion",
+        _fake_invoke_chat_completion,
+    )
+
+    outcome = agent.plan_cycle(
+        cfg=cfg,
+        cycle_index=0,
+        stage_history=[],
+        last_summary=None,
+    )
+
+    assert outcome.suggested_params_list == [seed_a]
 
 
 def test_plan_cycle_context_includes_balanced_experience_when_available(
@@ -724,6 +853,171 @@ def test_plan_cycle_accepts_planner_intent_payload(
     assert outcome.planner_intent == planner_intent
 
 
+def test_plan_cycle_accepts_per_candidate_planner_intents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _make_agent(monkeypatch, use_agent_gates=True)
+    cfg = dataclasses.replace(
+        ai_config.load_experiment_config(), problem="p3", cycles=1
+    )
+    seed_a = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.2, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.15, 0.0]],
+        "n_field_periods": cfg.boundary_template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+    seed_b = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.18, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.12, 0.0]],
+        "n_field_periods": cfg.boundary_template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+    intent_a = {
+        "primary_constraint_order": ["aspect_ratio", "qi"],
+        "target_move_family": "blend",
+        "forbidden_moves": [],
+        "penalty_focus_indices": [0],
+        "restart_policy": "on_stagnation",
+        "confidence": 0.7,
+    }
+    intent_b = {
+        "primary_constraint_order": ["qi", "aspect_ratio"],
+        "target_move_family": "scale_groups",
+        "forbidden_moves": ["random_reset"],
+        "penalty_focus_indices": [2],
+        "restart_policy": "aggressive",
+        "confidence": 0.55,
+    }
+    response_payload = json.dumps(
+        {
+            "suggested_params_list": [seed_a, seed_b],
+            "planner_intent_list": [intent_a, intent_b],
+        }
+    )
+
+    monkeypatch.setattr(agent, "retrieve_rag", lambda query, k=3: [])
+    monkeypatch.setattr(
+        agent,
+        "make_boundary",
+        lambda params: SimpleNamespace(
+            n_poloidal_modes=2,
+            n_toroidal_modes=3,
+            n_field_periods=params.get("n_field_periods", 3),
+            is_stellarator_symmetric=True,
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "evaluate_p3",
+        lambda params, stage=None: {
+            "stage": stage or "screen",
+            "objective": 1.0,
+            "feasibility": 0.0,
+            "gradient_proxy": 0.1,
+        },
+    )
+
+    def _fake_invoke_chat_completion(*_args, **_kwargs):
+        return SimpleNamespace(
+            status_code=200,
+            body={"choices": [{"message": {"content": response_payload}}]},
+        )
+
+    from ai_scientist import model_provider
+
+    monkeypatch.setattr(
+        model_provider,
+        "invoke_chat_completion",
+        _fake_invoke_chat_completion,
+    )
+
+    outcome = agent.plan_cycle(
+        cfg=cfg,
+        cycle_index=0,
+        stage_history=[],
+        last_summary=None,
+    )
+
+    assert outcome.suggested_params_list == [seed_a, seed_b]
+    assert outcome.planner_intent is None
+    assert outcome.planner_intent_list == [intent_a, intent_b]
+
+
+def test_plan_cycle_does_not_promote_non_selected_intent_from_intent_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _make_agent(monkeypatch, use_agent_gates=True)
+    cfg = dataclasses.replace(
+        ai_config.load_experiment_config(), problem="p3", cycles=1
+    )
+    seed = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.2, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.15, 0.0]],
+        "n_field_periods": cfg.boundary_template.n_field_periods,
+        "is_stellarator_symmetric": True,
+    }
+    non_selected_intent = {
+        "primary_constraint_order": ["qi", "aspect_ratio"],
+        "target_move_family": "blend",
+        "forbidden_moves": [],
+        "penalty_focus_indices": [2],
+        "restart_policy": "on_stagnation",
+        "confidence": 0.6,
+    }
+    response_payload = json.dumps(
+        {
+            "suggested_params_list": [seed, seed],
+            "planner_intent_list": [None, non_selected_intent],
+        }
+    )
+
+    monkeypatch.setattr(agent, "retrieve_rag", lambda query, k=3: [])
+    monkeypatch.setattr(
+        agent,
+        "make_boundary",
+        lambda params: SimpleNamespace(
+            n_poloidal_modes=2,
+            n_toroidal_modes=3,
+            n_field_periods=params.get("n_field_periods", 3),
+            is_stellarator_symmetric=True,
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "evaluate_p3",
+        lambda params, stage=None: {
+            "stage": stage or "screen",
+            "objective": 1.0,
+            "feasibility": 0.0,
+            "gradient_proxy": 0.1,
+        },
+    )
+
+    def _fake_invoke_chat_completion(*_args, **_kwargs):
+        return SimpleNamespace(
+            status_code=200,
+            body={"choices": [{"message": {"content": response_payload}}]},
+        )
+
+    from ai_scientist import model_provider
+
+    monkeypatch.setattr(
+        model_provider,
+        "invoke_chat_completion",
+        _fake_invoke_chat_completion,
+    )
+
+    outcome = agent.plan_cycle(
+        cfg=cfg,
+        cycle_index=0,
+        stage_history=[],
+        last_summary=None,
+    )
+
+    assert outcome.planner_intent is None
+    assert outcome.planner_intent_list == [None, non_selected_intent]
+
+
 def test_plan_cycle_retries_when_planner_intent_invalid_then_accepts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -828,9 +1122,12 @@ def test_plan_cycle_context_includes_scratchpad_summary_when_available(
         recent_experience_pack=lambda **_kwargs: {
             "recent_successes": [],
             "recent_near_successes": [],
-            "recent_failures": [],
+            "recent_failures": [{"design_hash": "abc"}],
             "feedback_adapter": {},
         },
+        ancestor_chains=lambda **_kwargs: [
+            {"target_design_hash": "abc", "ancestors": [{"design_hash": "p0"}]}
+        ],
         scratchpad_cycle_summary=lambda **_kwargs: {
             "cycle": 1,
             "event_count": 2,
@@ -871,6 +1168,7 @@ def test_plan_cycle_context_includes_scratchpad_summary_when_available(
     )
 
     assert outcome.context["scratchpad_summary"]["event_count"] == 2
+    assert outcome.context["ancestor_chains"][0]["target_design_hash"] == "abc"
 
 
 def test_supervision_prompt_includes_planner_intent_prior(
@@ -923,3 +1221,54 @@ def test_supervision_prompt_includes_planner_intent_prior(
     assert "Planner intent prior (SOFT PRIOR)" in prompt
     assert '"penalty_focus_indices": [' in prompt
     assert "0" in prompt
+
+
+def test_branch_experience_probability_decays_with_stagnation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _make_agent(monkeypatch)
+    aso = ai_config.ASOConfig(
+        experience_injection_probability=0.8,
+        experience_stagnation_decay=0.2,
+    )
+
+    p0 = agent._branch_experience_probability(aso_config=aso, stagnation_steps=0)
+    p2 = agent._branch_experience_probability(aso_config=aso, stagnation_steps=2)
+    p10 = agent._branch_experience_probability(aso_config=aso, stagnation_steps=10)
+
+    assert p0 == pytest.approx(0.8)
+    assert p2 == pytest.approx(0.48)
+    assert p10 == pytest.approx(0.0)
+
+
+def test_sample_branch_experience_uses_planner_seed_not_model_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _make_agent(monkeypatch)
+    diagnostics = planner.OptimizerDiagnostics(
+        step=1,
+        trajectory_id=1,
+        objective=1.0,
+        objective_delta=0.0,
+        max_violation=0.2,
+        constraints_raw=[0.2],
+        multipliers=[1.0],
+        penalty_parameters=[10.0],
+        bounds_norm=0.5,
+        status="STAGNATION",
+        constraint_diagnostics=[],
+        narrative=[],
+        steps_since_improvement=0,
+    )
+    monkeypatch.setattr(agent, "_should_inject_experience", lambda **_kwargs: False)
+    aso = ai_config.ASOConfig(experience_injection_probability=0.4)
+
+    probability, injected, snippets = agent._sample_branch_experience(
+        cycle=1,
+        diagnostics=diagnostics,
+        aso_config=aso,
+    )
+
+    assert probability == pytest.approx(0.4)
+    assert injected is False
+    assert snippets == []

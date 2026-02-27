@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from ai_scientist.model_router_reward import (
+    compute_ucb_score,
     compute_model_router_reward,
     relative_improvement,
+    select_ucb_arm,
 )
 
 
@@ -47,3 +49,27 @@ def test_compute_model_router_reward_rejects_invalid_weights() -> None:
             feasible_weight=0.0,
             hv_weight=0.0,
         )
+
+
+def test_compute_ucb_score_prefers_unseen_arms() -> None:
+    assert compute_ucb_score(
+        mean_reward=0.0,
+        pulls=0,
+        total_pulls=10,
+        exploration_c=1.0,
+    ) == float("inf")
+
+
+def test_select_ucb_arm_chooses_best_score() -> None:
+    selected = select_ucb_arm(
+        {
+            "arm-a": {"mean_reward": 0.20, "pulls": 10},
+            "arm-b": {"mean_reward": 0.35, "pulls": 10},
+        },
+        exploration_c=0.2,
+    )
+    assert selected == "arm-b"
+
+
+def test_select_ucb_arm_returns_none_for_empty_stats() -> None:
+    assert select_ucb_arm({}, exploration_c=0.5) is None

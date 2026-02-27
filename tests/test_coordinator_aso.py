@@ -1,5 +1,6 @@
 # ruff: noqa: E402
 import sys
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -71,6 +72,18 @@ def create_mock_alm_state(**kwargs):
     state.model_copy = MagicMock(side_effect=mock_copy)
     state.copy = MagicMock(side_effect=mock_copy)
     return state
+
+
+def _valid_seed(scale: float = 1.0) -> dict[str, object]:
+    return {
+        "params": {
+            "r_cos": [[1.0 * scale]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        },
+        "seed": 123,
+    }
 
 
 class TestCoordinatorASO:
@@ -157,6 +170,7 @@ class TestCoordinatorASO:
             patch("ai_scientist.coordinator.GeometerWorker"),
         ):
             wm = MagicMock()
+            wm.average_recent_hv_delta.return_value = None
             planner = MagicMock()
             coord = Coordinator(mock_cfg, wm, planner)
             # Setup constraint names for P3
@@ -232,7 +246,10 @@ class TestCoordinatorASO:
         )
 
         # Mock Dependencies
-        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed()])
+        coordinator._apply_seed_novelty_validity_gate = MagicMock(
+            side_effect=lambda seeds, **_kwargs: list(seeds)
+        )
         coordinator._seed_to_boundary = MagicMock()
         coordinator._get_problem = MagicMock()
         coordinator._build_optimization_settings = MagicMock()
@@ -354,7 +371,10 @@ class TestCoordinatorASO:
             OptimizationDirective,
         )
 
-        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed()])
+        coordinator._apply_seed_novelty_validity_gate = MagicMock(
+            side_effect=lambda seeds, **_kwargs: list(seeds)
+        )
         coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
         coordinator._get_problem = MagicMock(return_value=MagicMock())
         coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
@@ -426,7 +446,9 @@ class TestCoordinatorASO:
         }
 
         coordinator._prepare_seeds = MagicMock(side_effect=[[seed_a], [seed_b]])
-        coordinator._surrogate_rank_seeds = MagicMock(side_effect=lambda seeds, _cycle: seeds)
+        coordinator._surrogate_rank_seeds = MagicMock(
+            side_effect=lambda seeds, _cycle: seeds
+        )
         coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
         coordinator._get_problem = MagicMock(return_value=MagicMock())
         coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
@@ -509,9 +531,7 @@ class TestCoordinatorASO:
         assert coordinator._prepare_seeds.call_count >= 2
         assert mock_create_context.call_count >= 2
         assert any(event["aso_action"] == "RESTART" for event in coordinator.telemetry)
-        assert any(
-            event["vmec_failure_streak"] >= 2 for event in coordinator.telemetry
-        )
+        assert any(event["vmec_failure_streak"] >= 2 for event in coordinator.telemetry)
         assert any(event["vmec_step_failed"] for event in coordinator.telemetry)
 
     @patch("ai_scientist.coordinator.make_boundary_from_params")
@@ -533,7 +553,7 @@ class TestCoordinatorASO:
             OptimizationDirective,
         )
 
-        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed()])
         coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
         coordinator._get_problem = MagicMock(return_value=MagicMock())
         coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
@@ -596,6 +616,26 @@ class TestCoordinatorASO:
         assert result == [fallback]
         coordinator._stable_fallback_seed.assert_called_once_with(3)
 
+    def test_prepare_seeds_strict_policy_skips_fallback_when_geometer_rejects_all(
+        self, coordinator
+    ):
+        raw = [{"params": {"dummy": True}}]
+        coordinator.explore_worker.run.return_value = {"candidates": raw}
+        coordinator.geo_worker.run.return_value = {"candidates": []}
+        coordinator._stable_fallback_seed = MagicMock(
+            return_value={"seed": 7, "params": {"x": 1}}
+        )
+
+        result = coordinator._prepare_seeds(
+            initial_seeds=None,
+            cycle=3,
+            n_needed=2,
+            allow_fallbacks=False,
+        )
+
+        assert result == []
+        coordinator._stable_fallback_seed.assert_not_called()
+
     def test_prepare_seeds_keeps_initial_seeds_without_forced_fallback(
         self, coordinator
     ):
@@ -616,6 +656,177 @@ class TestCoordinatorASO:
         assert result[0]["params"]["r_cos"] == [[1.0]]
         coordinator._stable_fallback_seed.assert_not_called()
 
+    def test_produce_candidates_aso_strict_policy_raises_when_no_seed_survives(
+        self, coordinator
+    ):
+        coordinator._prepare_seeds = MagicMock(return_value=[])
+        coordinator._surrogate_rank_seeds = MagicMock(return_value=[])
+        coordinator.cfg.aso = replace(
+            coordinator.cfg.aso, seed_fallback_policy="forbid"
+        )
+
+        with pytest.raises(RuntimeError, match="seed_fallback_policy='forbid'"):
+            coordinator.produce_candidates_aso(
+                cycle=1,
+                experiment_id=1,
+                eval_budget=5,
+                template=MagicMock(),
+            )
+
+    def test_apply_seed_novelty_validity_gate_dedupes_sources(self, coordinator):
+        historical = {
+            "design_hash": "hist-1",
+            "params": _valid_seed()["params"],
+        }
+        coordinator.world_model.recent_candidate_snapshots = MagicMock(
+            return_value=[historical]
+        )
+        with patch("ai_scientist.coordinator.make_boundary_from_params") as mock_make:
+            mock_make.side_effect = lambda params: params
+            accepted = coordinator._apply_seed_novelty_validity_gate(
+                [_valid_seed(1.0), _valid_seed(1.0), _valid_seed(1.1)],
+                experiment_id=1,
+                problem="p3",
+                limit=4,
+            )
+
+        assert len(accepted) == 1
+        assert accepted[0]["params"]["r_cos"][0][0] == pytest.approx(1.1)
+        assert mock_make.call_count == 3
+
+    @patch("ai_scientist.coordinator.step_alm")
+    @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.coordinator.state_to_boundary_params")
+    def test_restart_consumes_queue_before_fallback_generation(
+        self, mock_state_to_params, mock_create_context, mock_step_alm, coordinator
+    ):
+        from ai_scientist.coordinator import TrajectoryState
+        from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+        from ai_scientist.planner import (
+            DirectiveAction,
+            DirectiveSource,
+            OptimizationDirective,
+        )
+
+        coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
+        coordinator._get_problem = MagicMock(return_value=MagicMock())
+        coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed(2.0)])
+        coordinator.cfg.aso = replace(
+            coordinator.cfg.aso, seed_fallback_policy="forbid"
+        )
+
+        mock_context = MagicMock(spec=ALMContext)
+        state = create_mock_alm_state()
+        mock_create_context.return_value = (mock_context, state)
+        mock_step_alm.side_effect = [
+            ALMStepResult(
+                state=state,
+                n_evals=1,
+                objective=10.0,
+                max_violation=10.0,
+                metrics=None,
+            ),
+            ALMStepResult(
+                state=state,
+                n_evals=1,
+                objective=1.0,
+                max_violation=0.0,
+                metrics=None,
+            ),
+        ]
+        coordinator.planner.supervise.side_effect = [
+            OptimizationDirective(
+                action=DirectiveAction.RESTART,
+                source=DirectiveSource.HEURISTIC,
+            ),
+            OptimizationDirective(
+                action=DirectiveAction.STOP,
+                source=DirectiveSource.HEURISTIC,
+            ),
+        ]
+        mock_state_to_params.return_value = _valid_seed()["params"]
+
+        restart_queue = [_valid_seed(1.2)]
+        candidates = coordinator._run_trajectory_aso(
+            traj=TrajectoryState(id=0, seed=_valid_seed()),
+            eval_budget=2,
+            cycle=1,
+            experiment_id=1,
+            config=coordinator.cfg,
+            planner_intent=None,
+            restart_seed_queue=restart_queue,
+        )
+
+        assert restart_queue == []
+        coordinator._prepare_seeds.assert_not_called()
+        assert len(candidates) >= 1
+
+    @patch("ai_scientist.coordinator.build_staged_seed_plan_from_snapshots")
+    def test_produce_candidates_aso_prepends_staged_governor_seeds(
+        self, mock_build_staged, coordinator
+    ):
+        from ai_scientist.staged_governor import StagedSeedPlan
+
+        user_seed = {
+            "params": {
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            }
+        }
+        staged_seed = {
+            "params": {
+                "r_cos": [[0.95]],
+                "z_sin": [[0.01]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            },
+            "source": "staged_governor",
+            "staged_governor": {"phase": "focus"},
+        }
+        mock_build_staged.return_value = StagedSeedPlan(
+            seeds=[staged_seed],
+            focus_hash="focus123",
+            partner_hash="partner123",
+            worst_constraint="mirror",
+        )
+
+        coordinator.world_model.recent_candidate_snapshots = MagicMock(
+            return_value=[{"design_hash": "x"}]
+        )
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed()])
+        coordinator._apply_seed_novelty_validity_gate = MagicMock(
+            side_effect=lambda seeds, **_kwargs: list(seeds)
+        )
+        coordinator._surrogate_rank_seeds = MagicMock(
+            return_value=[{**_valid_seed(), "surrogate_score": 1.0}]
+        )
+        coordinator._run_trajectory_aso = MagicMock(return_value=[])
+        coordinator._persist_telemetry = MagicMock()
+
+        coordinator.produce_candidates_aso(
+            cycle=2,
+            experiment_id=7,
+            eval_budget=3,
+            template=MagicMock(),
+            initial_seeds=[user_seed],
+        )
+
+        coordinator.world_model.recent_candidate_snapshots.assert_called_once_with(
+            experiment_id=7,
+            problem=coordinator.cfg.problem,
+            limit=coordinator.cfg.aso.staged_recent_limit,
+        )
+        mock_build_staged.assert_called_once()
+        args, kwargs = coordinator._prepare_seeds.call_args
+        merged = args[0]
+        assert isinstance(merged, list)
+        assert merged[0]["source"] == "staged_governor"
+        assert merged[1] == user_seed
+        assert kwargs["allow_fallbacks"] is True
+
     @patch("ai_scientist.coordinator.step_alm")
     @patch("ai_scientist.coordinator.create_alm_context")
     @patch("ai_scientist.coordinator.state_to_boundary_params")
@@ -629,7 +840,10 @@ class TestCoordinatorASO:
             OptimizationDirective,
         )
 
-        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed()])
+        coordinator._apply_seed_novelty_validity_gate = MagicMock(
+            side_effect=lambda seeds, **_kwargs: list(seeds)
+        )
         coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
         coordinator._get_problem = MagicMock(return_value=MagicMock())
         coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
@@ -676,3 +890,177 @@ class TestCoordinatorASO:
         assert supervise_kwargs["planner_intent"] == planner_intent
         assert coordinator.telemetry[0]["planner_intent"] == planner_intent
         assert coordinator.telemetry[0]["aso_action"] == "CONTINUE"
+        assert "worst_constraint_before" in coordinator.telemetry[0]
+        assert "worst_constraint_after" in coordinator.telemetry[0]
+        assert "chosen_operator" in coordinator.telemetry[0]
+        assert "parent_hashes" in coordinator.telemetry[0]
+        assert "bridge_flag" in coordinator.telemetry[0]
+        assert "feasibility_delta" in coordinator.telemetry[0]
+        assert "hv_delta" in coordinator.telemetry[0]
+
+    def test_produce_candidates_aso_uses_seed_specific_planner_intent(
+        self, coordinator
+    ):
+        seed = {
+            "params": {
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            },
+            "seed": 123,
+        }
+        cycle_intent = {
+            "primary_constraint_order": ["c1", "c2"],
+            "penalty_focus_indices": [0],
+        }
+        seed_intent = {
+            "primary_constraint_order": ["c3", "c1"],
+            "penalty_focus_indices": [2],
+        }
+        ranked_seed = {
+            **seed,
+            "planner_intent": seed_intent,
+            "surrogate_score": 0.9,
+        }
+
+        coordinator._prepare_seeds = MagicMock(return_value=[ranked_seed])
+        coordinator._surrogate_rank_seeds = MagicMock(return_value=[ranked_seed])
+        coordinator._run_trajectory_aso = MagicMock(return_value=[])
+        coordinator._persist_telemetry = MagicMock()
+
+        coordinator.produce_candidates_aso(
+            cycle=1,
+            experiment_id=42,
+            eval_budget=4,
+            template=MagicMock(),
+            initial_seeds=[seed],
+            planner_intent=cycle_intent,
+            planner_intents=[seed_intent],
+        )
+
+        call_kwargs = coordinator._run_trajectory_aso.call_args.kwargs
+        assert call_kwargs["planner_intent"] == seed_intent
+
+    def test_normalize_seed_entry_preserves_top_level_planner_intent(self, coordinator):
+        seed = {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+            "planner_intent": {
+                "primary_constraint_order": ["c3", "c1"],
+                "penalty_focus_indices": [2],
+            },
+        }
+
+        normalized = coordinator._normalize_seed_entry(seed, cycle=0)
+
+        assert normalized is not None
+        assert normalized["params"]["r_cos"] == [[1.0]]
+        assert normalized["planner_intent"] == seed["planner_intent"]
+        assert "planner_intent" not in normalized["params"]
+
+    def test_enqueue_seed_queue_requires_parent_hash_and_reason(self, coordinator):
+        queue: list[dict[str, object]] = []
+
+        coordinator._enqueue_seed_queue(
+            queue=queue,
+            new_items=[
+                {
+                    "params": _valid_seed()["params"],
+                    "estimated_feasibility": 0.1,
+                    "parent_feasibility": 0.2,
+                }
+            ],
+            max_size=10,
+            tie_epsilon=1e-6,
+        )
+        assert queue == []
+
+        coordinator._enqueue_seed_queue(
+            queue=queue,
+            new_items=[
+                {
+                    "params": _valid_seed(1.1)["params"],
+                    "lineage_parent_hashes": ["parent1"],
+                    "improvement_reason": "constraint_targeted_repair",
+                    "estimated_feasibility": 0.1,
+                    "parent_feasibility": 0.2,
+                }
+            ],
+            max_size=10,
+            tie_epsilon=1e-6,
+        )
+        assert len(queue) == 1
+
+    def test_select_runtime_ucb_arm_uses_eligible_history(self, coordinator):
+        coordinator.world_model.model_router_reward_eligible_history = MagicMock(
+            return_value=[
+                {
+                    "model_route": "codex-native",
+                    "reward": 0.8,
+                    "reward_components": {"operator_family": "staged_repair"},
+                },
+                {
+                    "model_route": "codex-native",
+                    "reward": 0.6,
+                    "reward_components": {"operator_family": "staged_repair"},
+                },
+                {
+                    "model_route": "baseline",
+                    "reward": 0.1,
+                    "reward_components": {"operator_family": "parent_group"},
+                },
+            ]
+        )
+
+        selected = coordinator._select_runtime_ucb_arm(
+            experiment_id=1,
+            problem="p3",
+            min_eligible_events=2,
+        )
+
+        assert selected is not None
+        assert selected["model_route"] == "codex-native"
+        assert selected["operator_family"] == "staged_repair"
+
+    def test_produce_candidates_aso_passes_leverage_context_to_parent_selector(
+        self, coordinator
+    ):
+        coordinator.world_model.recent_candidate_snapshots = MagicMock(
+            return_value=[
+                {
+                    "design_hash": "focus",
+                    "feasibility": 0.2,
+                    "constraint_margins": {"mirror": 0.3, "log10_qi": 0.1},
+                }
+            ]
+        )
+        coordinator.world_model.select_parent_group_performance_novelty = MagicMock(
+            return_value=[]
+        )
+        coordinator.world_model.model_router_reward_eligible_history = MagicMock(
+            return_value=[]
+        )
+        coordinator._prepare_seeds = MagicMock(return_value=[_valid_seed()])
+        coordinator._apply_seed_novelty_validity_gate = MagicMock(
+            side_effect=lambda seeds, **_kwargs: list(seeds)
+        )
+        coordinator._surrogate_rank_seeds = MagicMock(return_value=[_valid_seed()])
+        coordinator._run_trajectory_aso = MagicMock(return_value=[])
+        coordinator._persist_telemetry = MagicMock()
+
+        coordinator.produce_candidates_aso(
+            cycle=1,
+            experiment_id=1,
+            eval_budget=1,
+            template=MagicMock(),
+        )
+
+        kwargs = coordinator.world_model.select_parent_group_performance_novelty.call_args.kwargs
+        assert kwargs["worst_constraint"] == "mirror"
+        assert kwargs["focus_constraint_margin"] == pytest.approx(0.3)
+        assert kwargs["leverage_weight"] == pytest.approx(
+            coordinator.cfg.aso.parent_selection_leverage_weight
+        )

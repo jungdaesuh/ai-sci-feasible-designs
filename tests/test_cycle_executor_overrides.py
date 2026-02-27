@@ -269,6 +269,7 @@ def test_cycle_executor_passes_planner_intent_to_aso(MockCoordinator, mock_confi
         "penalty_focus_indices": [0, 2],
         "confidence": 0.6,
     }
+    planner_intents = [planner_intent]
 
     with patch(
         "ai_scientist.cycle_executor.tools.summarize_p3_candidates"
@@ -285,8 +286,211 @@ def test_cycle_executor_passes_planner_intent_to_aso(MockCoordinator, mock_confi
             git_sha="sha",
             constellaration_sha="sha",
             surrogate_model=MagicMock(),
+            suggested_params=[
+                {
+                    "r_cos": [[1.0]],
+                    "z_sin": [[0.0]],
+                    "n_field_periods": 1,
+                    "is_stellarator_symmetric": True,
+                }
+            ],
             planner_intent=planner_intent,
+            planner_intents=planner_intents,
         )
 
     call_kwargs = mock_coord.produce_candidates_aso.call_args.kwargs
     assert call_kwargs["planner_intent"] == planner_intent
+    assert call_kwargs["planner_intents"] == planner_intents
+
+
+def test_cycle_executor_strict_seed_policy_requires_agent_seed(mock_config):
+    config_with_aso = replace(
+        mock_config,
+        aso=replace(
+            mock_config.aso,
+            enabled=True,
+            seed_fallback_policy="forbid",
+        ),
+    )
+    mock_world_model = MagicMock(spec=memory.WorldModel)
+    mock_budget_controller = MagicMock()
+    mock_budget_controller.snapshot.return_value = MagicMock(
+        screen_evals_per_cycle=10,
+        promote_top_k=5,
+        max_high_fidelity_evals_per_cycle=5,
+    )
+    mock_fidelity_controller = MagicMock()
+
+    executor = CycleExecutor(
+        config=config_with_aso,
+        world_model=mock_world_model,
+        planner=MagicMock(),  # Agent mode
+        budget_controller=mock_budget_controller,
+        fidelity_controller=mock_fidelity_controller,
+    )
+
+    with pytest.raises(RuntimeError, match="requires at least one valid planner seed"):
+        executor.run_cycle(
+            cycle_index=0,
+            experiment_id=1,
+            governance_stage="s1",
+            git_sha="sha",
+            constellaration_sha="sha",
+            surrogate_model=MagicMock(),
+            suggested_params=None,
+        )
+
+
+@patch("ai_scientist.cycle_executor._bootstrap_strict_aso_seed_params")
+@patch("ai_scientist.cycle_executor.Coordinator")
+def test_cycle_executor_strict_seed_policy_bootstraps_deterministic_aso(
+    MockCoordinator, mock_bootstrap, mock_config
+):
+    config_with_aso = replace(
+        mock_config,
+        aso=replace(
+            mock_config.aso,
+            enabled=True,
+            seed_fallback_policy="forbid",
+        ),
+    )
+    mock_world_model = MagicMock(spec=memory.WorldModel)
+    mock_budget_controller = MagicMock()
+    mock_budget_controller.snapshot.return_value = MagicMock(
+        screen_evals_per_cycle=10,
+        promote_top_k=5,
+        max_high_fidelity_evals_per_cycle=5,
+    )
+    mock_fidelity_controller = MagicMock()
+    mock_coord = MockCoordinator.return_value
+    mock_coord.produce_candidates_aso.return_value = []
+
+    seeded = [
+        {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        }
+    ]
+    mock_bootstrap.return_value = seeded
+
+    executor = CycleExecutor(
+        config=config_with_aso,
+        world_model=mock_world_model,
+        planner=None,  # Deterministic mode
+        budget_controller=mock_budget_controller,
+        fidelity_controller=mock_fidelity_controller,
+    )
+
+    with patch("ai_scientist.cycle_executor.tools.summarize_p3_candidates") as mock_sum:
+        summary = MagicMock()
+        summary.feasible_count = 0
+        summary.hv_score = 0.0
+        mock_sum.return_value = summary
+
+        executor.run_cycle(
+            cycle_index=0,
+            experiment_id=1,
+            governance_stage="s1",
+            git_sha="sha",
+            constellaration_sha="sha",
+            surrogate_model=MagicMock(),
+            suggested_params=None,
+        )
+
+    mock_bootstrap.assert_called_once()
+    call_kwargs = mock_coord.produce_candidates_aso.call_args.kwargs
+    assert call_kwargs["initial_seeds"] == seeded
+
+
+def test_bootstrap_strict_aso_seed_params_resolves_repo_relative_seed_path(
+    mock_config, monkeypatch, tmp_path
+):
+    config_with_problem = replace(mock_config, problem="p1")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "ai_scientist.cycle_executor._canonicalize_agent_seed_params",
+        lambda _template, payload: {"loaded_seed": bool(payload)},
+    )
+
+    from ai_scientist.cycle_executor import _bootstrap_strict_aso_seed_params
+
+    seeds = _bootstrap_strict_aso_seed_params(config_with_problem, cycle_index=0)
+
+    assert seeds == [{"loaded_seed": True}]
+
+
+@patch("ai_scientist.cycle_executor._bootstrap_strict_aso_seed_params")
+@patch("ai_scientist.cycle_executor.Coordinator")
+def test_cycle_executor_fair_lockstep_seed_bank_hash(
+    MockCoordinator, mock_bootstrap, mock_config
+):
+    config_with_aso = replace(
+        mock_config,
+        aso=replace(
+            mock_config.aso,
+            enabled=True,
+            fair_ab_lockstep_seed_bank=True,
+        ),
+    )
+    mock_world_model = MagicMock(spec=memory.WorldModel)
+    mock_budget_controller = MagicMock()
+    mock_budget_controller.snapshot.return_value = MagicMock(
+        screen_evals_per_cycle=10,
+        promote_top_k=5,
+        max_high_fidelity_evals_per_cycle=5,
+    )
+    mock_fidelity_controller = MagicMock()
+    mock_coord = MockCoordinator.return_value
+    mock_coord.produce_candidates_aso.return_value = []
+
+    mock_bootstrap.return_value = [
+        {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        }
+    ]
+
+    executor = CycleExecutor(
+        config=config_with_aso,
+        world_model=mock_world_model,
+        planner=MagicMock(),
+        budget_controller=mock_budget_controller,
+        fidelity_controller=mock_fidelity_controller,
+    )
+
+    with patch("ai_scientist.cycle_executor.tools.summarize_p3_candidates") as mock_sum:
+        summary = MagicMock()
+        summary.feasible_count = 0
+        summary.hv_score = 0.0
+        mock_sum.return_value = summary
+
+        executor.run_cycle(
+            cycle_index=0,
+            experiment_id=1,
+            governance_stage="s1",
+            git_sha="sha",
+            constellaration_sha="sha",
+            surrogate_model=MagicMock(),
+            suggested_params=[
+                {
+                    "r_cos": [[1.1]],
+                    "z_sin": [[0.0]],
+                    "n_field_periods": 1,
+                    "is_stellarator_symmetric": True,
+                }
+            ],
+        )
+
+    initial_seeds = mock_coord.produce_candidates_aso.call_args.kwargs["initial_seeds"]
+    assert len(initial_seeds) == 2
+    assert initial_seeds[0]["source"] == "lockstep_seed"
+    assert initial_seeds[1]["source"] == "planner_extra"
+    hash_values = {
+        str(seed.get("fairness_seed_bank_hash", "")) for seed in initial_seeds
+    }
+    assert len(hash_values) == 1
+    assert next(iter(hash_values)) != ""

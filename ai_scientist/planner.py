@@ -20,9 +20,6 @@ from ai_scientist import memory, model_provider, rag, tools, tools_api
 from ai_scientist.constraints import get_constraint_names
 from ai_scientist.config import ASOConfig
 
-_DEFAULT_EXPERIENCE_INJECTION_PROBABILITY = 0.5
-_DEFAULT_AGENT_SEED_CANDIDATE_COUNT = 3
-
 
 class DirectiveAction(Enum):
     """Enumerated actions for type safety."""
@@ -283,6 +280,7 @@ class PlanningOutcome:
         suggested_params_list: Sequence[Mapping[str, Any]] | None = None,
         config_overrides: Mapping[str, Any] | None = None,
         planner_intent: Mapping[str, Any] | None = None,
+        planner_intent_list: Sequence[Mapping[str, Any] | None] | None = None,
     ) -> None:
         self.context = context
         self.evaluation_summary = evaluation_summary
@@ -295,6 +293,9 @@ class PlanningOutcome:
         )
         self.config_overrides = config_overrides
         self.planner_intent = planner_intent
+        self.planner_intent_list = (
+            list(planner_intent_list) if planner_intent_list else None
+        )
 
 
 def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | None:
@@ -376,6 +377,7 @@ class PlanningAgent:
         config: ai_config.ModelConfig | None = None,
         rag_index: Path | str | None = None,
         world_model: memory.WorldModel | None = None,
+        random_seed: int = 0,
     ) -> None:
         self.config = config or ai_config.load_model_config()
         self.planning_gate = agent_module.provision_model_tier(
@@ -389,6 +391,7 @@ class PlanningAgent:
         )
         self.rag_index = Path(rag_index or rag.DEFAULT_INDEX_PATH)
         self.world_model = world_model
+        self.random_seed = int(random_seed)
         self.last_context: Mapping[str, Any] | None = None
         self.heuristic: HeuristicSupervisor | None = None
 
@@ -654,13 +657,69 @@ class PlanningAgent:
         cycle_number: int,
         random_seed: int,
         experiment_id: int | None,
-        probability: float = _DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+        probability: float,
     ) -> bool:
         return self._deterministic_roll(
             cycle_number=cycle_number,
             random_seed=random_seed,
             experiment_id=experiment_id,
         ) < max(0.0, min(1.0, probability))
+
+    def _branch_experience_probability(
+        self,
+        *,
+        aso_config: ASOConfig,
+        stagnation_steps: int,
+    ) -> float:
+        base_probability = max(
+            0.0, min(1.0, aso_config.experience_injection_probability)
+        )
+        decay = max(0.0, float(aso_config.experience_stagnation_decay))
+        multiplier = max(0.0, 1.0 - (decay * max(0, int(stagnation_steps))))
+        return float(base_probability * multiplier)
+
+    def _sample_branch_experience(
+        self,
+        *,
+        cycle: int,
+        diagnostics: OptimizerDiagnostics,
+        aso_config: ASOConfig,
+    ) -> tuple[float, bool, list[Mapping[str, Any]]]:
+        probability = self._branch_experience_probability(
+            aso_config=aso_config,
+            stagnation_steps=diagnostics.steps_since_improvement,
+        )
+        inject = self._should_inject_experience(
+            cycle_number=cycle,
+            random_seed=self.random_seed + diagnostics.trajectory_id,
+            experiment_id=None,
+            probability=probability,
+        )
+        if not inject:
+            return probability, False, []
+        context = self.last_context if isinstance(self.last_context, Mapping) else {}
+        snippets: list[Mapping[str, Any]] = []
+        for key, label in (
+            ("recent_successes", "success"),
+            ("recent_near_successes", "near"),
+            ("recent_failures", "failure"),
+        ):
+            entries = context.get(key)
+            if not isinstance(entries, list) or not entries:
+                continue
+            first = entries[0]
+            if not isinstance(first, Mapping):
+                continue
+            snippets.append(
+                {
+                    "bucket": label,
+                    "design_hash": first.get("design_hash"),
+                    "feasibility": first.get("feasibility"),
+                    "objective": first.get("objective"),
+                    "worst_constraint": first.get("worst_constraint"),
+                }
+            )
+        return probability, True, snippets
 
     def _build_experience_memo(
         self,
@@ -699,6 +758,8 @@ class PlanningAgent:
     ) -> str:
         constraint_names = get_constraint_names(cfg.problem, for_alm=True)
         max_penalty_index = len(constraint_names) - 1
+        allow_seed_fallbacks = cfg.aso.seed_fallback_policy != "forbid"
+        k_candidates = max(1, int(cfg.aso.offspring_per_parent))
         gate_prompt = str(
             getattr(self.planning_gate, "system_prompt", "") or ""
         ).strip()
@@ -712,24 +773,38 @@ class PlanningAgent:
             "- Reuse history: leverage recent_successes, recent_near_successes, and recent_failures when present.\n"
             "- Respect deterministic downstream selection; return multiple candidates only when they are diverse.\n"
         )
-        protocol_prompt = (
-            "PROTOCOL:\n"
-            "1. Analyze cycle context, especially experience_memo, scratchpad_summary, feedback_adapter, and rag_snippets.\n"
-            "2. You may call tools to test hypotheses (retrieve_rag/evaluate/propose/recombine).\n"
-            '3. Tool call format: {"tool":"<name>","arguments":{...}}.\n'
-            '4. Finalization format: {"suggested_params_list":[{...},{...}], "config_overrides":{...}, "planner_intent":{...}}.\n'
-            "   - Prefer 3 candidates (k=3) and keep 1<=k<=3.\n"
-            '   - Backward-compatible alternative accepted: {"suggested_params":{...}}.\n'
-            "   - You MUST provide either valid suggested_params(_list) OR seed_fallback='template'.\n"
-            "   - config_overrides is optional and must be a JSON object when present.\n"
-            "   - planner_intent is optional and must be a JSON object when present.\n"
-            "   - planner_intent schema keys: primary_constraint_order, target_move_family, forbidden_moves, penalty_focus_indices, restart_policy, confidence.\n"
-            f"   - planner_intent.primary_constraint_order uses ALM names: {constraint_names}.\n"
-            f"   - planner_intent.penalty_focus_indices must be integer indices in [0, {max_penalty_index}].\n"
-            "5. seed_fallback='template' is allowed if you cannot produce valid coefficients.\n"
-            "If no valid finalization payload is returned within turn budget, runtime falls back to template seed.\n"
-            "Respond with JSON only."
-        )
+        protocol_lines = [
+            "PROTOCOL:",
+            "1. Analyze cycle context, especially experience_memo, scratchpad_summary, ancestor_chains, parent_group, nearest_case_deltas, feedback_adapter, and rag_snippets.",
+            "2. You may call tools to test hypotheses (retrieve_rag/evaluate/propose/recombine).",
+            '3. Tool call format: {"tool":"<name>","arguments":{...}}.',
+            '4. Finalization format: {"suggested_params_list":[{...},{...}], "planner_intent_list":[{...},{...}], "config_overrides":{...}, "planner_intent":{...}}.',
+            f"   - Prefer {k_candidates} candidates and keep 1<=k<={k_candidates}.",
+            '   - Backward-compatible alternative accepted: {"suggested_params":{...}}.',
+            "   - config_overrides is optional and must be a JSON object when present.",
+            "   - planner_intent is optional and must be a JSON object when present.",
+            "   - planner_intent_list is optional; when provided with suggested_params_list, it must align by index and length.",
+            "   - planner_intent schema keys: primary_constraint_order, target_move_family, forbidden_moves, penalty_focus_indices, restart_policy, confidence.",
+            f"   - planner_intent.primary_constraint_order uses ALM names: {constraint_names}.",
+            f"   - planner_intent.penalty_focus_indices must be integer indices in [0, {max_penalty_index}].",
+        ]
+        if allow_seed_fallbacks:
+            protocol_lines.extend(
+                [
+                    "   - You MUST provide either valid suggested_params(_list) OR seed_fallback='template'.",
+                    "5. seed_fallback='template' is allowed if you cannot produce valid coefficients.",
+                    "If no valid finalization payload is returned within turn budget, runtime falls back to template seed.",
+                ]
+            )
+        else:
+            protocol_lines.extend(
+                [
+                    "   - You MUST provide valid suggested_params(_list); seed_fallback is disabled.",
+                    "5. Runtime does not apply template fallback for seeds in this run.",
+                ]
+            )
+        protocol_lines.append("Respond with JSON only.")
+        protocol_prompt = "\n".join(protocol_lines)
         sections = [
             f"You are the Planning Agent for the AI Scientist (cycle {cycle_number}).",
             gate_prompt,
@@ -760,8 +835,11 @@ class PlanningAgent:
         feedback_adapter: Mapping[str, Any] | None = None,
         experience_memo: str | None = None,
         experience_injected: bool = True,
-        experience_injection_probability: float = _DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+        experience_injection_probability: float,
         scratchpad_summary: Mapping[str, Any] | None = None,
+        ancestor_chains: Sequence[Mapping[str, Any]] | None = None,
+        parent_group: Sequence[Mapping[str, Any]] | None = None,
+        nearest_case_deltas: Sequence[Mapping[str, Any]] | None = None,
     ) -> Mapping[str, Any]:
         context = {
             "cycle_index": cycle_index + 1,
@@ -784,6 +862,9 @@ class PlanningAgent:
             "experience_injected": experience_injected,
             "experience_injection_probability": experience_injection_probability,
             "scratchpad_summary": dict(scratchpad_summary or {}),
+            "ancestor_chains": list(ancestor_chains or []),
+            "parent_group": list(parent_group or []),
+            "nearest_case_deltas": list(nearest_case_deltas or []),
             "feedback_adapter": dict(feedback_adapter or {}),
             "toolset": list(self.planning_gate.allowed_tools),
         }
@@ -825,9 +906,7 @@ class PlanningAgent:
 
         max_index = len(allowed_constraint_names) - 1
         out_of_range = [
-            idx
-            for idx in intent.penalty_focus_indices
-            if idx < 0 or idx > max_index
+            idx for idx in intent.penalty_focus_indices if idx < 0 or idx > max_index
         ]
         if out_of_range:
             raise ValueError(
@@ -841,6 +920,8 @@ class PlanningAgent:
         action: Mapping[str, Any],
         *,
         template_params: Mapping[str, Any],
+        allow_template_fallback: bool,
+        max_candidates: int,
     ) -> tuple[list[Mapping[str, Any]] | None, str | None]:
         def _validate_seed(seed_payload: Mapping[str, Any]) -> Mapping[str, Any]:
             self.make_boundary(seed_payload)
@@ -853,7 +934,11 @@ class PlanningAgent:
 
         fallback_raw = action.get("seed_fallback")
         fallback = str(fallback_raw).strip().lower() if fallback_raw is not None else ""
-        use_template_fallback = fallback == "template"
+        if fallback and not allow_template_fallback:
+            raise ValueError(
+                "seed_fallback is disabled by aso.seed_fallback_policy='forbid'."
+            )
+        use_template_fallback = allow_template_fallback and fallback == "template"
 
         raw_suggested_list = action.get("suggested_params_list")
         if raw_suggested_list is not None:
@@ -866,9 +951,7 @@ class PlanningAgent:
                     return _template_seed(), fallback
                 raise ValueError("suggested_params_list cannot be empty.")
             resolved_list: list[Mapping[str, Any]] = []
-            for idx, raw_seed in enumerate(
-                raw_suggested_list[:_DEFAULT_AGENT_SEED_CANDIDATE_COUNT]
-            ):
+            for idx, raw_seed in enumerate(raw_suggested_list[:max_candidates]):
                 if not isinstance(raw_seed, Mapping):
                     if use_template_fallback:
                         return _template_seed(), fallback
@@ -900,6 +983,41 @@ class PlanningAgent:
         if use_template_fallback:
             return _template_seed(), fallback
         return None, None
+
+    def _resolve_intents_for_final_action(
+        self,
+        action: Mapping[str, Any],
+        *,
+        problem: str,
+        seed_count: int,
+    ) -> tuple[PlannerIntent | None, list[PlannerIntent | None] | None]:
+        cycle_level_intent = self._parse_planner_intent(
+            action.get("planner_intent"),
+            problem=problem,
+        )
+        raw_intent_list = action.get("planner_intent_list")
+        if raw_intent_list is not None:
+            if not isinstance(raw_intent_list, list):
+                raise ValueError("planner_intent_list must be a JSON array.")
+            if len(raw_intent_list) != seed_count:
+                raise ValueError(
+                    "planner_intent_list must have the same length as suggested_params_list."
+                )
+            parsed_list: list[PlannerIntent | None] = []
+            for idx, raw_intent in enumerate(raw_intent_list):
+                if raw_intent is None:
+                    parsed_list.append(None)
+                    continue
+                if not isinstance(raw_intent, Mapping):
+                    raise ValueError(
+                        f"planner_intent_list[{idx}] must be a JSON object or null."
+                    )
+                parsed_list.append(
+                    self._parse_planner_intent(raw_intent, problem=problem)
+                )
+            return cycle_level_intent, parsed_list
+
+        return cycle_level_intent, None
 
     def plan_cycle(
         self,
@@ -951,10 +1069,13 @@ class PlanningAgent:
             cycle_number=cycle_number,
             random_seed=cfg.random_seed,
             experiment_id=experiment_id,
-            probability=_DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+            probability=cfg.aso.experience_injection_probability,
         )
         experience_memo = ""
         scratchpad_summary: Mapping[str, Any] | None = None
+        ancestor_chains: Sequence[Mapping[str, Any]] | None = None
+        parent_group: Sequence[Mapping[str, Any]] | None = None
+        nearest_case_deltas: Sequence[Mapping[str, Any]] | None = None
 
         if self.world_model and experiment_id is not None:
             pg = self.world_model.to_networkx(experiment_id)
@@ -1006,11 +1127,46 @@ class PlanningAgent:
                     recent_near_successes=(),
                     recent_failures=failure_cases,
                 )
-            if cycle_number > 1 and hasattr(self.world_model, "scratchpad_cycle_summary"):
+            if cycle_number > 1 and hasattr(
+                self.world_model, "scratchpad_cycle_summary"
+            ):
                 scratchpad_summary = self.world_model.scratchpad_cycle_summary(
                     experiment_id=experiment_id,
                     cycle=cycle_number - 1,
                     limit=20,
+                )
+            if hasattr(self.world_model, "ancestor_chains"):
+                focus_hashes = [
+                    str(item.get("design_hash", ""))
+                    for item in (
+                        list(success_cases)
+                        + list(near_success_cases)
+                        + list(failure_cases)
+                    )
+                    if item.get("design_hash")
+                ]
+                if focus_hashes:
+                    ancestor_chains = self.world_model.ancestor_chains(
+                        experiment_id=experiment_id,
+                        problem=cfg.problem,
+                        design_hashes=focus_hashes[:6],
+                        max_depth=3,
+                    )
+            if hasattr(self.world_model, "select_parent_group_performance_novelty"):
+                parent_group = self.world_model.select_parent_group_performance_novelty(
+                    experiment_id=experiment_id,
+                    problem=cfg.problem,
+                    group_size=cfg.aso.parent_group_size,
+                    limit=cfg.aso.staged_recent_limit,
+                    near_feasibility_threshold=cfg.aso.staged_near_feasibility_threshold,
+                )
+            if hasattr(self.world_model, "nearest_case_deltas"):
+                nearest_case_deltas = self.world_model.nearest_case_deltas(
+                    experiment_id=experiment_id,
+                    problem=cfg.problem,
+                    seed_params=params,
+                    limit=max(2, cfg.aso.offspring_per_parent),
+                    near_feasibility_threshold=cfg.aso.staged_near_feasibility_threshold,
                 )
 
         context = self._build_context(
@@ -1029,17 +1185,22 @@ class PlanningAgent:
             feedback_adapter=feedback_adapter,
             experience_memo=experience_memo,
             experience_injected=experience_injected,
-            experience_injection_probability=_DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+            experience_injection_probability=cfg.aso.experience_injection_probability,
             scratchpad_summary=scratchpad_summary,
+            ancestor_chains=ancestor_chains,
+            parent_group=parent_group,
+            nearest_case_deltas=nearest_case_deltas,
         )
 
         suggested_params = None
         suggested_params_list: list[Mapping[str, Any]] | None = None
         config_overrides = None
         planner_intent: PlannerIntent | None = None
+        planner_intent_list: list[PlannerIntent | None] | None = None
 
         if self.config.agent_gates:
             provider = self.config.get_provider()
+            allow_seed_fallbacks = cfg.aso.seed_fallback_policy != "forbid"
 
             tools_schemas = tools_api.list_tool_schemas()
             available_tools = [
@@ -1114,6 +1275,7 @@ class PlanningAgent:
                         "suggested_params_list" in action
                         or "suggested_params" in action
                         or "config_overrides" in action
+                        or "planner_intent_list" in action
                         or "planner_intent" in action
                         or "seed_fallback" in action
                     ):
@@ -1130,24 +1292,14 @@ class PlanningAgent:
                             continue
 
                         try:
-                            planner_intent = self._parse_planner_intent(
-                                action.get("planner_intent"),
-                                problem=cfg.problem,
-                            )
-                        except Exception as intent_exc:
-                            messages.append(
-                                {
-                                    "role": "user",
-                                    "content": f"Error: Invalid planner_intent payload. {intent_exc}",
-                                }
-                            )
-                            continue
-
-                        try:
                             resolved_seeds, fallback_used = (
                                 self._resolve_seeds_for_final_action(
                                     action,
                                     template_params=params,
+                                    allow_template_fallback=allow_seed_fallbacks,
+                                    max_candidates=max(
+                                        1, int(cfg.aso.offspring_per_parent)
+                                    ),
                                 )
                             )
                         except Exception as seed_exc:
@@ -1160,10 +1312,32 @@ class PlanningAgent:
                             continue
 
                         if resolved_seeds is None:
+                            requirements_message = (
+                                "Error: Finalization requires valid suggested_params or seed_fallback ('template')."
+                                if allow_seed_fallbacks
+                                else "Error: Finalization requires valid suggested_params; seed_fallback is disabled."
+                            )
                             messages.append(
                                 {
                                     "role": "user",
-                                    "content": "Error: Finalization requires valid suggested_params or seed_fallback ('template').",
+                                    "content": requirements_message,
+                                }
+                            )
+                            continue
+
+                        try:
+                            planner_intent, planner_intent_list = (
+                                self._resolve_intents_for_final_action(
+                                    action,
+                                    problem=cfg.problem,
+                                    seed_count=len(resolved_seeds),
+                                )
+                            )
+                        except Exception as intent_exc:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": f"Error: Invalid planner_intent payload. {intent_exc}",
                                 }
                             )
                             continue
@@ -1217,7 +1391,11 @@ class PlanningAgent:
                         messages.append(
                             {
                                 "role": "user",
-                                "content": "Error: No supported action found. Provide a tool call or finalize with suggested_params/seed_fallback.",
+                                "content": (
+                                    "Error: No supported action found. Provide a tool call or finalize with suggested_params/seed_fallback."
+                                    if allow_seed_fallbacks
+                                    else "Error: No supported action found. Provide a tool call or finalize with suggested_params."
+                                ),
                             }
                         )
 
@@ -1226,6 +1404,10 @@ class PlanningAgent:
                     break
 
         if self.config.agent_gates and suggested_params is None:
+            if cfg.aso.seed_fallback_policy == "forbid":
+                raise RuntimeError(
+                    "Planner did not return a valid seed and aso.seed_fallback_policy='forbid' disables template fallback."
+                )
             fallback_seed = copy.deepcopy(dict(params))
             self.make_boundary(fallback_seed)
             suggested_params = fallback_seed
@@ -1246,6 +1428,14 @@ class PlanningAgent:
             planner_intent=(
                 planner_intent.model_dump(mode="json")
                 if planner_intent is not None
+                else None
+            ),
+            planner_intent_list=(
+                [
+                    intent.model_dump(mode="json") if intent is not None else None
+                    for intent in planner_intent_list
+                ]
+                if planner_intent_list is not None
                 else None
             ),
         )
@@ -1269,6 +1459,13 @@ class PlanningAgent:
         can make much better decisions than with proxy diagnostics.
         """
         heuristic = self._ensure_heuristic(aso_config)
+        branch_experience_probability, branch_experience_injected, branch_experience = (
+            self._sample_branch_experience(
+                cycle=cycle,
+                diagnostics=diagnostics,
+                aso_config=aso_config,
+            )
+        )
 
         # Tier 1: Check if LLM needed
         if not diagnostics.requires_llm_supervision(aso_config):
@@ -1282,6 +1479,9 @@ class PlanningAgent:
                     cycle,
                     aso_config,
                     planner_intent=planner_intent,
+                    branch_experience_probability=branch_experience_probability,
+                    branch_experience_injected=branch_experience_injected,
+                    branch_experience=branch_experience,
                 )
             except Exception as e:
                 print(f"[Planner] LLM supervision failed: {e}, using heuristic")
@@ -1292,6 +1492,9 @@ class PlanningAgent:
                 cycle,
                 aso_config,
                 planner_intent=planner_intent,
+                branch_experience_probability=branch_experience_probability,
+                branch_experience_injected=branch_experience_injected,
+                branch_experience=branch_experience,
             )
 
     def _llm_supervise(
@@ -1300,6 +1503,9 @@ class PlanningAgent:
         cycle: int,
         aso_config: ASOConfig,
         planner_intent: Mapping[str, Any] | None = None,
+        branch_experience_probability: float = 0.0,
+        branch_experience_injected: bool = False,
+        branch_experience: Sequence[Mapping[str, Any]] | None = None,
     ) -> OptimizationDirective:
         """LLM-based supervision with real ALM state context."""
         # Retrieve relevant context if stagnating
@@ -1315,6 +1521,9 @@ class PlanningAgent:
             rag_context,
             diagnostics,
             planner_intent=planner_intent,
+            branch_experience_probability=branch_experience_probability,
+            branch_experience_injected=branch_experience_injected,
+            branch_experience=branch_experience,
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1364,6 +1573,9 @@ class PlanningAgent:
         rag_context: list,
         diagnostics: OptimizerDiagnostics,
         planner_intent: Mapping[str, Any] | None = None,
+        branch_experience_probability: float = 0.0,
+        branch_experience_injected: bool = False,
+        branch_experience: Sequence[Mapping[str, Any]] | None = None,
     ) -> str:
         rag_section = ""
         if rag_context:
@@ -1376,6 +1588,16 @@ class PlanningAgent:
                 "\nPlanner intent prior (SOFT PRIOR):\n"
                 f"{json.dumps(planner_intent, indent=2)}\n"
                 "Treat planner intent as guidance. ALM diagnostics are hard truth."
+            )
+        branch_experience_section = (
+            "\nBranch experience injection: disabled for this branch."
+        )
+        if branch_experience_injected and branch_experience:
+            branch_experience_section = (
+                "\nBranch experience injection:\n"
+                f"- probability={branch_experience_probability:.3f}\n"
+                f"- snippets={json.dumps(list(branch_experience), indent=2)}\n"
+                "Use these as soft priors only when consistent with ALM diagnostics."
             )
 
         constraint_rows = [
@@ -1429,6 +1651,7 @@ POLICY (feasibility-first, bounded edits):
 - If multiplier is high while violation stays high, mark that constraint as likely bottleneck in reasoning.
 - If planner intent conflicts with diagnostics, override it and include override_reason.
 {intent_section}
+{branch_experience_section}
 {rag_section}
 
 Respond with ONLY valid JSON."""

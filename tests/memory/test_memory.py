@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from ai_scientist import memory
+from ai_scientist.staged_governor import build_staged_seed_plan_from_snapshots
 
 
 def test_world_model_records_cycle(tmp_path):
@@ -837,6 +838,313 @@ def test_recent_experience_pack_balances_success_near_failure(tmp_path):
         assert len(adapter["recent_effective_deltas"]) >= 1
 
 
+def test_recent_candidate_snapshots_support_flat_metrics_for_staged_governor(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+
+        def _log_snapshot_candidate(
+            *,
+            design_hash: str,
+            seed: int,
+            r00: float,
+            objective: float,
+            feasibility: float,
+            mirror: float,
+            log10_qi: float,
+            constraint_margins: dict[str, float],
+        ) -> None:
+            wm.log_candidate(
+                experiment_id=experiment_id,
+                problem="p3",
+                params={"r_cos": [[r00]], "z_sin": [[0.0]]},
+                seed=seed,
+                status="screen",
+                evaluation={
+                    "stage": "p3",
+                    "objective": objective,
+                    "feasibility": feasibility,
+                    "metrics": {"mirror": mirror, "log10_qi": log10_qi},
+                    "constraint_margins": constraint_margins,
+                },
+                design_hash=design_hash,
+            )
+
+        _log_snapshot_candidate(
+            design_hash="focus",
+            seed=1,
+            r00=1.0,
+            objective=5.0,
+            feasibility=0.09,
+            mirror=0.30,
+            log10_qi=-3.2,
+            constraint_margins={"mirror": 0.12, "log10_qi": 0.02},
+        )
+        _log_snapshot_candidate(
+            design_hash="metric-partner",
+            seed=2,
+            r00=0.98,
+            objective=1.0,
+            feasibility=0.0,
+            mirror=0.24,
+            log10_qi=-3.7,
+            constraint_margins={},
+        )
+        _log_snapshot_candidate(
+            design_hash="objective-fallback",
+            seed=3,
+            r00=1.1,
+            objective=9.0,
+            feasibility=0.0,
+            mirror=0.60,
+            log10_qi=-3.9,
+            constraint_margins={},
+        )
+
+        snapshots = wm.recent_candidate_snapshots(experiment_id, "p3", limit=8)
+        plan = build_staged_seed_plan_from_snapshots(
+            snapshots=snapshots,
+            problem="p3",
+            near_feasibility_threshold=0.25,
+            max_repair_candidates=3,
+            bridge_blend_t=0.86,
+        )
+
+        assert plan is not None
+        assert plan.focus_hash == "focus"
+        assert plan.worst_constraint == "mirror"
+        assert plan.partner_hash == "metric-partner"
+
+
+def test_recent_candidate_snapshots_ignore_non_numeric_constraint_margins(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=1,
+            status="screen",
+            evaluation={
+                "stage": "p3",
+                "objective": 2.0,
+                "feasibility": 0.2,
+                "metrics": {"mirror": 0.3},
+                "constraint_margins": {
+                    "mirror": None,
+                    "qi": "bad",
+                    "flux": 0.04,
+                    "flag": True,
+                    "negative": -0.2,
+                },
+            },
+            design_hash="mixed-margins",
+        )
+
+        snapshots = wm.recent_candidate_snapshots(experiment_id, "p3", limit=5)
+        assert len(snapshots) == 1
+        assert snapshots[0]["constraint_margins"] == {"flux": 0.04}
+
+
+def test_ancestor_chains_collects_parent_lineage(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+
+        def _log_chain(
+            *,
+            design_hash: str,
+            parent_hashes: list[str],
+            feasibility: float,
+            objective: float,
+            worst_name: str | None = None,
+            worst_value: float = 0.0,
+        ) -> None:
+            margins = {}
+            if worst_name is not None:
+                margins[worst_name] = worst_value
+            wm.log_candidate(
+                experiment_id=experiment_id,
+                problem="p3",
+                params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+                seed=1,
+                status="screen",
+                evaluation={
+                    "stage": "screen",
+                    "objective": objective,
+                    "feasibility": feasibility,
+                    "metrics": {"aspect_ratio": 8.0},
+                    "constraint_margins": margins,
+                },
+                design_hash=design_hash,
+                lineage_parent_hashes=parent_hashes,
+            )
+
+        _log_chain(
+            design_hash="grandparent",
+            parent_hashes=[],
+            feasibility=0.4,
+            objective=2.0,
+            worst_name="mirror",
+            worst_value=0.2,
+        )
+        _log_chain(
+            design_hash="parent",
+            parent_hashes=["grandparent"],
+            feasibility=0.2,
+            objective=3.0,
+            worst_name="log10_qi",
+            worst_value=0.1,
+        )
+        _log_chain(
+            design_hash="child",
+            parent_hashes=["parent"],
+            feasibility=0.05,
+            objective=4.0,
+            worst_name="mirror",
+            worst_value=0.03,
+        )
+
+        chains = wm.ancestor_chains(
+            experiment_id=experiment_id,
+            problem="p3",
+            design_hashes=["child"],
+            max_depth=3,
+        )
+
+        assert len(chains) == 1
+        assert chains[0]["target_design_hash"] == "child"
+        ancestors = chains[0]["ancestors"]
+        assert ancestors[0]["design_hash"] == "parent"
+        assert ancestors[0]["depth"] == 1
+        assert ancestors[1]["design_hash"] == "grandparent"
+        assert ancestors[1]["depth"] == 2
+
+
+def test_ancestor_chains_ignores_non_numeric_constraint_margins(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=1,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 3.0,
+                "feasibility": 0.1,
+                "metrics": {"aspect_ratio": 8.0},
+                "constraint_margins": {
+                    "bool_margin": True,
+                    "string_margin": "0.5",
+                    "valid_margin": 0.03,
+                },
+            },
+            design_hash="parent",
+            lineage_parent_hashes=[],
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=2,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 3.5,
+                "feasibility": 0.05,
+                "metrics": {"aspect_ratio": 8.1},
+                "constraint_margins": {},
+            },
+            design_hash="child",
+            lineage_parent_hashes=["parent"],
+        )
+
+        chains = wm.ancestor_chains(
+            experiment_id=experiment_id,
+            problem="p3",
+            design_hashes=["child"],
+            max_depth=1,
+        )
+
+        assert len(chains) == 1
+        assert chains[0]["target_design_hash"] == "child"
+        assert len(chains[0]["ancestors"]) == 1
+        assert chains[0]["ancestors"][0]["worst_constraint"] == "valid_margin"
+        assert chains[0]["ancestors"][0]["worst_constraint_violation"] == 0.03
+
+
+def test_to_networkx_materializes_lineage_parent_edges(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=1,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 2.0,
+                "feasibility": 0.2,
+                "metrics": {},
+                "constraint_margins": {},
+            },
+            design_hash="p0",
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=2,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 3.0,
+                "feasibility": 0.1,
+                "metrics": {},
+                "constraint_margins": {},
+            },
+            design_hash="c0",
+            lineage_parent_hashes=["p0"],
+        )
+        wm._conn.execute(
+            """
+            UPDATE candidates
+            SET lineage_parent_hashes_json = ?
+            WHERE experiment_id = ? AND design_hash = ?
+            """,
+            ('[null, "", "null", "p0"]', experiment_id, "c0"),
+        )
+        wm._conn.commit()
+
+        graph = wm.to_networkx(experiment_id)
+        lineage_edges = [
+            (src, dst, attrs)
+            for src, dst, attrs in graph.edges
+            if attrs.get("relation") == "lineage_parent_of"
+        ]
+        assert len(lineage_edges) == 1
+        assert lineage_edges[0][0].startswith("candidate:")
+        assert lineage_edges[0][1].startswith("candidate:")
+
+        chains = wm.ancestor_chains(
+            experiment_id=experiment_id,
+            problem="p3",
+            design_hashes=["c0"],
+            max_depth=2,
+        )
+        assert len(chains[0]["ancestors"]) == 1
+        assert chains[0]["ancestors"][0]["design_hash"] == "p0"
+
+
 def test_scratchpad_event_persistence_and_summary(tmp_path):
     db_path = tmp_path / "world.db"
     with memory.WorldModel(db_path) as wm:
@@ -871,3 +1179,202 @@ def test_scratchpad_event_persistence_and_summary(tmp_path):
         assert summary["action_counts"]["RESTART"] == 1
         assert summary["events"][0]["step"] == 1
         assert summary["events"][1]["intent_agreement"] == "overridden"
+
+
+def test_select_parent_group_performance_novelty(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p1"}, "deadbeef")
+
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p1",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=1,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 1.0,
+                "feasibility": 0.0,
+                "metrics": {"aspect_ratio": 8.0},
+                "constraint_margins": {},
+            },
+            design_hash="feasible-a",
+            novelty_score=0.20,
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p1",
+            params={"r_cos": [[0.95]], "z_sin": [[0.02]]},
+            seed=2,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 1.4,
+                "feasibility": 0.08,
+                "metrics": {"aspect_ratio": 8.5},
+                "constraint_margins": {"qi": 0.08},
+            },
+            design_hash="near-b",
+            novelty_score=0.12,
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p1",
+            params={"r_cos": [[0.80]], "z_sin": [[0.05]]},
+            seed=3,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 4.0,
+                "feasibility": 0.9,
+                "metrics": {"aspect_ratio": 12.0},
+                "constraint_margins": {"qi": 0.9},
+            },
+            design_hash="bad-c",
+            novelty_score=0.01,
+        )
+
+        selected = wm.select_parent_group_performance_novelty(
+            experiment_id=experiment_id,
+            problem="p1",
+            group_size=2,
+            worst_constraint="qi",
+            focus_constraint_margin=0.2,
+            leverage_weight=0.5,
+        )
+
+        assert len(selected) == 2
+        hashes = {item["design_hash"] for item in selected}
+        assert "feasible-a" in hashes
+        assert "near-b" in hashes
+        assert all("parent_selection_score" in item for item in selected)
+        assert all("constraint_leverage_score" in item for item in selected)
+
+
+def test_nearest_case_deltas_returns_feasible_and_near_buckets(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p2"}, "deadbeef")
+
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p2",
+            params={"r_cos": [[1.0, 0.0]], "z_sin": [[0.0, 0.1]]},
+            seed=1,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 6.0,
+                "feasibility": 0.0,
+                "metrics": {"aspect_ratio": 9.0},
+                "constraint_margins": {},
+            },
+            design_hash="good-a",
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p2",
+            params={"r_cos": [[1.02, 0.0]], "z_sin": [[0.0, 0.08]]},
+            seed=2,
+            status="screen",
+            evaluation={
+                "stage": "screen",
+                "objective": 5.5,
+                "feasibility": 0.1,
+                "metrics": {"aspect_ratio": 8.7},
+                "constraint_margins": {"vacuum_well": 0.1},
+            },
+            design_hash="near-b",
+        )
+
+        nearest = wm.nearest_case_deltas(
+            experiment_id=experiment_id,
+            problem="p2",
+            seed_params={"r_cos": [[1.01, 0.0]], "z_sin": [[0.0, 0.09]]},
+            limit=2,
+            near_feasibility_threshold=0.2,
+            include_recipes=True,
+        )
+
+        assert len(nearest) == 2
+        buckets = {item["bucket"] for item in nearest}
+        assert "feasible" in buckets
+        assert "near_feasible" in buckets
+        assert all("delta_summary" in item for item in nearest)
+        assert all("delta_recipe" in item for item in nearest)
+        assert all(
+            item["delta_recipe"]["type"] == "sparse_additive_delta" for item in nearest
+        )
+
+
+def test_model_router_reward_summary_can_filter_reward_eligible_only(tmp_path):
+    db_path = tmp_path / "world_reward_eligible.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_model_router_reward_event(
+            experiment_id=experiment_id,
+            problem="p3",
+            model_route="route-a",
+            window_size=10,
+            previous_feasible_yield=10.0,
+            current_feasible_yield=11.0,
+            previous_hv=1.0,
+            current_hv=1.1,
+            reward=0.1,
+            reward_components={"reward_eligible": False},
+        )
+        wm.log_model_router_reward_event(
+            experiment_id=experiment_id,
+            problem="p3",
+            model_route="route-a",
+            window_size=10,
+            previous_feasible_yield=11.0,
+            current_feasible_yield=12.0,
+            previous_hv=1.1,
+            current_hv=1.2,
+            reward=0.2,
+            reward_components={"reward_eligible": True},
+        )
+        summary = wm.model_router_reward_summary(
+            experiment_id,
+            problem="p3",
+            reward_eligible_only=True,
+        )
+        assert summary["event_count"] == 1
+        assert summary["sampled_event_count"] == 1
+        assert summary["last_reward"] == pytest.approx(0.2)
+
+
+def test_model_router_reward_eligible_history_filters_rows(tmp_path):
+    db_path = tmp_path / "world_reward_history.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_model_router_reward_event(
+            experiment_id=experiment_id,
+            problem="p3",
+            model_route="route-a",
+            window_size=10,
+            previous_feasible_yield=10.0,
+            current_feasible_yield=11.0,
+            previous_hv=1.0,
+            current_hv=1.1,
+            reward=0.1,
+            reward_components={"reward_eligible": False},
+        )
+        wm.log_model_router_reward_event(
+            experiment_id=experiment_id,
+            problem="p3",
+            model_route="route-b",
+            window_size=10,
+            previous_feasible_yield=11.0,
+            current_feasible_yield=13.0,
+            previous_hv=1.1,
+            current_hv=1.4,
+            reward=0.3,
+            reward_components={"reward_eligible": True},
+        )
+        history = wm.model_router_reward_eligible_history(experiment_id, problem="p3")
+        assert len(history) == 1
+        assert history[0]["model_route"] == "route-b"
+        assert history[0]["reward"] == pytest.approx(0.3)

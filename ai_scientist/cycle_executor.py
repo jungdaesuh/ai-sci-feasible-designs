@@ -10,6 +10,7 @@ Handles the core orchestration of a single governance cycle:
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import os
@@ -188,6 +189,7 @@ class CycleExecutor:
         suggested_params: list[dict[str, Any]] | None = None,
         config_overrides: Mapping[str, Any] | None = None,
         planner_intent: Mapping[str, Any] | None = None,
+        planner_intents: Sequence[Mapping[str, Any] | None] | None = None,
         # Runtime flags passed as kwargs to avoid coupling with RunnerCLIConfig
         verbose: bool = False,
         slow: bool = False,
@@ -392,14 +394,41 @@ class CycleExecutor:
                     f"[runner][cycle={cycle_number}] Prefilter training failed: {e}. Continuing without prefilter."
                 )
 
-        canonical_suggested_params = _canonicalize_agent_seed_list(
-            active_cfg.boundary_template,
-            cast(Sequence[Mapping[str, Any]] | None, suggested_params),
+        canonical_suggested_params, canonical_planner_intents = (
+            _canonicalize_agent_seed_bundle(
+                active_cfg.boundary_template,
+                cast(Sequence[Mapping[str, Any]] | None, suggested_params),
+                planner_intents=planner_intents,
+            )
+        )
+        strict_seed_policy = active_cfg.aso.seed_fallback_policy == "forbid"
+        agent_requires_seed = (
+            strict_seed_policy and active_cfg.aso.enabled and self.planner is not None
+        )
+        deterministic_requires_seed = (
+            strict_seed_policy and active_cfg.aso.enabled and self.planner is None
         )
         if suggested_params and not canonical_suggested_params:
+            if strict_seed_policy:
+                raise RuntimeError(
+                    "Planner suggested seeds were rejected by canonicalization and aso.seed_fallback_policy='forbid' disables fallback."
+                )
             print(
                 f"[runner][cycle={cycle_number}] All planner suggested seeds were rejected by canonicalization."
             )
+        if agent_requires_seed and not canonical_suggested_params:
+            raise RuntimeError(
+                "Agent mode requires at least one valid planner seed when aso.seed_fallback_policy='forbid'."
+            )
+        if deterministic_requires_seed and not canonical_suggested_params:
+            canonical_suggested_params = _bootstrap_strict_aso_seed_params(
+                active_cfg,
+                cycle_index=cycle_index,
+            )
+            if verbose:
+                print(
+                    f"[runner][cycle={cycle_number}] Strict deterministic ASO bootstrap loaded {len(canonical_suggested_params)} seed(s)."
+                )
 
         candidate_pool: list[dict[str, Any]] = []
 
@@ -408,7 +437,9 @@ class CycleExecutor:
         coordinator = Coordinator(
             active_cfg,
             self.world_model,
-            planner=ai_planner.PlanningAgent(),  # Default planner
+            planner=ai_planner.PlanningAgent(
+                random_seed=active_cfg.random_seed
+            ),  # Default planner
             surrogate=surrogate_model
             if isinstance(surrogate_model, NeuralOperatorSurrogate)
             else None,
@@ -419,9 +450,29 @@ class CycleExecutor:
             if verbose:
                 print(f"[runner][cycle={cycle_number}] ASO mode with real ALM state.")
 
-            initial_seeds = []
-            if canonical_suggested_params:
-                initial_seeds = canonical_suggested_params
+            initial_seeds: list[dict[str, Any]] = []
+            if active_cfg.aso.fair_ab_lockstep_seed_bank:
+                lockstep_seeds = _bootstrap_strict_aso_seed_params(
+                    active_cfg,
+                    cycle_index=cycle_index,
+                )
+                fairness_seed_bank_hash = _fairness_seed_bank_hash(lockstep_seeds)
+                for seed in lockstep_seeds:
+                    seed_payload = dict(seed)
+                    seed_payload["source"] = "lockstep_seed"
+                    seed_payload["fairness_seed_bank_hash"] = fairness_seed_bank_hash
+                    initial_seeds.append(seed_payload)
+                for seed in canonical_suggested_params:
+                    seed_payload = dict(seed)
+                    seed_payload["source"] = "planner_extra"
+                    seed_payload["fairness_seed_bank_hash"] = fairness_seed_bank_hash
+                    initial_seeds.append(seed_payload)
+                if verbose:
+                    print(
+                        f"[runner][cycle={cycle_number}] fair A/B lockstep seed hash={fairness_seed_bank_hash[:12]}"
+                    )
+            elif canonical_suggested_params:
+                initial_seeds = [dict(seed) for seed in canonical_suggested_params]
 
             candidate_pool = cast(
                 list[dict[str, Any]],
@@ -433,8 +484,10 @@ class CycleExecutor:
                     initial_seeds=initial_seeds,
                     initial_config=active_cfg,
                     planner_intent=planner_intent,
+                    planner_intents=canonical_planner_intents,
                 ),
             )
+            candidate_pool = _filter_invalid_aso_candidates(candidate_pool)
             candidates = candidate_pool
 
         elif self.config.optimizer_backend == "gradient_descent":
@@ -615,6 +668,18 @@ class CycleExecutor:
             )
 
         screen_design_map = _latest_evaluations_by_design(screen_results, screen_stage)
+        if active_cfg.aso.enabled and screen_design_map:
+            gated_screen_design_map = {
+                design_hash: entry
+                for design_hash, entry in screen_design_map.items()
+                if fidelity_ctl.passes_cheap_stage_evidence(entry)
+            }
+            rejected = len(screen_design_map) - len(gated_screen_design_map)
+            if rejected > 0 and verbose:
+                print(
+                    f"[runner][cycle={cycle_number}] cheap-stage evidence gate rejected {rejected} candidate(s) from strict promotion."
+                )
+            screen_design_map = gated_screen_design_map
         screen_summary = tools.summarize_p3_candidates(
             list(screen_design_map.values()), reference_point=P3_REFERENCE_POINT
         )
@@ -842,6 +907,9 @@ class CycleExecutor:
             tool_name, self.config.fidelity_ladder.screen
         )
         config_snapshot["adapter_version"] = adapter_version
+        fairness_seed_bank_hash = str(best_entry.get("fairness_seed_bank_hash", ""))
+        if fairness_seed_bank_hash:
+            config_snapshot["fairness_seed_bank_hash"] = fairness_seed_bank_hash
         cycle_json = {
             "experiment_id": experiment_id,
             "git_sha": git_sha,
@@ -858,6 +926,7 @@ class CycleExecutor:
             "promoted": len(promote_results),
             "feasibility_rate": feasibility_rate,
             "adapter_version": adapter_version,
+            "fairness_seed_bank_hash": fairness_seed_bank_hash or None,
             "last_feedback": {
                 "hv_delta": hv_delta,
                 "feasibility_rate": feasibility_rate,
@@ -1842,19 +1911,96 @@ def _canonicalize_agent_seed_list(
     template: ai_config.BoundaryTemplateConfig,
     suggested_params: Sequence[Mapping[str, Any]] | None,
 ) -> list[dict[str, Any]]:
+    canonical_seeds, _ = _canonicalize_agent_seed_bundle(
+        template,
+        suggested_params,
+        planner_intents=None,
+    )
+    return canonical_seeds
+
+
+def _canonicalize_agent_seed_bundle(
+    template: ai_config.BoundaryTemplateConfig,
+    suggested_params: Sequence[Mapping[str, Any]] | None,
+    *,
+    planner_intents: Sequence[Mapping[str, Any] | None] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any] | None] | None]:
     canonical_seeds: list[dict[str, Any]] = []
+    canonical_intents: list[dict[str, Any] | None] | None = (
+        [] if planner_intents is not None else None
+    )
+    planner_intent_values: Sequence[Mapping[str, Any] | None] = planner_intents or ()
     if not suggested_params:
-        return canonical_seeds
+        return canonical_seeds, canonical_intents
     for idx, raw in enumerate(suggested_params):
         try:
             canonical_seeds.append(_canonicalize_agent_seed_params(template, raw))
+            if canonical_intents is not None:
+                intent_payload = (
+                    planner_intent_values[idx]
+                    if idx < len(planner_intent_values)
+                    else None
+                )
+                if isinstance(intent_payload, Mapping):
+                    canonical_intents.append(dict(intent_payload))
+                else:
+                    canonical_intents.append(None)
         except Exception as exc:
             logging.warning(
                 "[canonicalization] rejecting suggested_params[%d] before eval: %s",
                 idx,
                 exc,
             )
-    return canonical_seeds
+    return canonical_seeds, canonical_intents
+
+
+def _fairness_seed_bank_hash(seeds: Sequence[Mapping[str, Any]]) -> str:
+    canonical: list[str] = []
+    for seed in seeds:
+        if not isinstance(seed, Mapping):
+            continue
+        params = seed.get("params")
+        if isinstance(params, Mapping):
+            canonical.append(json.dumps(params, sort_keys=True, separators=(",", ":")))
+            continue
+        if "r_cos" in seed and "z_sin" in seed:
+            canonical.append(
+                json.dumps(dict(seed), sort_keys=True, separators=(",", ":"))
+            )
+    if not canonical:
+        return ""
+    payload = "|".join(sorted(canonical))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bootstrap_strict_aso_seed_params(
+    cfg: ai_config.ExperimentConfig,
+    *,
+    cycle_index: int,
+) -> list[dict[str, Any]]:
+    repo_root = Path(__file__).resolve().parents[1]
+    seed_path = repo_root / "configs" / "seeds" / f"{cfg.problem.lower()}_seeds.json"
+    if not seed_path.exists():
+        raise RuntimeError(
+            f"Strict ASO deterministic bootstrap seed file not found: {seed_path}"
+        )
+
+    raw = json.loads(seed_path.read_text(encoding="utf-8"))
+    if isinstance(raw, list):
+        if not raw:
+            raise RuntimeError(
+                f"Strict ASO deterministic bootstrap seed file is empty: {seed_path}"
+            )
+        seed_index = (cfg.random_seed + cycle_index) % len(raw)
+        seed_payload = raw[seed_index]
+    elif isinstance(raw, Mapping):
+        seed_payload = raw
+    else:
+        raise RuntimeError(
+            f"Strict ASO deterministic bootstrap seed file has unsupported payload: {seed_path}"
+        )
+
+    return [_canonicalize_agent_seed_params(cfg.boundary_template, seed_payload)]
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -2705,6 +2851,31 @@ def _vmec_failure_rate(results: Sequence[Mapping[str, Any]]) -> float:
         if status and status not in {"ok", "success"}:
             failures += 1
     return float(failures) / float(total)
+
+
+def _filter_invalid_aso_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove non-finite/sentinel ASO outputs before downstream selection."""
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        params = candidate.get("params")
+        if not isinstance(params, Mapping):
+            continue
+        objective = candidate.get("objective")
+        max_violation = candidate.get("max_violation")
+        if not isinstance(objective, (int, float)):
+            continue
+        if not isinstance(max_violation, (int, float)):
+            continue
+        objective_f = float(objective)
+        max_violation_f = float(max_violation)
+        if not np.isfinite(objective_f) or not np.isfinite(max_violation_f):
+            continue
+        if objective_f >= 1e8 or max_violation_f >= 1e8:
+            continue
+        filtered.append(dict(candidate))
+    return filtered
 
 
 def _log_observability_metrics(

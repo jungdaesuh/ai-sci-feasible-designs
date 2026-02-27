@@ -7,9 +7,10 @@ switching between Exploration (gathering new data/seeds) and Exploitation (optim
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import jax.numpy as jnp
 import numpy as np
@@ -35,7 +36,15 @@ from ai_scientist.planner import (
     OptimizerDiagnostics,
     PlanningAgent,
 )
+from ai_scientist.model_router_reward import select_ucb_arm
 from ai_scientist.problems import get_problem
+from ai_scientist.staged_governor import (
+    StagedSeedPlan,
+    build_delta_replay_seeds,
+    build_staged_seed_plan_from_snapshots,
+    expand_parent_group_staged_offspring,
+    worst_constraint_from_violations,
+)
 from ai_scientist.workers import (
     ExplorationWorker,
     GeometerWorker,
@@ -124,6 +133,7 @@ class Coordinator:
         self.problem = get_problem(cfg.problem or "p3")
         self.constraint_names = _alm_constraint_names(cfg.problem or "p3")
         self.telemetry: List[Dict[str, Any]] = []
+        self._last_trajectory_budget_used: int = 0
 
     def decide_strategy(self, cycle: int, experiment_id: int) -> str:
         """
@@ -442,6 +452,151 @@ class Coordinator:
             except Exception as e:
                 print(f"[Coordinator] Surrogate retraining failed: {e}")
 
+    def _as_finite_float(self, value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value_f = float(value)
+        if not np.isfinite(value_f):
+            return None
+        return value_f
+
+    def _seed_bank_hash(self, seeds: Sequence[Mapping[str, Any]]) -> str:
+        canonical: list[str] = []
+        for seed in seeds:
+            params = seed.get("params")
+            if isinstance(params, Mapping):
+                canonical.append(self._seed_identity(params))
+        payload = "|".join(sorted(canonical))
+        if not payload:
+            return ""
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _derive_focus_constraint_context(
+        self,
+        snapshots: Sequence[Mapping[str, Any]],
+    ) -> tuple[str | None, float | None]:
+        if not snapshots:
+            return None, None
+        finite = [
+            entry
+            for entry in snapshots
+            if self._as_finite_float(entry.get("feasibility")) is not None
+        ]
+        if not finite:
+            return None, None
+        focus = min(
+            finite,
+            key=lambda entry: float(entry.get("feasibility", float("inf"))),
+        )
+        margins = focus.get("constraint_margins")
+        if not isinstance(margins, Mapping):
+            return None, None
+        worst_name: str | None = None
+        worst_margin = 0.0
+        for key, raw in margins.items():
+            margin = self._as_finite_float(raw)
+            if margin is None or margin <= 0.0:
+                continue
+            if margin > worst_margin:
+                worst_margin = margin
+                worst_name = str(key)
+        if worst_name is None:
+            return None, None
+        return worst_name, float(worst_margin)
+
+    def _select_runtime_ucb_arm(
+        self,
+        *,
+        experiment_id: int,
+        problem: str,
+        min_eligible_events: int,
+    ) -> dict[str, Any] | None:
+        if not hasattr(self.world_model, "model_router_reward_eligible_history"):
+            return None
+        history = self.world_model.model_router_reward_eligible_history(
+            experiment_id=experiment_id,
+            problem=problem,
+            limit=200,
+        )
+        if not isinstance(history, list) or len(history) < min_eligible_events:
+            return None
+
+        arm_stats: dict[str, dict[str, float | int]] = {}
+        arm_payload: dict[str, dict[str, str]] = {}
+        for row in history:
+            if not isinstance(row, Mapping):
+                continue
+            model_route_raw = row.get("model_route")
+            model_route = (
+                str(model_route_raw).strip() if model_route_raw is not None else ""
+            )
+            if not model_route:
+                model_route = "unknown"
+            reward_raw = row.get("reward")
+            reward = self._as_finite_float(reward_raw)
+            if reward is None:
+                continue
+            components = row.get("reward_components")
+            operator_family = "unknown"
+            if isinstance(components, Mapping):
+                op_raw = components.get("operator_family")
+                if isinstance(op_raw, str) and op_raw.strip():
+                    operator_family = op_raw.strip()
+            arm_key = f"{operator_family}|{model_route}"
+            stats = arm_stats.get(arm_key)
+            if stats is None:
+                arm_stats[arm_key] = {"pulls": 1, "mean_reward": reward}
+                arm_payload[arm_key] = {
+                    "operator_family": operator_family,
+                    "model_route": model_route,
+                }
+                continue
+            pulls_raw = stats.get("pulls", 0)
+            pulls = int(pulls_raw) if isinstance(pulls_raw, (int, float)) else 0
+            mean_raw = stats.get("mean_reward", 0.0)
+            mean = float(mean_raw) if isinstance(mean_raw, (int, float)) else 0.0
+            next_pulls = pulls + 1
+            next_mean = ((mean * pulls) + reward) / max(1, next_pulls)
+            stats["pulls"] = next_pulls
+            stats["mean_reward"] = next_mean
+
+        if not arm_stats:
+            return None
+        arm_key = select_ucb_arm(arm_stats, exploration_c=1.0)
+        if arm_key is None:
+            return None
+        selected = arm_payload.get(arm_key)
+        if selected is None:
+            return None
+        payload = dict(selected)
+        payload["arm_key"] = arm_key
+        return payload
+
+    def _stamp_runtime_ucb_arm(
+        self,
+        *,
+        seeds: list[dict[str, Any]],
+        arm: Mapping[str, Any] | None,
+    ) -> None:
+        if not arm:
+            return
+        selected_route = arm.get("model_route")
+        selected_operator = arm.get("operator_family")
+        route_text = (
+            str(selected_route)
+            if isinstance(selected_route, str) and selected_route
+            else "unknown"
+        )
+        operator_text = (
+            str(selected_operator)
+            if isinstance(selected_operator, str) and selected_operator
+            else "unknown"
+        )
+        for seed in seeds:
+            seed.setdefault("model_route", route_text)
+            seed.setdefault("operator_family", operator_text)
+            seed["runtime_ucb_arm"] = dict(arm)
+
     def produce_candidates_aso(
         self,
         cycle: int,
@@ -451,46 +606,344 @@ class Coordinator:
         initial_seeds: Optional[List[Dict[str, Any]]] = None,
         initial_config: Optional[ai_config.ExperimentConfig] = None,
         planner_intent: Mapping[str, Any] | None = None,
+        planner_intents: Sequence[Mapping[str, Any] | None] | None = None,
     ) -> List[Dict[str, Any]]:
         """
         ASO loop with real ALM state supervision.
         """
         config = initial_config or self.cfg
-
-        # 1. Prepare seeds with Surrogate Ranking
-        # Calculate pool size based on multiplier
+        allow_seed_fallbacks = config.aso.seed_fallback_policy != "forbid"
+        tree_enabled = bool(config.aso.tree_evolution_enabled)
         multiplier = config.proposal_mix.surrogate_pool_multiplier
-        pool_size = int(max(10, 1 * multiplier))  # We only need 1 candidate for ASO
+        pool_size = int(max(10, 1 * multiplier))
+        queue_limit = max(1, int(config.aso.tree_queue_max))
+        branch_budget = max(1, int(config.aso.tree_branch_budget))
 
-        # Generate larger pool
-        raw_seeds = self._prepare_seeds(initial_seeds, cycle, pool_size)
+        fairness_lockstep = bool(config.aso.fair_ab_lockstep_seed_bank)
+        user_initial_seeds = list(initial_seeds or [])
+        if planner_intents is not None and user_initial_seeds:
+            enriched_seeds: list[dict[str, Any]] = []
+            for idx, seed in enumerate(user_initial_seeds):
+                seed_payload = dict(seed)
+                intent_payload = (
+                    planner_intents[idx] if idx < len(planner_intents) else None
+                )
+                if isinstance(intent_payload, Mapping):
+                    seed_payload["planner_intent"] = dict(intent_payload)
+                enriched_seeds.append(seed_payload)
+            user_initial_seeds = enriched_seeds
 
-        # Rank and select best
-        ranked_seeds = self._surrogate_rank_seeds(raw_seeds, cycle)
+        snapshots: list[Mapping[str, Any]] = []
+        if hasattr(self.world_model, "recent_candidate_snapshots"):
+            snapshot_rows = self.world_model.recent_candidate_snapshots(
+                experiment_id=experiment_id,
+                problem=config.problem,
+                limit=config.aso.staged_recent_limit,
+            )
+            if isinstance(snapshot_rows, list):
+                snapshots = snapshot_rows
+        focus_worst_constraint, focus_constraint_margin = (
+            self._derive_focus_constraint_context(snapshots)
+        )
 
-        if not ranked_seeds:
-            print("[Coordinator] No valid seeds, returning empty")
+        fairness_seed_bank_hash = self._seed_bank_hash(user_initial_seeds)
+        for seed in user_initial_seeds:
+            if fairness_seed_bank_hash:
+                seed["fairness_seed_bank_hash"] = fairness_seed_bank_hash
+
+        base_seed_sources: list[dict[str, Any]] = []
+        deferred_planner_seeds: list[dict[str, Any]] = []
+        for seed in user_initial_seeds:
+            source_raw = seed.get("source")
+            source_name = str(source_raw) if isinstance(source_raw, str) else ""
+            if fairness_lockstep and source_name == "planner_extra":
+                deferred_planner_seeds.append(dict(seed))
+            else:
+                base_seed_sources.append(dict(seed))
+
+        parent_group: list[Mapping[str, Any]] = []
+        if hasattr(self.world_model, "select_parent_group_performance_novelty"):
+            selected = self.world_model.select_parent_group_performance_novelty(
+                experiment_id=experiment_id,
+                problem=config.problem,
+                group_size=max(1, int(config.aso.parent_group_size)),
+                limit=config.aso.staged_recent_limit,
+                near_feasibility_threshold=config.aso.staged_near_feasibility_threshold,
+                worst_constraint=focus_worst_constraint,
+                focus_constraint_margin=focus_constraint_margin,
+                leverage_weight=config.aso.parent_selection_leverage_weight,
+            )
+            if isinstance(selected, list):
+                parent_group = selected
+
+        parent_by_hash: dict[str, Mapping[str, Any]] = {}
+        for parent in parent_group:
+            params_payload = parent.get("params")
+            if not isinstance(params_payload, Mapping):
+                continue
+            design_hash = str(parent.get("design_hash", ""))
+            if design_hash:
+                parent_by_hash[design_hash] = parent
+            base_seed_sources.append(
+                {
+                    "seed": int(
+                        parent.get("seed", self._default_seed_for_cycle(cycle))
+                    ),
+                    "params": dict(params_payload),
+                    "source": "parent_group",
+                    "lineage_parent_hashes": [design_hash],
+                    "operator_family": "parent_group",
+                    "novelty_score": parent.get("novelty_score"),
+                    "parent_feasibility": parent.get("feasibility"),
+                    "parent_objective": parent.get("objective"),
+                    "improvement_reason": "performance_novelty_leverage_selection",
+                    "fairness_seed_bank_hash": fairness_seed_bank_hash,
+                }
+            )
+
+        staged_plan: StagedSeedPlan | None = None
+        staged_seeds: list[dict[str, Any]] = []
+        if config.aso.staged_governor_enabled:
+            if parent_group:
+                focus_parent = parent_group[0]
+                raw_violations = focus_parent.get("constraint_margins")
+                violations = (
+                    dict(raw_violations) if isinstance(raw_violations, Mapping) else {}
+                )
+                worst_constraint, _ = worst_constraint_from_violations(violations)
+                staged_seeds = expand_parent_group_staged_offspring(
+                    parent_group=parent_group,
+                    worst_constraint=worst_constraint,
+                    max_repair_candidates=config.aso.staged_repair_candidates,
+                    bridge_blend_t=config.aso.staged_bridge_blend_t,
+                    offspring_per_parent=config.aso.offspring_per_parent,
+                )
+            else:
+                if isinstance(snapshots, list) and snapshots:
+                    staged_plan = build_staged_seed_plan_from_snapshots(
+                        snapshots=snapshots,
+                        problem=config.problem,
+                        near_feasibility_threshold=config.aso.staged_near_feasibility_threshold,
+                        max_repair_candidates=config.aso.staged_repair_candidates,
+                        bridge_blend_t=config.aso.staged_bridge_blend_t,
+                    )
+                if staged_plan is not None and staged_plan.seeds:
+                    staged_seeds = staged_plan.seeds
+
+        replay_seeds: list[dict[str, Any]] = []
+        if (
+            parent_group
+            and hasattr(self.world_model, "nearest_case_deltas")
+            and int(config.aso.delta_replay_top_k) > 0
+        ):
+            focus_parent = parent_group[0]
+            focus_params_raw = focus_parent.get("params")
+            if isinstance(focus_params_raw, Mapping):
+                nearest = self.world_model.nearest_case_deltas(
+                    experiment_id=experiment_id,
+                    problem=config.problem,
+                    seed_params=focus_params_raw,
+                    limit=max(2, int(config.aso.delta_replay_top_k) * 2),
+                    near_feasibility_threshold=config.aso.staged_near_feasibility_threshold,
+                    include_recipes=True,
+                )
+                if isinstance(nearest, list):
+                    focus_hash = str(focus_parent.get("design_hash", ""))
+                    replay_seeds = build_delta_replay_seeds(
+                        focus_params=focus_params_raw,
+                        case_deltas=nearest,
+                        top_k=int(config.aso.delta_replay_top_k),
+                        focus_hash=focus_hash,
+                        worst_constraint=focus_worst_constraint,
+                    )
+
+        seed_sources: list[dict[str, Any]] = list(base_seed_sources)
+        if replay_seeds:
+            seed_sources = replay_seeds + seed_sources
+        if staged_seeds:
+            seed_sources = staged_seeds + seed_sources
+
+        for staged_seed in seed_sources:
+            parent_hashes = staged_seed.get("lineage_parent_hashes")
+            if not isinstance(parent_hashes, list) or not parent_hashes:
+                continue
+            focus_hash = str(parent_hashes[0])
+            parent = parent_by_hash.get(focus_hash)
+            if parent is None:
+                continue
+            if "parent_feasibility" not in staged_seed:
+                staged_seed["parent_feasibility"] = parent.get("feasibility")
+            if "parent_objective" not in staged_seed:
+                staged_seed["parent_objective"] = parent.get("objective")
+            if fairness_seed_bank_hash and "fairness_seed_bank_hash" not in staged_seed:
+                staged_seed["fairness_seed_bank_hash"] = fairness_seed_bank_hash
+
+        if staged_seeds:
+            print(
+                "[Coordinator] Staged governor prepared seeds "
+                f"(count={len(staged_seeds)})."
+            )
+        elif staged_plan is not None and staged_plan.seeds:
+            print(
+                "[Coordinator] Staged governor prepared seeds "
+                f"(focus={staged_plan.focus_hash[:12]}, "
+                f"worst={staged_plan.worst_constraint}, "
+                f"count={len(staged_plan.seeds)})."
+            )
+        if replay_seeds:
+            print(
+                f"[Coordinator] Applied case-delta replay seeds (count={len(replay_seeds)})."
+            )
+
+        runtime_ucb_arm: Mapping[str, Any] | None = None
+        if config.aso.runtime_ucb_enabled:
+            runtime_ucb_arm = self._select_runtime_ucb_arm(
+                experiment_id=experiment_id,
+                problem=config.problem,
+                min_eligible_events=max(
+                    1, int(config.aso.runtime_ucb_min_eligible_events)
+                ),
+            )
+            if runtime_ucb_arm is not None:
+                print(
+                    "[Coordinator] Runtime UCB selected arm "
+                    f"{runtime_ucb_arm.get('arm_key', 'unknown')}."
+                )
+                self._stamp_runtime_ucb_arm(
+                    seeds=seed_sources,
+                    arm=runtime_ucb_arm,
+                )
+                self._stamp_runtime_ucb_arm(
+                    seeds=deferred_planner_seeds,
+                    arm=runtime_ucb_arm,
+                )
+
+        ranked_seeds = self._prepare_gated_ranked_seeds(
+            seeds=seed_sources or None,
+            cycle=cycle,
+            n_needed=max(pool_size, queue_limit),
+            allow_fallbacks=allow_seed_fallbacks,
+            experiment_id=experiment_id,
+            problem=config.problem,
+            gate_limit=queue_limit,
+        )
+        seed_queue: list[dict[str, Any]] = [
+            dict(seed) for seed in ranked_seeds[:queue_limit]
+        ]
+
+        if not seed_queue and deferred_planner_seeds:
+            ranked_deferred = self._prepare_gated_ranked_seeds(
+                seeds=deferred_planner_seeds,
+                cycle=cycle,
+                n_needed=max(pool_size, queue_limit),
+                allow_fallbacks=False,
+                experiment_id=experiment_id,
+                problem=config.problem,
+                gate_limit=queue_limit,
+            )
+            seed_queue = [dict(seed) for seed in ranked_deferred[:queue_limit]]
+            deferred_planner_seeds = []
+
+        if not seed_queue:
+            if not allow_seed_fallbacks:
+                raise RuntimeError(
+                    "ASO seed queue is empty after novelty/validity gate and aso.seed_fallback_policy='forbid' disables fallback seeding."
+                )
+            print("[Coordinator] No valid ASO seeds after gating; returning empty.")
             return []
 
-        best_seed = ranked_seeds[0]
         print(
-            f"[Coordinator] Selected best seed from {len(raw_seeds)} candidates (Score: {best_seed.get('surrogate_score', 'N/A')})"
+            f"[Coordinator] ASO seed queue initialized with {len(seed_queue)} candidate(s)."
         )
 
-        # 2. Run trajectory with real ALM
-        traj = TrajectoryState(id=0, seed=best_seed)
-        candidates = self._run_trajectory_aso(
-            traj=traj,
-            eval_budget=eval_budget,
-            cycle=cycle,
-            experiment_id=experiment_id,
-            config=config,
-            planner_intent=planner_intent,
-        )
+        remaining_budget = int(eval_budget)
+        trajectory_id = 0
+        candidates: list[dict[str, Any]] = []
+        while remaining_budget > 0 and seed_queue:
+            seed_payload = seed_queue.pop(0)
+            seed_specific_intent = seed_payload.get("planner_intent")
+            effective_planner_intent = (
+                dict(seed_specific_intent)
+                if isinstance(seed_specific_intent, Mapping)
+                else planner_intent
+            )
+            branch_eval_budget = (
+                min(remaining_budget, branch_budget)
+                if tree_enabled
+                else remaining_budget
+            )
+            traj = TrajectoryState(id=trajectory_id, seed=seed_payload)
+            branch_candidates = self._run_trajectory_aso(
+                traj=traj,
+                eval_budget=branch_eval_budget,
+                cycle=cycle,
+                experiment_id=experiment_id,
+                config=config,
+                planner_intent=effective_planner_intent,
+                restart_seed_queue=seed_queue,
+            )
+            candidates.extend(branch_candidates)
+            consumed = self._last_trajectory_budget_used
+            if consumed <= 0:
+                consumed = branch_eval_budget
+            remaining_budget = max(0, remaining_budget - consumed)
+            trajectory_id += 1
 
-        # 3. Persist telemetry
+            if deferred_planner_seeds and trajectory_id >= 1:
+                ranked_deferred = self._prepare_gated_ranked_seeds(
+                    seeds=deferred_planner_seeds,
+                    cycle=cycle,
+                    n_needed=len(deferred_planner_seeds),
+                    allow_fallbacks=False,
+                    experiment_id=experiment_id,
+                    problem=config.problem,
+                    gate_limit=queue_limit,
+                )
+                self._enqueue_seed_queue(
+                    queue=seed_queue,
+                    new_items=ranked_deferred,
+                    max_size=queue_limit,
+                    tie_epsilon=config.aso.frontier_objective_tie_epsilon,
+                )
+                deferred_planner_seeds = []
+
+            if not tree_enabled:
+                break
+
+            expanded = self._expand_tree_seeds_from_candidates(
+                candidates=branch_candidates,
+                parent_group=parent_group,
+                config=config,
+                experiment_id=experiment_id,
+            )
+            if expanded:
+                ranked_expanded = self._prepare_gated_ranked_seeds(
+                    seeds=expanded,
+                    cycle=cycle,
+                    n_needed=len(expanded),
+                    allow_fallbacks=False,
+                    experiment_id=experiment_id,
+                    problem=config.problem,
+                    gate_limit=queue_limit,
+                )
+                self._enqueue_seed_queue(
+                    queue=seed_queue,
+                    new_items=ranked_expanded,
+                    max_size=queue_limit,
+                    tie_epsilon=config.aso.frontier_objective_tie_epsilon,
+                )
+
+        if (
+            remaining_budget > 0
+            and not seed_queue
+            and not allow_seed_fallbacks
+            and not candidates
+        ):
+            raise RuntimeError(
+                "ASO queue depleted before budget exhaustion and aso.seed_fallback_policy='forbid' prevents fresh fallback seeds."
+            )
+
         self._persist_telemetry(experiment_id)
-
         return candidates
 
     def _run_trajectory_aso(
@@ -501,11 +954,14 @@ class Coordinator:
         experiment_id: int,
         config: ai_config.ExperimentConfig,
         planner_intent: Mapping[str, Any] | None = None,
+        restart_seed_queue: list[dict[str, Any]] | None = None,
     ) -> List[Dict[str, Any]]:
         """Run trajectory with real ALM state and supervision."""
         aso = config.aso
         alm = config.alm
+        allow_seed_fallbacks = aso.seed_fallback_policy != "forbid"
         candidates = []
+        self._last_trajectory_budget_used = 0
 
         # Initialize ALM context and state
         boundary = self._seed_to_boundary(traj.seed)
@@ -576,12 +1032,10 @@ class Coordinator:
                 aso,
                 planner_intent=planner_intent,
             )
-            intent_agreement, computed_override_reason = (
-                self._assess_intent_agreement(
-                    planner_intent=planner_intent,
-                    diagnostics=diagnostics,
-                    directive=directive,
-                )
+            intent_agreement, computed_override_reason = self._assess_intent_agreement(
+                planner_intent=planner_intent,
+                diagnostics=diagnostics,
+                directive=directive,
             )
             recovery_override_reason: str | None = None
             if (
@@ -621,9 +1075,7 @@ class Coordinator:
             override_reason = directive.override_reason or computed_override_reason
             if recovery_override_reason is not None:
                 if override_reason:
-                    override_reason = (
-                        f"{override_reason} | {recovery_override_reason}"
-                    )
+                    override_reason = f"{override_reason} | {recovery_override_reason}"
                 else:
                     override_reason = recovery_override_reason
             violation_delta = (
@@ -631,6 +1083,26 @@ class Coordinator:
                 if prev_diag is not None
                 else None
             )
+            feasibility_delta = violation_delta
+            worst_before_name, worst_before_value = self._worst_constraint_snapshot(
+                prev_diag
+            )
+            worst_after_name, worst_after_value = self._worst_constraint_snapshot(
+                diagnostics
+            )
+            chosen_operator = self._chosen_operator_label(
+                seed_payload=traj.seed,
+                directive=directive,
+            )
+            parent_hashes = self._parent_hashes_from_seed(traj.seed)
+            bridge_flag = self._bridge_flag_from_seed(traj.seed)
+            hv_delta_raw = self.world_model.average_recent_hv_delta(
+                experiment_id, lookback=1
+            )
+            try:
+                hv_delta = float(hv_delta_raw) if hv_delta_raw is not None else None
+            except (TypeError, ValueError):
+                hv_delta = None
 
             # 5. Log telemetry
             wall_time_ms = (time.perf_counter() - step_start) * 1000
@@ -646,6 +1118,15 @@ class Coordinator:
                 intent_agreement=intent_agreement,
                 override_reason=override_reason,
                 violation_delta=violation_delta,
+                feasibility_delta=feasibility_delta,
+                hv_delta=hv_delta,
+                worst_constraint_before=worst_before_name,
+                worst_constraint_before_value=worst_before_value,
+                worst_constraint_after=worst_after_name,
+                worst_constraint_after_value=worst_after_value,
+                chosen_operator=chosen_operator,
+                parent_hashes=parent_hashes,
+                bridge_flag=bridge_flag,
                 vmec_step_failed=vmec_step_failed,
                 vmec_failure_streak=consecutive_vmec_failures,
             )
@@ -663,6 +1144,13 @@ class Coordinator:
                     "max_violation": diagnostics.max_violation,
                     "bounds_norm": diagnostics.bounds_norm,
                     "penalty_parameters": diagnostics.penalty_parameters,
+                    "worst_constraint_before": worst_before_name,
+                    "worst_constraint_before_value": worst_before_value,
+                    "worst_constraint_after": worst_after_name,
+                    "worst_constraint_after_value": worst_after_value,
+                    "chosen_operator": chosen_operator,
+                    "parent_hashes": parent_hashes,
+                    "bridge_flag": bridge_flag,
                     "constraint_diagnostics": [
                         entry.model_dump(mode="json")
                         for entry in diagnostics.constraint_diagnostics
@@ -670,6 +1158,8 @@ class Coordinator:
                 },
                 outcome={
                     "objective_delta": diagnostics.objective_delta,
+                    "feasibility_delta": feasibility_delta,
+                    "hv_delta": hv_delta,
                     "violation_delta": violation_delta,
                     "steps_since_improvement": diagnostics.steps_since_improvement,
                     "llm_called": llm_called,
@@ -697,12 +1187,28 @@ class Coordinator:
                     max_violation=result.max_violation,
                     source="aso",
                     seed=traj.seed.get("seed", 0),
+                    seed_payload=traj.seed,
                 )
                 break
 
             if directive.action == DirectiveAction.RESTART:
-                # Try new seed
-                new_seeds = self._prepare_seeds(None, cycle, 1)
+                # Strict restart contract: consume queued seeds first.
+                new_seeds: list[dict[str, Any]] = []
+                if restart_seed_queue:
+                    next_seed = restart_seed_queue.pop(0)
+                    if isinstance(next_seed, Mapping):
+                        new_seeds = [dict(next_seed)]
+                elif allow_seed_fallbacks:
+                    new_seeds = self._prepare_seeds(
+                        None,
+                        cycle,
+                        1,
+                        allow_fallbacks=True,
+                    )
+                else:
+                    raise RuntimeError(
+                        "ASO restart requested but queue is empty and aso.seed_fallback_policy='forbid' prevents fresh seed generation."
+                    )
                 if new_seeds:
                     # Save current best before restart
                     assert traj.alm_state is not None
@@ -713,6 +1219,7 @@ class Coordinator:
                         max_violation=result.max_violation,
                         source="aso_pre_restart",
                         seed=traj.seed.get("seed", 0),
+                        seed_payload=traj.seed,
                     )
 
                     boundary = self._seed_to_boundary(new_seeds[0])
@@ -774,6 +1281,7 @@ class Coordinator:
                     max_violation=result.max_violation,
                     source="aso_stagnation",
                     seed=traj.seed.get("seed", 0),
+                    seed_payload=traj.seed,
                 )
                 break
 
@@ -790,6 +1298,7 @@ class Coordinator:
                 max_violation=max_violation,
                 source="aso_terminal_state",
                 seed=traj.seed.get("seed", 0),
+                seed_payload=traj.seed,
             )
 
         print(
@@ -797,6 +1306,7 @@ class Coordinator:
             f"{traj.budget_used} evals, {len(candidates)} candidates"
         )
 
+        self._last_trajectory_budget_used = int(traj.budget_used)
         return candidates
 
     def _is_vmec_failure_step(self, result: Any) -> bool:
@@ -819,6 +1329,7 @@ class Coordinator:
         max_violation: float,
         source: str,
         seed: int,
+        seed_payload: Mapping[str, Any] | None = None,
     ) -> None:
         try:
             make_boundary_from_params(params)
@@ -827,6 +1338,19 @@ class Coordinator:
                 f"[Coordinator] Dropping invalid ASO candidate (source={source}, seed={seed}): {exc}"
             )
             return
+        seed_payload_mapping = seed_payload if isinstance(seed_payload, Mapping) else {}
+        parent_hashes = self._parent_hashes_from_seed(seed_payload_mapping)
+        parent_feasibility = self._as_finite_float(
+            seed_payload_mapping.get("parent_feasibility")
+        )
+        parent_objective = self._as_finite_float(
+            seed_payload_mapping.get("parent_objective")
+        )
+        violation_delta_vs_parent = None
+        if parent_feasibility is not None:
+            violation_delta_vs_parent = float(max_violation) - float(parent_feasibility)
+        staged_raw = seed_payload_mapping.get("staged_governor")
+        staged_meta = dict(staged_raw) if isinstance(staged_raw, Mapping) else {}
         candidates.append(
             {
                 "params": dict(params),
@@ -834,8 +1358,79 @@ class Coordinator:
                 "max_violation": float(max_violation),
                 "source": source,
                 "seed": int(seed),
+                "lineage_parent_hashes": parent_hashes,
+                "operator_family": self._chosen_operator_label(
+                    seed_payload=seed_payload_mapping,
+                    directive=None,
+                ),
+                "model_route": seed_payload_mapping.get("model_route"),
+                "bridge_flag": self._bridge_flag_from_seed(seed_payload_mapping),
+                "staged_governor": staged_meta,
+                "verify_contract_phases": ["cheap", "strict", "vmec"],
+                "parent_feasibility": parent_feasibility,
+                "parent_objective": parent_objective,
+                "violation_delta_vs_parent": violation_delta_vs_parent,
+                "improvement_reason": seed_payload_mapping.get("improvement_reason"),
+                "fairness_seed_bank_hash": seed_payload_mapping.get(
+                    "fairness_seed_bank_hash"
+                ),
             }
         )
+
+    def _worst_constraint_snapshot(
+        self, diagnostics: OptimizerDiagnostics | None
+    ) -> tuple[str | None, float | None]:
+        if diagnostics is None or not diagnostics.constraint_diagnostics:
+            return None, None
+        worst = max(
+            diagnostics.constraint_diagnostics,
+            key=lambda entry: float(entry.violation),
+        )
+        return str(worst.name), float(worst.violation)
+
+    def _chosen_operator_label(
+        self,
+        *,
+        seed_payload: Mapping[str, Any],
+        directive: OptimizationDirective | None,
+    ) -> str:
+        staged = seed_payload.get("staged_governor")
+        if isinstance(staged, Mapping):
+            phase = staged.get("phase")
+            if isinstance(phase, str) and phase:
+                return f"staged:{phase}"
+        operator = seed_payload.get("operator_family")
+        if isinstance(operator, str) and operator:
+            return operator
+        if directive is not None:
+            return f"aso:{directive.action.value.lower()}"
+        source = seed_payload.get("source")
+        if isinstance(source, str) and source:
+            return source
+        return "unknown"
+
+    def _parent_hashes_from_seed(self, seed_payload: Mapping[str, Any]) -> list[str]:
+        lineage = seed_payload.get("lineage_parent_hashes")
+        if isinstance(lineage, list):
+            return [str(item) for item in lineage if str(item)]
+
+        staged = seed_payload.get("staged_governor")
+        if isinstance(staged, Mapping):
+            hashes: list[str] = []
+            focus_hash = staged.get("focus_hash")
+            if isinstance(focus_hash, str) and focus_hash:
+                hashes.append(focus_hash)
+            partner_hash = staged.get("partner_hash")
+            if isinstance(partner_hash, str) and partner_hash:
+                hashes.append(partner_hash)
+            return hashes
+        return []
+
+    def _bridge_flag_from_seed(self, seed_payload: Mapping[str, Any]) -> bool:
+        staged = seed_payload.get("staged_governor")
+        if not isinstance(staged, Mapping):
+            return False
+        return str(staged.get("phase", "")).lower() == "bridge"
 
     def _generate_diagnostics(
         self,
@@ -995,7 +1590,9 @@ class Coordinator:
                 focus_set = {int(idx) for idx in focus_indices}
                 penalties = diagnostics.penalty_parameters
                 adjusted_indices = []
-                for idx, value in enumerate(directive.alm_overrides["penalty_parameters"]):
+                for idx, value in enumerate(
+                    directive.alm_overrides["penalty_parameters"]
+                ):
                     if idx >= len(penalties):
                         continue
                     if float(value) != float(penalties[idx]):
@@ -1044,6 +1641,15 @@ class Coordinator:
         intent_agreement: str,
         override_reason: str | None,
         violation_delta: float | None,
+        feasibility_delta: float | None,
+        hv_delta: float | None,
+        worst_constraint_before: str | None,
+        worst_constraint_before_value: float | None,
+        worst_constraint_after: str | None,
+        worst_constraint_after_value: float | None,
+        chosen_operator: str,
+        parent_hashes: Sequence[str],
+        bridge_flag: bool,
         vmec_step_failed: bool,
         vmec_failure_streak: int,
     ):
@@ -1067,7 +1673,16 @@ class Coordinator:
                 "aso_action": directive.action.value,
                 "intent_agreement": intent_agreement,
                 "override_reason": override_reason,
+                "worst_constraint_before": worst_constraint_before,
+                "worst_constraint_before_value": worst_constraint_before_value,
+                "worst_constraint_after": worst_constraint_after,
+                "worst_constraint_after_value": worst_constraint_after_value,
+                "chosen_operator": chosen_operator,
+                "parent_hashes": list(parent_hashes),
+                "bridge_flag": bool(bridge_flag),
                 "objective_delta": diag.objective_delta,
+                "feasibility_delta": feasibility_delta,
+                "hv_delta": hv_delta,
                 "violation_delta": violation_delta,
                 "vmec_step_failed": vmec_step_failed,
                 "vmec_failure_streak": vmec_failure_streak,
@@ -1080,6 +1695,8 @@ class Coordinator:
                 "surrogate_score": traj.seed.get("surrogate_score"),
                 "surrogate_rank": traj.seed.get("surrogate_rank"),
                 "surrogate_pool_size": traj.seed.get("surrogate_pool_size"),
+                "fairness_seed_bank_hash": traj.seed.get("fairness_seed_bank_hash"),
+                "runtime_ucb_arm": traj.seed.get("runtime_ucb_arm"),
             }
         )
 
@@ -1166,7 +1783,39 @@ class Coordinator:
             return seeds
 
     # Helper methods
-    def _prepare_seeds(self, initial_seeds, cycle, n_needed):
+    def _prepare_gated_ranked_seeds(
+        self,
+        *,
+        seeds: Sequence[Mapping[str, Any]] | None,
+        cycle: int,
+        n_needed: int,
+        allow_fallbacks: bool,
+        experiment_id: int,
+        problem: str,
+        gate_limit: int,
+    ) -> list[dict[str, Any]]:
+        prepared = self._prepare_seeds(
+            seeds,
+            cycle,
+            n_needed,
+            allow_fallbacks=allow_fallbacks,
+        )
+        gated = self._apply_seed_novelty_validity_gate(
+            prepared,
+            experiment_id=experiment_id,
+            problem=problem,
+            limit=gate_limit,
+        )
+        return self._surrogate_rank_seeds(gated, cycle)
+
+    def _prepare_seeds(
+        self,
+        initial_seeds,
+        cycle,
+        n_needed,
+        *,
+        allow_fallbacks: bool = True,
+    ):
         """Prepare and validate seeds using ExplorationWorker + GeometerWorker."""
         if initial_seeds:
             normalized_initial = self._normalize_seed_batch(
@@ -1176,6 +1825,11 @@ class Coordinator:
             )
             if normalized_initial:
                 return normalized_initial
+            if not allow_fallbacks:
+                print(
+                    "[Coordinator] Initial seeds rejected and fallback seeding is disabled."
+                )
+                return []
             fallback = self._stable_fallback_seed(cycle)
             if fallback is not None:
                 return [fallback]
@@ -1195,6 +1849,11 @@ class Coordinator:
             candidates = geo_res.get("candidates", [])
 
         if not candidates:
+            if not allow_fallbacks:
+                print(
+                    "[Coordinator] Geometer rejected all seeds and fallback seeding is disabled."
+                )
+                return []
             fallback = self._stable_fallback_seed(cycle)
             if fallback is not None:
                 print(
@@ -1217,6 +1876,291 @@ class Coordinator:
             cycle,
             limit=n_needed,
         )
+
+    def _seed_identity(self, params: Mapping[str, Any]) -> str:
+        return json.dumps(params, sort_keys=True, separators=(",", ":"))
+
+    def _flatten_seed_params(self, params: Mapping[str, Any]) -> np.ndarray:
+        values: list[float] = []
+        for key in ("r_cos", "z_sin", "r_sin", "z_cos"):
+            matrix = params.get(key)
+            if not isinstance(matrix, list):
+                continue
+            for row in matrix:
+                if not isinstance(row, list):
+                    continue
+                for value in row:
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        continue
+                    value_f = float(value)
+                    if np.isfinite(value_f):
+                        values.append(value_f)
+        if not values:
+            return np.zeros(0, dtype=float)
+        return np.asarray(values, dtype=float)
+
+    def _seed_distance(self, left: np.ndarray, right: np.ndarray) -> float:
+        if left.size == 0 or right.size == 0:
+            return float("inf")
+        shared = min(left.size, right.size)
+        if shared <= 0:
+            return float("inf")
+        lhs = left[:shared]
+        rhs = right[:shared]
+        dist = float(np.linalg.norm(lhs - rhs))
+        if left.size > shared:
+            dist = float(np.sqrt((dist**2) + float(np.linalg.norm(left[shared:]) ** 2)))
+        if right.size > shared:
+            dist = float(
+                np.sqrt((dist**2) + float(np.linalg.norm(right[shared:]) ** 2))
+            )
+        return dist
+
+    def _apply_seed_novelty_validity_gate(
+        self,
+        seeds: Sequence[Mapping[str, Any]],
+        *,
+        experiment_id: int,
+        problem: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Canonical novelty + validity gate applied to every seed source."""
+        if not seeds:
+            return []
+
+        history = self.world_model.recent_candidate_snapshots(
+            experiment_id=experiment_id,
+            problem=problem,
+            limit=max(64, limit * 8),
+        )
+        historical_hashes: set[str] = set()
+        historical_vectors: list[np.ndarray] = []
+        for snapshot in history:
+            params = snapshot.get("params")
+            if not isinstance(params, Mapping):
+                continue
+            historical_hashes.add(self._seed_identity(params))
+            historical_vectors.append(self._flatten_seed_params(params))
+
+        accepted: list[dict[str, Any]] = []
+        accepted_hashes: set[str] = set()
+        accepted_vectors: list[np.ndarray] = []
+        novelty_floor = 1e-8
+        for seed in seeds:
+            params_payload = seed.get("params")
+            if not isinstance(params_payload, Mapping):
+                continue
+            params = dict(params_payload)
+            try:
+                make_boundary_from_params(params)
+            except Exception:
+                continue
+            identity = self._seed_identity(params)
+            if identity in historical_hashes or identity in accepted_hashes:
+                continue
+            vector = self._flatten_seed_params(params)
+            novelty_score = 1.0
+            if historical_vectors:
+                novelty_score = min(
+                    self._seed_distance(vector, baseline)
+                    for baseline in historical_vectors
+                )
+            if accepted_vectors:
+                novelty_score = min(
+                    novelty_score,
+                    min(
+                        self._seed_distance(vector, baseline)
+                        for baseline in accepted_vectors
+                    ),
+                )
+            if novelty_score <= novelty_floor:
+                continue
+            payload = dict(seed)
+            payload["params"] = params
+            payload["novelty_score"] = float(novelty_score)
+            accepted.append(payload)
+            accepted_hashes.add(identity)
+            accepted_vectors.append(vector)
+            if len(accepted) >= limit:
+                break
+        return accepted
+
+    def _expand_tree_seeds_from_candidates(
+        self,
+        *,
+        candidates: Sequence[Mapping[str, Any]],
+        parent_group: Sequence[Mapping[str, Any]],
+        config: ai_config.ExperimentConfig,
+        experiment_id: int,
+    ) -> list[dict[str, Any]]:
+        if not candidates:
+            return []
+
+        finite_candidates = [
+            candidate
+            for candidate in candidates
+            if np.isfinite(float(candidate.get("max_violation", float("inf"))))
+            and isinstance(candidate.get("params"), Mapping)
+        ]
+        if not finite_candidates:
+            return []
+        focus_candidate = min(
+            finite_candidates,
+            key=lambda item: float(item.get("max_violation", float("inf"))),
+        )
+        params_payload = focus_candidate.get("params")
+        if not isinstance(params_payload, Mapping):
+            return []
+
+        staged_meta = focus_candidate.get("staged_governor")
+        worst_constraint = None
+        if isinstance(staged_meta, Mapping):
+            raw_worst = staged_meta.get("worst_constraint")
+            if isinstance(raw_worst, str) and raw_worst:
+                worst_constraint = raw_worst
+
+        focus_hash = self._seed_identity(params_payload)[:16]
+        focus_node: dict[str, Any] = {
+            "design_hash": focus_hash,
+            "params": dict(params_payload),
+            "feasibility": float(focus_candidate.get("max_violation", float("inf"))),
+            "is_feasible": bool(
+                float(focus_candidate.get("max_violation", float("inf")))
+                <= config.aso.feasibility_threshold
+            ),
+            "constraint_margins": {},
+        }
+        parent_nodes: list[Mapping[str, Any]] = [focus_node]
+        if parent_group:
+            parent_nodes.append(parent_group[0])
+        expanded = expand_parent_group_staged_offspring(
+            parent_group=parent_nodes,
+            worst_constraint=worst_constraint,
+            max_repair_candidates=config.aso.staged_repair_candidates,
+            bridge_blend_t=config.aso.staged_bridge_blend_t,
+            offspring_per_parent=config.aso.offspring_per_parent,
+        )
+        replay: list[dict[str, Any]] = []
+        if (
+            hasattr(self.world_model, "nearest_case_deltas")
+            and int(config.aso.delta_replay_top_k) > 0
+        ):
+            nearest = self.world_model.nearest_case_deltas(
+                experiment_id=experiment_id,
+                problem=config.problem,
+                seed_params=dict(params_payload),
+                limit=max(2, int(config.aso.delta_replay_top_k) * 2),
+                near_feasibility_threshold=config.aso.staged_near_feasibility_threshold,
+                include_recipes=True,
+            )
+            if isinstance(nearest, list):
+                replay = build_delta_replay_seeds(
+                    focus_params=dict(params_payload),
+                    case_deltas=nearest,
+                    top_k=int(config.aso.delta_replay_top_k),
+                    focus_hash=focus_hash,
+                    worst_constraint=worst_constraint,
+                )
+        merged = replay + expanded
+        parent_feasibility = self._as_finite_float(
+            focus_candidate.get("max_violation", focus_candidate.get("feasibility"))
+        )
+        parent_objective = self._as_finite_float(focus_candidate.get("objective"))
+        for item in merged:
+            item.setdefault("parent_feasibility", parent_feasibility)
+            item.setdefault("parent_objective", parent_objective)
+            if "improvement_reason" not in item:
+                item["improvement_reason"] = "tree_branch_expansion"
+            staged = item.get("staged_governor")
+            phase = (
+                str(staged.get("phase", "")).lower()
+                if isinstance(staged, Mapping)
+                else ""
+            )
+            if parent_feasibility is not None:
+                if phase == "repair":
+                    item.setdefault("estimated_feasibility", parent_feasibility * 0.9)
+                elif phase in {"bridge", "delta_replay"}:
+                    item.setdefault("estimated_feasibility", parent_feasibility * 0.95)
+                else:
+                    item.setdefault("estimated_feasibility", parent_feasibility)
+            if parent_objective is not None:
+                if phase in {"repair", "delta_replay"}:
+                    item.setdefault("estimated_objective", parent_objective * 0.99)
+                else:
+                    item.setdefault("estimated_objective", parent_objective)
+        return merged
+
+    def _enqueue_seed_queue(
+        self,
+        *,
+        queue: list[dict[str, Any]],
+        new_items: Sequence[Mapping[str, Any]],
+        max_size: int,
+        tie_epsilon: float,
+    ) -> None:
+        if max_size <= 0:
+            return
+        existing: set[str] = set()
+        for seed in queue:
+            params = seed.get("params")
+            if isinstance(params, Mapping):
+                existing.add(self._seed_identity(params))
+
+        tie_eps = float(max(0.0, tie_epsilon))
+        for item in new_items:
+            if len(queue) >= max_size:
+                break
+            params = item.get("params")
+            if not isinstance(params, Mapping):
+                continue
+            identity = self._seed_identity(params)
+            if identity in existing:
+                continue
+
+            parent_hashes = item.get("lineage_parent_hashes")
+            if not isinstance(parent_hashes, list) or not parent_hashes:
+                print(
+                    "[Coordinator] Queue rejection: missing lineage_parent_hashes for frontier admission."
+                )
+                continue
+            reason_raw = item.get("improvement_reason")
+            reason = str(reason_raw).strip() if reason_raw is not None else ""
+            if not reason:
+                print(
+                    "[Coordinator] Queue rejection: missing improvement_reason for frontier admission."
+                )
+                continue
+
+            parent_feasibility = self._as_finite_float(item.get("parent_feasibility"))
+            estimated_feasibility = self._as_finite_float(
+                item.get("estimated_feasibility")
+            )
+            parent_objective = self._as_finite_float(item.get("parent_objective"))
+            estimated_objective = self._as_finite_float(item.get("estimated_objective"))
+            if parent_feasibility is not None and estimated_feasibility is not None:
+                improved_feasibility = float(estimated_feasibility) + tie_eps < float(
+                    parent_feasibility
+                )
+                tied_feasibility = (
+                    abs(float(estimated_feasibility) - float(parent_feasibility))
+                    <= tie_eps
+                )
+                improved_objective = False
+                if parent_objective is not None and estimated_objective is not None:
+                    improved_objective = float(estimated_objective) + tie_eps < float(
+                        parent_objective
+                    )
+                if not improved_feasibility and not (
+                    tied_feasibility and improved_objective
+                ):
+                    print(
+                        "[Coordinator] Queue rejection: frontier admission policy rejected non-improving seed."
+                    )
+                    continue
+
+            queue.append(dict(item))
+            existing.add(identity)
 
     def _normalize_seed_batch(
         self,
@@ -1252,11 +2196,16 @@ class Coordinator:
 
         if "r_cos" not in seed or "z_sin" not in seed:
             return None
-        return {
+        params_payload = dict(seed)
+        planner_intent = params_payload.pop("planner_intent", None)
+        normalized_seed = {
             "seed": int(seed.get("seed", default_seed)),
-            "params": dict(seed),
+            "params": params_payload,
             "source": str(seed.get("source", "seed_normalized")),
         }
+        if isinstance(planner_intent, Mapping):
+            normalized_seed["planner_intent"] = dict(planner_intent)
+        return normalized_seed
 
     def _stable_fallback_seed(self, cycle: int) -> dict[str, Any] | None:
         problem_key = (self.cfg.problem or "p3").lower()
