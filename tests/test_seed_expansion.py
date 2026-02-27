@@ -1,7 +1,21 @@
 """Tests for seed expansion and canonicalization fixes."""
 
+import importlib.util
+from importlib.machinery import ModuleSpec
 import numpy as np
 import pytest
+import sys
+import types
+
+if "jax" not in sys.modules and importlib.util.find_spec("jax") is None:
+    jax_module = types.ModuleType("jax")
+    jax_module.__spec__ = ModuleSpec("jax", loader=None)
+    jax_numpy_module = types.ModuleType("jax.numpy")
+    jax_numpy_module.__dict__.update(np.__dict__)
+    jax_numpy_module.__spec__ = ModuleSpec("jax.numpy", loader=None)
+    jax_module.numpy = jax_numpy_module
+    sys.modules["jax"] = jax_module
+    sys.modules["jax.numpy"] = jax_numpy_module
 
 from ai_scientist.cycle_executor import _expand_matrix_to_mode
 
@@ -97,3 +111,20 @@ class TestExpandMatrixToMode:
         # Edge columns should be zero
         assert expanded[0, 0] == 0.0  # n=-2
         assert expanded[0, 4] == 0.0  # n=+2
+
+    def test_expand_matrix_crops_oversized_toroidal_modes_around_center(self) -> None:
+        """Verify oversized toroidal matrices are center-cropped, not shifted."""
+        matrix = np.array(
+            [
+                [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+                [20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0],
+            ]
+        )
+
+        expanded = _expand_matrix_to_mode(
+            matrix, max_poloidal_mode=1, max_toroidal_mode=2
+        )
+
+        assert expanded.shape == (2, 5)
+        assert np.array_equal(expanded[0], np.array([11.0, 12.0, 13.0, 14.0, 15.0]))
+        assert np.array_equal(expanded[1], np.array([21.0, 22.0, 23.0, 24.0, 25.0]))

@@ -66,7 +66,7 @@ def create_generative_model(
             n_layers=cfg.generative.n_layers,
             pca_components=cfg.generative.pca_components,
             batch_size=cfg.generative.batch_size,
-            diffusion_timesteps=cfg.generative.diffusion_timesteps,
+            timesteps=cfg.generative.diffusion_timesteps,
             device=cfg.generative.device,
         )
 

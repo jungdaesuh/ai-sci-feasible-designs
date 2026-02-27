@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
+from dataclasses import replace
 
 from ai_scientist.cycle_executor import CycleExecutor
 from ai_scientist import config as ai_config
@@ -183,6 +184,9 @@ def test_coordinator_rebuilt_with_overrides(MockCoordinator, mock_config):
     passed_config = call_args[0][0]  # First arg is config
 
     assert passed_config.budgets.screen_evals_per_cycle == 999
+    # Empty cycles should still persist numeric budget/cycle rows.
+    assert mock_world_model.record_cycle.called
+    assert mock_world_model.record_cycle_summary.called
     # Verify it was NOT the initial coordinator reused (or if it was reused, it was updated - but our fix forces rebuild)
     # Since we mocked the class, if it was reused, the class wouldn't be called.
     # So MockCoordinator.called proves it was rebuilt.
@@ -236,3 +240,53 @@ def test_generative_model_fit_called_once(MockCoordinator, mock_config):
     # Verification
     # fit should be called exactly once
     assert mock_gen_model.fit.call_count == 1
+
+
+@patch("ai_scientist.cycle_executor.Coordinator")
+def test_cycle_executor_passes_planner_intent_to_aso(MockCoordinator, mock_config):
+    config_with_aso = replace(mock_config, aso=replace(mock_config.aso, enabled=True))
+    mock_world_model = MagicMock(spec=memory.WorldModel)
+    mock_budget_controller = MagicMock()
+    mock_budget_controller.snapshot.return_value = MagicMock(
+        screen_evals_per_cycle=10,
+        promote_top_k=5,
+        max_high_fidelity_evals_per_cycle=5,
+    )
+    mock_fidelity_controller = MagicMock()
+    mock_coord = MockCoordinator.return_value
+    mock_coord.produce_candidates_aso.return_value = []
+
+    executor = CycleExecutor(
+        config=config_with_aso,
+        world_model=mock_world_model,
+        planner=MagicMock(),
+        budget_controller=mock_budget_controller,
+        fidelity_controller=mock_fidelity_controller,
+    )
+
+    planner_intent = {
+        "primary_constraint_order": ["aspect_ratio", "qi"],
+        "penalty_focus_indices": [0, 2],
+        "confidence": 0.6,
+    }
+
+    with patch(
+        "ai_scientist.cycle_executor.tools.summarize_p3_candidates"
+    ) as mock_summary:
+        mock_summary_obj = MagicMock()
+        mock_summary_obj.feasible_count = 0
+        mock_summary_obj.hv_score = 0.0
+        mock_summary.return_value = mock_summary_obj
+
+        executor.run_cycle(
+            cycle_index=0,
+            experiment_id=1,
+            governance_stage="s1",
+            git_sha="sha",
+            constellaration_sha="sha",
+            surrogate_model=MagicMock(),
+            planner_intent=planner_intent,
+        )
+
+    call_kwargs = mock_coord.produce_candidates_aso.call_args.kwargs
+    assert call_kwargs["planner_intent"] == planner_intent

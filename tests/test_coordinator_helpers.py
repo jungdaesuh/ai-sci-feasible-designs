@@ -1,3 +1,4 @@
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 from ai_scientist import config as ai_config
@@ -30,3 +31,19 @@ def test_coordinator_helpers_imports():
     assert settings is not None
     print(f"Settings created: {type(settings)}")
     assert settings.forward_model_settings is not None
+
+
+def test_build_optimization_settings_is_problem_aware():
+    cfg = ai_config.load_experiment_config("configs/experiment.example.yaml")
+    wm = MagicMock()
+    planner = MagicMock()
+    coord = Coordinator(cfg, wm, planner, generative_model=MagicMock())
+
+    p1_cfg = replace(cfg, problem="p1")
+    p1_settings = coord._build_optimization_settings(p1_cfg).forward_model_settings
+    assert p1_settings.vmec_preset_settings.fidelity == "low_fidelity"
+    assert p1_settings.qi_settings is None
+
+    p3_cfg = replace(cfg, problem="p3")
+    p3_settings = coord._build_optimization_settings(p3_cfg).forward_model_settings
+    assert p3_settings.vmec_preset_settings.fidelity == "very_low_fidelity"

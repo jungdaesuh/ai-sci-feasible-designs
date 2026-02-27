@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
@@ -13,8 +15,13 @@ import pydantic
 
 from ai_scientist import agent as agent_module
 from ai_scientist import config as ai_config
-from ai_scientist import memory, rag, tools, tools_api
+from ai_scientist import prompts
+from ai_scientist import memory, model_provider, rag, tools, tools_api
+from ai_scientist.constraints import get_constraint_names
 from ai_scientist.config import ASOConfig
+
+_DEFAULT_EXPERIENCE_INJECTION_PROBABILITY = 0.5
+_DEFAULT_AGENT_SEED_CANDIDATE_COUNT = 3
 
 
 class DirectiveAction(Enum):
@@ -45,8 +52,22 @@ class OptimizationDirective(pydantic.BaseModel):
     alm_overrides: Optional[Mapping[str, Any]] = None  # Direct ALM state manipulation
     suggested_params: Optional[Mapping[str, Any]] = None
     reasoning: str = ""
+    override_reason: str | None = None
     confidence: float = 1.0
     source: DirectiveSource = DirectiveSource.HEURISTIC
+
+
+class PlannerIntent(pydantic.BaseModel):
+    """Structured cycle-level intent from planner to ASO (soft prior)."""
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    primary_constraint_order: list[str] = pydantic.Field(default_factory=list)
+    target_move_family: str | None = None
+    forbidden_moves: list[str] = pydantic.Field(default_factory=list)
+    penalty_focus_indices: list[int] = pydantic.Field(default_factory=list)
+    restart_policy: str | None = None
+    confidence: float = pydantic.Field(default=0.5, ge=0.0, le=1.0)
 
 
 class ConstraintDiagnostic(pydantic.BaseModel):
@@ -259,7 +280,9 @@ class PlanningOutcome:
         rag_snippets: Sequence[Mapping[str, str]],
         graph_summary: Mapping[str, Any] | None = None,
         suggested_params: Mapping[str, Any] | None = None,
+        suggested_params_list: Sequence[Mapping[str, Any]] | None = None,
         config_overrides: Mapping[str, Any] | None = None,
+        planner_intent: Mapping[str, Any] | None = None,
     ) -> None:
         self.context = context
         self.evaluation_summary = evaluation_summary
@@ -267,7 +290,11 @@ class PlanningOutcome:
         self.rag_snippets = rag_snippets
         self.graph_summary = graph_summary
         self.suggested_params = suggested_params
+        self.suggested_params_list = (
+            list(suggested_params_list) if suggested_params_list else None
+        )
         self.config_overrides = config_overrides
+        self.planner_intent = planner_intent
 
 
 def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | None:
@@ -287,6 +314,57 @@ def _serialize_summary(summary: tools.P3Summary | None) -> Mapping[str, Any] | N
             for entry in summary.pareto_entries
         ],
     }
+
+
+def _coerce_graph_attrs(attrs: Any) -> Mapping[str, Any]:
+    if isinstance(attrs, Mapping):
+        return attrs
+    return {"value": attrs}
+
+
+def _graph_nodes(graph: Any) -> list[tuple[str, Mapping[str, Any]]]:
+    nodes_accessor = getattr(graph, "nodes", None)
+    if callable(nodes_accessor):
+        raw_nodes = nodes_accessor(data=True)
+        if not isinstance(raw_nodes, Iterable):
+            return []
+        parsed_nodes: list[tuple[str, Mapping[str, Any]]] = []
+        for item in raw_nodes:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            node_id, attrs = item
+            parsed_nodes.append((str(node_id), _coerce_graph_attrs(attrs)))
+        return parsed_nodes
+    if isinstance(nodes_accessor, Mapping):
+        return [
+            (str(node_id), _coerce_graph_attrs(attrs))
+            for node_id, attrs in nodes_accessor.items()
+        ]
+    return []
+
+
+def _graph_edges(graph: Any) -> list[tuple[str, str, Mapping[str, Any]]]:
+    edges_accessor = getattr(graph, "edges", None)
+    if callable(edges_accessor):
+        raw_edges = edges_accessor(data=True)
+        if not isinstance(raw_edges, Iterable):
+            return []
+        parsed_edges: list[tuple[str, str, Mapping[str, Any]]] = []
+        for item in raw_edges:
+            if not isinstance(item, tuple) or len(item) != 3:
+                continue
+            src, dst, attrs = item
+            parsed_edges.append((str(src), str(dst), _coerce_graph_attrs(attrs)))
+        return parsed_edges
+    if isinstance(edges_accessor, Iterable):
+        parsed_edges: list[tuple[str, str, Mapping[str, Any]]] = []
+        for item in edges_accessor:
+            if not isinstance(item, tuple) or len(item) != 3:
+                continue
+            src, dst, attrs = item
+            parsed_edges.append((str(src), str(dst), _coerce_graph_attrs(attrs)))
+        return parsed_edges
+    return []
 
 
 class PlanningAgent:
@@ -559,6 +637,111 @@ class PlanningAgent:
             "is_stellarator_symmetric": True,
         }
 
+    def _deterministic_roll(
+        self,
+        *,
+        cycle_number: int,
+        random_seed: int,
+        experiment_id: int | None,
+    ) -> float:
+        payload = f"{cycle_number}:{random_seed}:{experiment_id or 0}".encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()[:8]
+        return int(digest, 16) / 0xFFFFFFFF
+
+    def _should_inject_experience(
+        self,
+        *,
+        cycle_number: int,
+        random_seed: int,
+        experiment_id: int | None,
+        probability: float = _DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+    ) -> bool:
+        return self._deterministic_roll(
+            cycle_number=cycle_number,
+            random_seed=random_seed,
+            experiment_id=experiment_id,
+        ) < max(0.0, min(1.0, probability))
+
+    def _build_experience_memo(
+        self,
+        *,
+        recent_successes: Sequence[Mapping[str, Any]],
+        recent_near_successes: Sequence[Mapping[str, Any]],
+        recent_failures: Sequence[Mapping[str, Any]],
+    ) -> str:
+        def _fmt(entries: Sequence[Mapping[str, Any]], label: str) -> str:
+            if not entries:
+                return f"{label}: none"
+            compact = []
+            for item in entries[:2]:
+                worst = item.get("worst_constraint") or "none"
+                feasibility = item.get("feasibility")
+                objective = item.get("objective")
+                compact.append(
+                    f"({label} feas={feasibility}, obj={objective}, worst={worst})"
+                )
+            return " ".join(compact)
+
+        return " | ".join(
+            [
+                _fmt(recent_successes, "success"),
+                _fmt(recent_near_successes, "near"),
+                _fmt(recent_failures, "failure"),
+            ]
+        )
+
+    def _build_planning_system_prompt(
+        self,
+        *,
+        cfg: ai_config.ExperimentConfig,
+        cycle_number: int,
+        available_tools: Sequence[Mapping[str, Any]],
+    ) -> str:
+        constraint_names = get_constraint_names(cfg.problem, for_alm=True)
+        max_penalty_index = len(constraint_names) - 1
+        gate_prompt = str(
+            getattr(self.planning_gate, "system_prompt", "") or ""
+        ).strip()
+        problem_prompt = prompts.build_problem_prompt(
+            cfg.problem, cfg.fidelity_ladder.screen
+        ).strip()
+        contract_prompt = (
+            "Repository contract:\n"
+            "- Feasibility-first search: prioritize reducing constraint violations before objective tuning.\n"
+            "- Bounded edits: each seed proposal should change a small subset of coefficients; avoid wholesale rewrites.\n"
+            "- Reuse history: leverage recent_successes, recent_near_successes, and recent_failures when present.\n"
+            "- Respect deterministic downstream selection; return multiple candidates only when they are diverse.\n"
+        )
+        protocol_prompt = (
+            "PROTOCOL:\n"
+            "1. Analyze cycle context, especially experience_memo, scratchpad_summary, feedback_adapter, and rag_snippets.\n"
+            "2. You may call tools to test hypotheses (retrieve_rag/evaluate/propose/recombine).\n"
+            '3. Tool call format: {"tool":"<name>","arguments":{...}}.\n'
+            '4. Finalization format: {"suggested_params_list":[{...},{...}], "config_overrides":{...}, "planner_intent":{...}}.\n'
+            "   - Prefer 3 candidates (k=3) and keep 1<=k<=3.\n"
+            '   - Backward-compatible alternative accepted: {"suggested_params":{...}}.\n'
+            "   - You MUST provide either valid suggested_params(_list) OR seed_fallback='template'.\n"
+            "   - config_overrides is optional and must be a JSON object when present.\n"
+            "   - planner_intent is optional and must be a JSON object when present.\n"
+            "   - planner_intent schema keys: primary_constraint_order, target_move_family, forbidden_moves, penalty_focus_indices, restart_policy, confidence.\n"
+            f"   - planner_intent.primary_constraint_order uses ALM names: {constraint_names}.\n"
+            f"   - planner_intent.penalty_focus_indices must be integer indices in [0, {max_penalty_index}].\n"
+            "5. seed_fallback='template' is allowed if you cannot produce valid coefficients.\n"
+            "If no valid finalization payload is returned within turn budget, runtime falls back to template seed.\n"
+            "Respond with JSON only."
+        )
+        sections = [
+            f"You are the Planning Agent for the AI Scientist (cycle {cycle_number}).",
+            gate_prompt,
+            problem_prompt,
+            contract_prompt,
+            "Available tools:",
+            json.dumps(list(available_tools), indent=2),
+            protocol_prompt,
+            "Think step-by-step. Max turns: 5.",
+        ]
+        return "\n\n".join(section for section in sections if section)
+
     def _build_context(
         self,
         *,
@@ -572,6 +755,13 @@ class PlanningAgent:
         rag_snippets: Sequence[Mapping[str, str]],
         graph_summary: Mapping[str, Any] | None = None,
         failure_cases: Sequence[Mapping[str, Any]] | None = None,
+        success_cases: Sequence[Mapping[str, Any]] | None = None,
+        near_success_cases: Sequence[Mapping[str, Any]] | None = None,
+        feedback_adapter: Mapping[str, Any] | None = None,
+        experience_memo: str | None = None,
+        experience_injected: bool = True,
+        experience_injection_probability: float = _DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+        scratchpad_summary: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         context = {
             "cycle_index": cycle_index + 1,
@@ -585,10 +775,131 @@ class PlanningAgent:
             "rag_snippets": list(rag_snippets),
             "graph_summary": graph_summary,
             "failure_cases": list(failure_cases) if failure_cases else [],
+            "recent_failures": list(failure_cases) if failure_cases else [],
+            "recent_successes": list(success_cases) if success_cases else [],
+            "recent_near_successes": (
+                list(near_success_cases) if near_success_cases else []
+            ),
+            "experience_memo": experience_memo or "",
+            "experience_injected": experience_injected,
+            "experience_injection_probability": experience_injection_probability,
+            "scratchpad_summary": dict(scratchpad_summary or {}),
+            "feedback_adapter": dict(feedback_adapter or {}),
             "toolset": list(self.planning_gate.allowed_tools),
         }
         self.last_context = context
         return context
+
+    def _parse_planner_intent(
+        self,
+        raw_intent: Any,
+        *,
+        problem: str,
+    ) -> PlannerIntent | None:
+        if raw_intent is None:
+            return None
+        if not isinstance(raw_intent, Mapping):
+            raise ValueError("planner_intent must be a JSON object.")
+
+        intent = PlannerIntent.model_validate(raw_intent)
+        allowed_constraint_names = get_constraint_names(problem, for_alm=True)
+        allowed_constraint_set = set(allowed_constraint_names)
+
+        if len(set(intent.primary_constraint_order)) != len(
+            intent.primary_constraint_order
+        ):
+            raise ValueError("planner_intent.primary_constraint_order has duplicates.")
+
+        unknown_constraints = [
+            name
+            for name in intent.primary_constraint_order
+            if name not in allowed_constraint_set
+        ]
+        if unknown_constraints:
+            raise ValueError(
+                f"planner_intent.primary_constraint_order contains unknown constraints: {unknown_constraints}"
+            )
+
+        if len(set(intent.penalty_focus_indices)) != len(intent.penalty_focus_indices):
+            raise ValueError("planner_intent.penalty_focus_indices has duplicates.")
+
+        max_index = len(allowed_constraint_names) - 1
+        out_of_range = [
+            idx
+            for idx in intent.penalty_focus_indices
+            if idx < 0 or idx > max_index
+        ]
+        if out_of_range:
+            raise ValueError(
+                f"planner_intent.penalty_focus_indices out of range: {out_of_range}; expected 0..{max_index}"
+            )
+
+        return intent
+
+    def _resolve_seeds_for_final_action(
+        self,
+        action: Mapping[str, Any],
+        *,
+        template_params: Mapping[str, Any],
+    ) -> tuple[list[Mapping[str, Any]] | None, str | None]:
+        def _validate_seed(seed_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.make_boundary(seed_payload)
+            return copy.deepcopy(dict(seed_payload))
+
+        def _template_seed() -> list[Mapping[str, Any]]:
+            seed = copy.deepcopy(dict(template_params))
+            self.make_boundary(seed)
+            return [seed]
+
+        fallback_raw = action.get("seed_fallback")
+        fallback = str(fallback_raw).strip().lower() if fallback_raw is not None else ""
+        use_template_fallback = fallback == "template"
+
+        raw_suggested_list = action.get("suggested_params_list")
+        if raw_suggested_list is not None:
+            if not isinstance(raw_suggested_list, list):
+                if use_template_fallback:
+                    return _template_seed(), fallback
+                raise ValueError("suggested_params_list must be a JSON array.")
+            if len(raw_suggested_list) == 0:
+                if use_template_fallback:
+                    return _template_seed(), fallback
+                raise ValueError("suggested_params_list cannot be empty.")
+            resolved_list: list[Mapping[str, Any]] = []
+            for idx, raw_seed in enumerate(
+                raw_suggested_list[:_DEFAULT_AGENT_SEED_CANDIDATE_COUNT]
+            ):
+                if not isinstance(raw_seed, Mapping):
+                    if use_template_fallback:
+                        return _template_seed(), fallback
+                    raise ValueError(
+                        f"suggested_params_list[{idx}] must be a JSON object."
+                    )
+                try:
+                    resolved_list.append(_validate_seed(raw_seed))
+                except Exception:
+                    if use_template_fallback:
+                        return _template_seed(), fallback
+                    raise
+            if resolved_list:
+                return resolved_list, None
+
+        raw_suggested = action.get("suggested_params")
+        if raw_suggested is not None:
+            if not isinstance(raw_suggested, Mapping):
+                if use_template_fallback:
+                    return _template_seed(), fallback
+                raise ValueError("suggested_params must be a JSON object.")
+            try:
+                return [_validate_seed(raw_suggested)], None
+            except Exception:
+                if use_template_fallback:
+                    return _template_seed(), fallback
+                raise
+
+        if use_template_fallback:
+            return _template_seed(), fallback
+        return None, None
 
     def plan_cycle(
         self,
@@ -633,6 +944,17 @@ class PlanningAgent:
         # Property Graph Snapshot (if world_model connected)
         graph_summary: Mapping[str, Any] | None = None
         failure_cases: Sequence[Mapping[str, Any]] = []
+        success_cases: Sequence[Mapping[str, Any]] = []
+        near_success_cases: Sequence[Mapping[str, Any]] = []
+        feedback_adapter: Mapping[str, Any] = {}
+        experience_injected = self._should_inject_experience(
+            cycle_number=cycle_number,
+            random_seed=cfg.random_seed,
+            experiment_id=experiment_id,
+            probability=_DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+        )
+        experience_memo = ""
+        scratchpad_summary: Mapping[str, Any] | None = None
 
         if self.world_model and experiment_id is not None:
             pg = self.world_model.to_networkx(experiment_id)
@@ -640,10 +962,10 @@ class PlanningAgent:
             graph_dir.mkdir(parents=True, exist_ok=True)
             graph_file = graph_dir / f"cycle_{cycle_number}.json"
 
-            nodes = [{"id": node_id, **attrs} for node_id, attrs in pg.nodes(data=True)]
+            nodes = [{"id": node_id, **attrs} for node_id, attrs in _graph_nodes(pg)]
             edges = [
                 {"src": src, "dst": dst, "attrs": attrs}
-                for src, dst, attrs in pg.edges(data=True)
+                for src, dst, attrs in _graph_edges(pg)
             ]
             snapshot_data = {"nodes": nodes, "edges": edges}
             graph_file.write_text(json.dumps(snapshot_data, indent=2), encoding="utf-8")
@@ -655,10 +977,41 @@ class PlanningAgent:
                 "snapshot_path": str(graph_file),
             }
 
-            # Retrieve recent failures for reflection
-            failure_cases = self.world_model.recent_failures(
-                experiment_id=experiment_id, problem=cfg.problem, limit=5
-            )
+            if hasattr(self.world_model, "recent_experience_pack"):
+                experience_pack = self.world_model.recent_experience_pack(
+                    experiment_id=experiment_id,
+                    problem=cfg.problem,
+                    limit_per_bucket=3,
+                )
+                feedback_adapter = dict(experience_pack.get("feedback_adapter", {}))
+                if experience_injected:
+                    success_cases = list(experience_pack.get("recent_successes", []))
+                    near_success_cases = list(
+                        experience_pack.get("recent_near_successes", [])
+                    )
+                    failure_cases = list(experience_pack.get("recent_failures", []))
+                experience_memo = self._build_experience_memo(
+                    recent_successes=success_cases,
+                    recent_near_successes=near_success_cases,
+                    recent_failures=failure_cases,
+                )
+            else:
+                failure_cases = self.world_model.recent_failures(
+                    experiment_id=experiment_id,
+                    problem=cfg.problem,
+                    limit=5,
+                )
+                experience_memo = self._build_experience_memo(
+                    recent_successes=(),
+                    recent_near_successes=(),
+                    recent_failures=failure_cases,
+                )
+            if cycle_number > 1 and hasattr(self.world_model, "scratchpad_cycle_summary"):
+                scratchpad_summary = self.world_model.scratchpad_cycle_summary(
+                    experiment_id=experiment_id,
+                    cycle=cycle_number - 1,
+                    limit=20,
+                )
 
         context = self._build_context(
             cycle_index=cycle_index,
@@ -671,14 +1024,21 @@ class PlanningAgent:
             rag_snippets=rag_snippets,
             graph_summary=graph_summary,
             failure_cases=failure_cases,
+            success_cases=success_cases,
+            near_success_cases=near_success_cases,
+            feedback_adapter=feedback_adapter,
+            experience_memo=experience_memo,
+            experience_injected=experience_injected,
+            experience_injection_probability=_DEFAULT_EXPERIENCE_INJECTION_PROBABILITY,
+            scratchpad_summary=scratchpad_summary,
         )
 
         suggested_params = None
+        suggested_params_list: list[Mapping[str, Any]] | None = None
         config_overrides = None
+        planner_intent: PlannerIntent | None = None
 
         if self.config.agent_gates:
-            from ai_scientist import model_provider
-
             provider = self.config.get_provider()
 
             tools_schemas = tools_api.list_tool_schemas()
@@ -688,22 +1048,10 @@ class PlanningAgent:
                 if schema["name"] in self.planning_gate.allowed_tools
             ]
 
-            system_prompt = (
-                f"You are the Planning Agent for the AI Scientist (cycle {cycle_number}).\n"
-                f"Your goal is to optimize a stellarator design (problem: {cfg.problem}) by analyzing the "
-                "experiment context and literature.\n\n"
-                "You have access to the following tools:\n"
-                f"{json.dumps(available_tools, indent=2)}\n\n"
-                "PROTOCOL:\n"
-                "1. Analyze the context, specifically 'failure_cases' (to see what constraints are being violated) and 'rag_snippets'.\n"
-                "2. You may use tools to gather more info or test hypotheses (e.g., 'retrieve_rag', 'evaluate_p1', 'evaluate_p2', 'evaluate_p3', 'propose_boundary').\n"
-                '3. To call a tool, output a JSON object with {"tool": "<name>", "arguments": {<args>}}.\n'
-                '4. To finish and commit to a plan, output a JSON object with {"suggested_params": {...}, "config_overrides": {...}}.\n'
-                "   - 'suggested_params' (optional): A dictionary matching the structure of 'current_boundary' for the next candidate seed.\n"
-                "   - 'config_overrides' (optional): A dictionary to adjust experiment settings.\n"
-                "       - Example: {'proposal_mix': {'exploration_ratio': 0.8}}\n"
-                "       - Example: {'constraint_weights': {'mhd': 50.0}} (Soft ALM: Increase weight if MHD is failing)\n\n"
-                "Think step-by-step. You have a maximum of 5 turns."
+            system_prompt = self._build_planning_system_prompt(
+                cfg=cfg,
+                cycle_number=cycle_number,
+                available_tools=available_tools,
             )
 
             messages = [
@@ -762,15 +1110,83 @@ class PlanningAgent:
                     messages.append({"role": "assistant", "content": content})
 
                     # Check for final plan
-                    if "suggested_params" in action or "config_overrides" in action:
-                        suggested_params = action.get("suggested_params")
-                        config_overrides = action.get("config_overrides")
+                    if (
+                        "suggested_params_list" in action
+                        or "suggested_params" in action
+                        or "config_overrides" in action
+                        or "planner_intent" in action
+                        or "seed_fallback" in action
+                    ):
+                        raw_overrides = action.get("config_overrides")
+                        if raw_overrides is not None and not isinstance(
+                            raw_overrides, Mapping
+                        ):
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": "Error: config_overrides must be a JSON object when provided.",
+                                }
+                            )
+                            continue
+
+                        try:
+                            planner_intent = self._parse_planner_intent(
+                                action.get("planner_intent"),
+                                problem=cfg.problem,
+                            )
+                        except Exception as intent_exc:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": f"Error: Invalid planner_intent payload. {intent_exc}",
+                                }
+                            )
+                            continue
+
+                        try:
+                            resolved_seeds, fallback_used = (
+                                self._resolve_seeds_for_final_action(
+                                    action,
+                                    template_params=params,
+                                )
+                            )
+                        except Exception as seed_exc:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": f"Error: Invalid seed payload. {seed_exc}",
+                                }
+                            )
+                            continue
+
+                        if resolved_seeds is None:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": "Error: Finalization requires valid suggested_params or seed_fallback ('template').",
+                                }
+                            )
+                            continue
+
+                        suggested_params_list = list(resolved_seeds)
+                        suggested_params = dict(suggested_params_list[0])
+                        config_overrides = raw_overrides
                         print(f"[planner] Plan finalized in turn {turn + 1}")
-                        if suggested_params:
-                            print("[planner] Suggesting new boundary params")
+                        if fallback_used:
+                            print(
+                                f"[planner] Using explicit seed fallback path: {fallback_used}"
+                            )
+                        else:
+                            print(
+                                f"[planner] Suggesting {len(suggested_params_list)} boundary seed candidate(s)"
+                            )
                         if config_overrides:
                             print(
                                 f"[planner] Suggesting config overrides: {config_overrides}"
+                            )
+                        if planner_intent is not None:
+                            print(
+                                f"[planner] Suggesting planner intent: {planner_intent.model_dump(mode='json')}"
                             )
                         break
 
@@ -801,13 +1217,22 @@ class PlanningAgent:
                         messages.append(
                             {
                                 "role": "user",
-                                "content": "Error: No 'tool' or 'suggested_params' found in JSON.",
+                                "content": "Error: No supported action found. Provide a tool call or finalize with suggested_params/seed_fallback.",
                             }
                         )
 
                 except Exception as exc:
                     print(f"[planner] Turn {turn} failed: {exc}")
                     break
+
+        if self.config.agent_gates and suggested_params is None:
+            fallback_seed = copy.deepcopy(dict(params))
+            self.make_boundary(fallback_seed)
+            suggested_params = fallback_seed
+            suggested_params_list = [fallback_seed]
+            print(
+                "[planner] No valid seed returned; applying explicit fallback path: template."
+            )
 
         return PlanningOutcome(
             context=context,
@@ -816,7 +1241,13 @@ class PlanningAgent:
             rag_snippets=rag_snippets,
             graph_summary=graph_summary,
             suggested_params=suggested_params,
+            suggested_params_list=suggested_params_list,
             config_overrides=config_overrides,
+            planner_intent=(
+                planner_intent.model_dump(mode="json")
+                if planner_intent is not None
+                else None
+            ),
         )
 
     def _ensure_heuristic(self, aso_config: ASOConfig) -> HeuristicSupervisor:
@@ -829,6 +1260,7 @@ class PlanningAgent:
         diagnostics: OptimizerDiagnostics,
         cycle: int,
         aso_config: ASOConfig,
+        planner_intent: Mapping[str, Any] | None = None,
     ) -> OptimizationDirective:
         """
         Tiered supervision: heuristic first, LLM on demand.
@@ -845,18 +1277,29 @@ class PlanningAgent:
         # Tier 2: Try LLM with fallback
         if aso_config.use_heuristic_fallback:
             try:
-                return self._llm_supervise(diagnostics, cycle, aso_config)
+                return self._llm_supervise(
+                    diagnostics,
+                    cycle,
+                    aso_config,
+                    planner_intent=planner_intent,
+                )
             except Exception as e:
                 print(f"[Planner] LLM supervision failed: {e}, using heuristic")
                 return heuristic.analyze(diagnostics)
         else:
-            return self._llm_supervise(diagnostics, cycle, aso_config)
+            return self._llm_supervise(
+                diagnostics,
+                cycle,
+                aso_config,
+                planner_intent=planner_intent,
+            )
 
     def _llm_supervise(
         self,
         diagnostics: OptimizerDiagnostics,
         cycle: int,
         aso_config: ASOConfig,
+        planner_intent: Mapping[str, Any] | None = None,
     ) -> OptimizationDirective:
         """LLM-based supervision with real ALM state context."""
         # Retrieve relevant context if stagnating
@@ -867,7 +1310,12 @@ class PlanningAgent:
                 k=2,
             )
 
-        system_prompt = self._build_supervision_prompt(cycle, rag_context, diagnostics)
+        system_prompt = self._build_supervision_prompt(
+            cycle,
+            rag_context,
+            diagnostics,
+            planner_intent=planner_intent,
+        )
         messages = [
             {"role": "system", "content": system_prompt},
             {
@@ -875,8 +1323,6 @@ class PlanningAgent:
                 "content": f"Current ALM diagnostics:\n{diagnostics.to_json()}",
             },
         ]
-
-        from ai_scientist import model_provider
 
         provider = self.config.get_provider()
 
@@ -913,21 +1359,47 @@ class PlanningAgent:
         raise RuntimeError("LLM supervision failed after retries")
 
     def _build_supervision_prompt(
-        self, cycle: int, rag_context: list, diagnostics: OptimizerDiagnostics
+        self,
+        cycle: int,
+        rag_context: list,
+        diagnostics: OptimizerDiagnostics,
+        planner_intent: Mapping[str, Any] | None = None,
     ) -> str:
         rag_section = ""
         if rag_context:
             rag_section = (
                 f"\n\nRelevant knowledge:\n{json.dumps(rag_context, indent=2)}"
             )
+        intent_section = "\nPlanner intent prior: none."
+        if planner_intent:
+            intent_section = (
+                "\nPlanner intent prior (SOFT PRIOR):\n"
+                f"{json.dumps(planner_intent, indent=2)}\n"
+                "Treat planner intent as guidance. ALM diagnostics are hard truth."
+            )
 
-        constraint_names = [c.name for c in diagnostics.constraint_diagnostics]
+        constraint_rows = [
+            {
+                "index": idx,
+                "name": c.name,
+                "violation": round(c.violation, 6),
+                "penalty": round(c.penalty, 6),
+                "multiplier": round(c.multiplier, 6),
+                "trend": c.trend,
+                "delta": round(c.delta, 6),
+            }
+            for idx, c in enumerate(diagnostics.constraint_diagnostics)
+        ]
+        constraint_priority = sorted(
+            constraint_rows, key=lambda row: float(row["violation"]), reverse=True
+        )
 
         return f"""You are the ASO Supervisor for the AI Scientist (cycle {cycle}).
 
 You have access to REAL Augmented Lagrangian Method (ALM) state:
 - objective: Current objective function value
-- constraints: {constraint_names}
+- constraints (with index mapping): {json.dumps(constraint_rows, indent=2)}
+- constraint priority (highest violation first): {json.dumps(constraint_priority, indent=2)}
 - penalty_parameters: How strongly each constraint is being enforced
 - multipliers: Lagrange multipliers (learned constraint importance)
 - bounds_norm: Size of trust region (smaller = more focused search)
@@ -942,15 +1414,21 @@ OUTPUT FORMAT (JSON):
 {{
   "action": "CONTINUE | ADJUST | STOP | RESTART",
   "alm_overrides": {{
-    "penalty_parameters": [p1, p2, ...]  // Optional: new penalties per constraint
+    "penalty_parameters": [p1, p2, ...]  // Optional: same length as constraints
   }},
   "reasoning": "brief explanation"
 }}
 
-ADJUSTMENT STRATEGY:
-- If a constraint has high violation but low penalty: increase that penalty
-- If stuck (small bounds_norm) with violations: try RESTART
-- If multiplier is high but violation persists: constraint may be infeasible
+POLICY (feasibility-first, bounded edits):
+- Prioritize reducing max violation before objective optimization.
+- ADJUST can modify at most 2 indices per call.
+- Keep each adjusted penalty within [0.5x, 4.0x] of its current value.
+- Do not reorder penalty array; index mapping is strict.
+- Use STOP only when feasible and objective change is negligible, or trajectory is clearly hopeless.
+- Use RESTART when stagnating with non-trivial violation and tight bounds.
+- If multiplier is high while violation stays high, mark that constraint as likely bottleneck in reasoning.
+- If planner intent conflicts with diagnostics, override it and include override_reason.
+{intent_section}
 {rag_section}
 
 Respond with ONLY valid JSON."""
@@ -973,5 +1451,6 @@ Respond with ONLY valid JSON."""
             alm_overrides=data.get("alm_overrides"),
             config_overrides=data.get("config_overrides"),
             reasoning=data.get("reasoning", ""),
+            override_reason=data.get("override_reason"),
             source=DirectiveSource.LLM,
         )

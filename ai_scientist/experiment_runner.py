@@ -12,7 +12,7 @@ import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -125,7 +125,9 @@ def run_experiment(
         else:
             experiment_id = world_model.start_experiment(
                 serialize_experiment_config(
-                    cfg, constellaration_sha=constellaration_sha
+                    cfg,
+                    constellaration_sha=constellaration_sha,
+                    planner_override=planner_mode,
                 ),
                 git_sha,
                 constellaration_sha=constellaration_sha,
@@ -175,6 +177,7 @@ def run_experiment(
             )
             suggested_params: list[dict[str, Any]] | None = None
             config_overrides: Mapping[str, Any] | None = None
+            planner_intent: Mapping[str, Any] | None = None
             if planning_agent:
                 stage_payload = [
                     {
@@ -195,10 +198,17 @@ def run_experiment(
                 context_snapshot = json.dumps(plan_outcome.context, indent=2)
                 print(f"[planner][cycle={idx + 1}] context:\n{context_snapshot}")
 
-                if plan_outcome.suggested_params:
+                if plan_outcome.suggested_params_list:
+                    suggested_params = [
+                        dict(seed_params)
+                        for seed_params in plan_outcome.suggested_params_list
+                    ]
+                elif plan_outcome.suggested_params:
                     suggested_params = [dict(plan_outcome.suggested_params)]
                 if plan_outcome.config_overrides:
                     config_overrides = plan_outcome.config_overrides
+                if plan_outcome.planner_intent:
+                    planner_intent = plan_outcome.planner_intent
 
             result = cycle_executor.run_cycle(
                 cycle_index=idx,
@@ -211,6 +221,7 @@ def run_experiment(
                 prev_feasibility_rate=last_feasibility_rate,
                 suggested_params=suggested_params,
                 config_overrides=config_overrides,
+                planner_intent=planner_intent,
                 verbose=bool(runtime and runtime.verbose),
                 slow=bool(runtime and runtime.slow),
                 screen_only=bool(runtime and runtime.screen_only),
@@ -340,10 +351,25 @@ def _export_batch_reports(
     return summary_path
 
 
-def main() -> None:
+def main(
+    *,
+    parse_args_fn: Callable[[], RunnerCLIConfig] = parse_args,
+    apply_run_preset_fn: Callable[
+        [RunnerCLIConfig], RunnerCLIConfig
+    ] = apply_run_preset,
+    validate_runtime_flags_fn: Callable[
+        [RunnerCLIConfig], None
+    ] = validate_runtime_flags,
+    run_experiment_fn: Callable[
+        [ai_config.ExperimentConfig, RunnerCLIConfig | None], None
+    ] = run_experiment,
+    load_experiment_config_fn: Callable[
+        [Path | None], ai_config.ExperimentConfig
+    ] = ai_config.load_experiment_config,
+) -> None:
     try:
-        cli = apply_run_preset(parse_args())
-        validate_runtime_flags(cli)
+        cli = apply_run_preset_fn(parse_args_fn())
+        validate_runtime_flags_fn(cli)
     except ValueError as exc:
         print(f"[runner] invalid CLI flags: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
@@ -364,7 +390,7 @@ def main() -> None:
         experiment = PRESET_MAP[cli.preset]()
         print(f"[runner] Loaded configuration from preset: {cli.preset}")
     else:
-        experiment = ai_config.load_experiment_config(cli.config_path)
+        experiment = load_experiment_config_fn(cli.config_path)
 
     if cli.problem:
         experiment = replace(experiment, problem=cli.problem)
@@ -387,8 +413,14 @@ def main() -> None:
             experiment,
             budgets=replace(experiment.budgets, pool_type=cli.pool_type),
         )
+    if cli.planner:
+        experiment = replace(experiment, planner=cli.planner)
     if cli.aso:
         experiment = replace(experiment, aso=replace(experiment.aso, enabled=True))
+    planner_mode = (cli.planner or experiment.planner).lower()
+    if planner_mode == "agent" and not experiment.aso.enabled:
+        experiment = replace(experiment, aso=replace(experiment.aso, enabled=True))
+        print("[runner] planner=agent detected; enabling ASO by default.")
     if getattr(cli, "disable_rl", False):
         run_overrides = dict(experiment.run_overrides or {})
         proposal_mix_overrides: dict[str, Any] = {}
@@ -411,9 +443,10 @@ def main() -> None:
         f"[runner] starting problem={experiment.problem} cycles={experiment.cycles} "
         f"screen_budget={experiment.budgets.screen_evals_per_cycle} "
         f"screen_only={cli.screen_only} promote_only={cli.promote_only} "
-        f"log_cache_stats={cli.log_cache_stats} slow={cli.slow} preset={preset_label}"
+        f"log_cache_stats={cli.log_cache_stats} slow={cli.slow} "
+        f"planner={planner_mode} aso_enabled={experiment.aso.enabled} preset={preset_label}"
     )
-    run_experiment(experiment, runtime=cli)
+    run_experiment_fn(experiment, runtime=cli)
 
 
 # Backward compatibility alias for tests

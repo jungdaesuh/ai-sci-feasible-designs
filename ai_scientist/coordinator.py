@@ -6,8 +6,10 @@ switching between Exploration (gathering new data/seeds) and Exploitation (optim
 
 from __future__ import annotations
 
+import json
 import time
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional
 
 import jax.numpy as jnp
 import numpy as np
@@ -16,6 +18,7 @@ from constellaration.optimization.augmented_lagrangian import AugmentedLagrangia
 
 from ai_scientist import config as ai_config
 from ai_scientist import memory
+from ai_scientist.forward_model import make_boundary_from_params
 from ai_scientist.optim.alm_bridge import (
     ALMContext,
     create_alm_context,
@@ -27,6 +30,7 @@ from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
 from ai_scientist.planner import (
     ConstraintDiagnostic,
     DirectiveAction,
+    DirectiveSource,
     OptimizationDirective,
     OptimizerDiagnostics,
     PlanningAgent,
@@ -54,6 +58,12 @@ def _alm_constraint_names(problem: str) -> list[str]:
     from ai_scientist.constraints import get_constraint_names
 
     return get_constraint_names(problem, for_alm=True)
+
+
+_VMEC_FAILURE_OBJECTIVE_SENTINEL = 9.0
+_VMEC_FAILURE_VIOLATION_SENTINEL = 5.0
+_VMEC_FAILURE_RESTART_STREAK = 2
+_VMEC_FAILURE_ABORT_STREAK = 4
 
 
 class TrajectoryState(pydantic.BaseModel):
@@ -186,122 +196,75 @@ class Coordinator:
                 "(skipped Surrogate/RL for diversity)"
             )
 
-        elif strategy == "EXPLOIT":
-            # ═══════════════════════════════════════════════════════════
-            # QUAD-HYBRID PIPELINE (EXPLOIT mode)
-            # ═══════════════════════════════════════════════════════════
-
-            # STAGE 1: Dream - Generate N seeds
-            explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
-            seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
-            print(f"[Coordinator] Dreamer generated {len(seeds)} seeds")
-
-            # STAGE 2: Pre-relax - Fast geometric smoothing
-            prerelax_ctx = {
-                "candidates": seeds,
-                "schema": self.surrogate._schema if self.surrogate else None,
-            }
-            prerelaxed = self.prerelax_worker.run(prerelax_ctx).get("candidates", [])
-            print(f"[Coordinator] Pre-relaxer smoothed {len(prerelaxed)} candidates")
-
-            # STAGE 3: Geometer - Validate geometric constraints
-            geo_ctx = {"candidates": prerelaxed}
-            valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
-            print(
-                f"[Coordinator] Geometer passed {len(valid_seeds)}/{len(prerelaxed)} candidates"
-            )
-
-            # STAGE 4: Surrogate Rank - Select top-K
-            if valid_seeds and self.surrogate and self.surrogate._trained:
-                ranked_seeds = self._surrogate_rank_seeds(valid_seeds, cycle)
-                k = min(100, len(ranked_seeds))
-                top_k = ranked_seeds[:k]
-                print(
-                    f"[Coordinator] Surrogate selected top-{k} candidates for RL refinement"
-                )
-            else:
-                top_k = valid_seeds[:100]
-
-            # STAGE 5: RL Refine - Micro-surgery on top-K only
-            if self.cfg.proposal_mix.rl_refinement_enabled:
-                rl_ctx = {
-                    "candidates": top_k,
-                    "target_metrics": explore_ctx.get("target_metrics"),
-                }
-                refined = self.rl_worker.run(rl_ctx).get("candidates", [])
-                print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
-            else:
-                refined = top_k
-                print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
-
-            # STAGE 6: Optimize - Final gradient descent
-            opt_ctx = {"initial_guesses": refined}
-            res = self.opt_worker.run(opt_ctx)
-            candidates = res.get("candidates", [])
-            print(
-                f"[Coordinator] Quad-Hybrid pipeline complete: {len(candidates)} final candidates"
-            )
-
-        else:  # HYBRID
-            # ═══════════════════════════════════════════════════════════
-            # QUAD-HYBRID PIPELINE (HYBRID mode - standard)
-            # ═══════════════════════════════════════════════════════════
-
-            # STAGE 1: Dream - Generate N seeds
-            explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
-            seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
-            print(f"[Coordinator] Dreamer generated {len(seeds)} seeds")
-
-            # STAGE 2: Pre-relax - Fast geometric smoothing
-            prerelax_ctx = {
-                "candidates": seeds,
-                "schema": self.surrogate._schema if self.surrogate else None,
-            }
-            prerelaxed = self.prerelax_worker.run(prerelax_ctx).get("candidates", [])
-            print(f"[Coordinator] Pre-relaxer smoothed {len(prerelaxed)} candidates")
-
-            # STAGE 3: Geometer - Validate geometric constraints
-            geo_ctx = {"candidates": prerelaxed}
-            valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
-            print(
-                f"[Coordinator] Geometer passed {len(valid_seeds)}/{len(prerelaxed)} candidates"
-            )
-
-            # STAGE 4: Surrogate Rank - Select top-K
-            if valid_seeds and self.surrogate and self.surrogate._trained:
-                ranked_seeds = self._surrogate_rank_seeds(valid_seeds, cycle)
-                k = min(100, len(ranked_seeds))
-                top_k = ranked_seeds[:k]
-                print(
-                    f"[Coordinator] Surrogate selected top-{k} candidates for RL refinement"
-                )
-            else:
-                top_k = valid_seeds[:100]
-
-            # STAGE 5: RL Refine - Micro-surgery on top-K only
-            if self.cfg.proposal_mix.rl_refinement_enabled:
-                rl_ctx = {
-                    "candidates": top_k,
-                    "target_metrics": explore_ctx.get("target_metrics"),
-                }
-                refined = self.rl_worker.run(rl_ctx).get("candidates", [])
-                print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
-            else:
-                refined = top_k
-                print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
-
-            # STAGE 6: Optimize - Final gradient descent
-            opt_ctx = {"initial_guesses": refined}
-            res = self.opt_worker.run(opt_ctx)
-            candidates = res.get("candidates", [])
-            print(
-                f"[Coordinator] Quad-Hybrid pipeline complete: {len(candidates)} final candidates"
+        else:
+            candidates = self._run_standard_pipeline(
+                cycle=cycle,
+                n_candidates=n_candidates,
             )
 
         # Check for periodic retraining
         if candidates:
             self._periodic_retrain(cycle, experiment_id, candidates)
 
+        return candidates
+
+    def _run_standard_pipeline(
+        self,
+        *,
+        cycle: int,
+        n_candidates: int,
+    ) -> List[Dict[str, Any]]:
+        """Run the shared Quad-Hybrid stages used by EXPLOIT and HYBRID modes."""
+        # STAGE 1: Dream - Generate N seeds
+        explore_ctx = {"n_samples": n_candidates, "cycle": cycle}
+        seeds = self.explore_worker.run(explore_ctx).get("candidates", [])
+        print(f"[Coordinator] Dreamer generated {len(seeds)} seeds")
+
+        # STAGE 2: Pre-relax - Fast geometric smoothing
+        prerelax_ctx = {
+            "candidates": seeds,
+            "schema": self.surrogate._schema if self.surrogate else None,
+        }
+        prerelaxed = self.prerelax_worker.run(prerelax_ctx).get("candidates", [])
+        print(f"[Coordinator] Pre-relaxer smoothed {len(prerelaxed)} candidates")
+
+        # STAGE 3: Geometer - Validate geometric constraints
+        geo_ctx = {"candidates": prerelaxed}
+        valid_seeds = self.geo_worker.run(geo_ctx).get("candidates", [])
+        print(
+            f"[Coordinator] Geometer passed {len(valid_seeds)}/{len(prerelaxed)} candidates"
+        )
+
+        # STAGE 4: Surrogate Rank - Select top-K
+        if valid_seeds and self.surrogate and self.surrogate._trained:
+            ranked_seeds = self._surrogate_rank_seeds(valid_seeds, cycle)
+            k = min(100, len(ranked_seeds))
+            top_k = ranked_seeds[:k]
+            print(
+                f"[Coordinator] Surrogate selected top-{k} candidates for RL refinement"
+            )
+        else:
+            top_k = valid_seeds[:100]
+
+        # STAGE 5: RL Refine - Micro-surgery on top-K only
+        if self.cfg.proposal_mix.rl_refinement_enabled:
+            rl_ctx = {
+                "candidates": top_k,
+                "target_metrics": explore_ctx.get("target_metrics"),
+            }
+            refined = self.rl_worker.run(rl_ctx).get("candidates", [])
+            print(f"[Coordinator] RL Agent refined {len(refined)} candidates")
+        else:
+            refined = top_k
+            print("[Coordinator] RL refinement disabled; skipping PPO-CMA stage")
+
+        # STAGE 6: Optimize - Final gradient descent
+        opt_ctx = {"initial_guesses": refined}
+        res = self.opt_worker.run(opt_ctx)
+        candidates = res.get("candidates", [])
+        print(
+            f"[Coordinator] Quad-Hybrid pipeline complete: {len(candidates)} final candidates"
+        )
         return candidates
 
     def _should_retrain(self, cycle: int, experiment_id: int) -> tuple[bool, str]:
@@ -487,6 +450,7 @@ class Coordinator:
         template: ai_config.BoundaryTemplateConfig,
         initial_seeds: Optional[List[Dict[str, Any]]] = None,
         initial_config: Optional[ai_config.ExperimentConfig] = None,
+        planner_intent: Mapping[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         """
         ASO loop with real ALM state supervision.
@@ -521,6 +485,7 @@ class Coordinator:
             cycle=cycle,
             experiment_id=experiment_id,
             config=config,
+            planner_intent=planner_intent,
         )
 
         # 3. Persist telemetry
@@ -535,6 +500,7 @@ class Coordinator:
         cycle: int,
         experiment_id: int,
         config: ai_config.ExperimentConfig,
+        planner_intent: Mapping[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         """Run trajectory with real ALM state and supervision."""
         aso = config.aso
@@ -561,6 +527,8 @@ class Coordinator:
         )
 
         oracle_budget = alm.oracle_budget_initial
+        prev_diag: OptimizerDiagnostics | None = None
+        consecutive_vmec_failures = 0
 
         while traj.budget_used < eval_budget and traj.status == "active":
             # Mathematical Invariant: ALM state is mandatory for the optimization loop.
@@ -591,13 +559,78 @@ class Coordinator:
 
             # 2. Generate diagnostics from REAL ALM state
             diagnostics = self._generate_diagnostics(result.state, traj)
+            vmec_step_failed = self._is_vmec_failure_step(result)
+            if vmec_step_failed:
+                consecutive_vmec_failures += 1
+            else:
+                consecutive_vmec_failures = 0
 
             # 3. Update trajectory tracking
             traj = self._update_trajectory_best(traj, diagnostics)
 
             # 4. Get directive (tiered supervision)
             llm_called = diagnostics.requires_llm_supervision(aso)
-            directive = self.planner.supervise(diagnostics, cycle, aso)
+            directive = self.planner.supervise(
+                diagnostics,
+                cycle,
+                aso,
+                planner_intent=planner_intent,
+            )
+            intent_agreement, computed_override_reason = (
+                self._assess_intent_agreement(
+                    planner_intent=planner_intent,
+                    diagnostics=diagnostics,
+                    directive=directive,
+                )
+            )
+            recovery_override_reason: str | None = None
+            if (
+                vmec_step_failed
+                and consecutive_vmec_failures >= _VMEC_FAILURE_ABORT_STREAK
+            ):
+                recovery_override_reason = (
+                    "forced STOP after sustained VMEC-failure sentinel streak"
+                )
+                directive = OptimizationDirective(
+                    action=DirectiveAction.STOP,
+                    reasoning=(
+                        "Consecutive VMEC-failure sentinel steps reached abort threshold; "
+                        "stopping trajectory."
+                    ),
+                    source=DirectiveSource.FALLBACK,
+                )
+            elif (
+                vmec_step_failed
+                and consecutive_vmec_failures >= _VMEC_FAILURE_RESTART_STREAK
+                and directive.action != DirectiveAction.RESTART
+            ):
+                recovery_override_reason = (
+                    "forced RESTART after repeated VMEC-failure sentinel steps"
+                )
+                directive = OptimizationDirective(
+                    action=DirectiveAction.RESTART,
+                    reasoning=(
+                        "Consecutive VMEC-failure sentinel steps reached restart threshold; "
+                        "restarting with a fresh seed."
+                    ),
+                    source=DirectiveSource.FALLBACK,
+                )
+
+            if recovery_override_reason is not None:
+                intent_agreement = "overridden"
+            override_reason = directive.override_reason or computed_override_reason
+            if recovery_override_reason is not None:
+                if override_reason:
+                    override_reason = (
+                        f"{override_reason} | {recovery_override_reason}"
+                    )
+                else:
+                    override_reason = recovery_override_reason
+            violation_delta = (
+                diagnostics.max_violation - prev_diag.max_violation
+                if prev_diag is not None
+                else None
+            )
 
             # 5. Log telemetry
             wall_time_ms = (time.perf_counter() - step_start) * 1000
@@ -609,7 +642,42 @@ class Coordinator:
                 directive,
                 wall_time_ms,
                 llm_called,
+                planner_intent=planner_intent,
+                intent_agreement=intent_agreement,
+                override_reason=override_reason,
+                violation_delta=violation_delta,
+                vmec_step_failed=vmec_step_failed,
+                vmec_failure_streak=consecutive_vmec_failures,
             )
+            self.world_model.log_scratchpad_event(
+                experiment_id=experiment_id,
+                cycle=cycle,
+                step=traj.steps,
+                planner_intent=planner_intent,
+                aso_action=directive.action.value,
+                intent_agreement=intent_agreement,
+                override_reason=override_reason,
+                diagnostics={
+                    "status": diagnostics.status,
+                    "objective": diagnostics.objective,
+                    "max_violation": diagnostics.max_violation,
+                    "bounds_norm": diagnostics.bounds_norm,
+                    "penalty_parameters": diagnostics.penalty_parameters,
+                    "constraint_diagnostics": [
+                        entry.model_dump(mode="json")
+                        for entry in diagnostics.constraint_diagnostics
+                    ],
+                },
+                outcome={
+                    "objective_delta": diagnostics.objective_delta,
+                    "violation_delta": violation_delta,
+                    "steps_since_improvement": diagnostics.steps_since_improvement,
+                    "llm_called": llm_called,
+                    "vmec_step_failed": vmec_step_failed,
+                    "vmec_failure_streak": consecutive_vmec_failures,
+                },
+            )
+            prev_diag = diagnostics
 
             # 6. Apply directive
             if directive.action == DirectiveAction.STOP:
@@ -622,14 +690,13 @@ class Coordinator:
                 print(f"[Coordinator] STOP: {directive.reasoning}")
                 # Extract final candidate
                 assert traj.alm_state is not None
-                candidates.append(
-                    {
-                        "params": state_to_boundary_params(alm_context, traj.alm_state),
-                        "objective": result.objective,
-                        "max_violation": result.max_violation,
-                        "source": "aso",
-                        "seed": traj.seed.get("seed", 0),
-                    }
+                self._append_validated_aso_candidate(
+                    candidates=candidates,
+                    params=state_to_boundary_params(alm_context, traj.alm_state),
+                    objective=result.objective,
+                    max_violation=result.max_violation,
+                    source="aso",
+                    seed=traj.seed.get("seed", 0),
                 )
                 break
 
@@ -639,16 +706,13 @@ class Coordinator:
                 if new_seeds:
                     # Save current best before restart
                     assert traj.alm_state is not None
-                    candidates.append(
-                        {
-                            "params": state_to_boundary_params(
-                                alm_context, traj.alm_state
-                            ),
-                            "objective": result.objective,
-                            "max_violation": result.max_violation,
-                            "source": "aso_pre_restart",
-                            "seed": traj.seed.get("seed", 0),
-                        }
+                    self._append_validated_aso_candidate(
+                        candidates=candidates,
+                        params=state_to_boundary_params(alm_context, traj.alm_state),
+                        objective=result.objective,
+                        max_violation=result.max_violation,
+                        source="aso_pre_restart",
+                        seed=traj.seed.get("seed", 0),
                     )
 
                     boundary = self._seed_to_boundary(new_seeds[0])
@@ -703,16 +767,30 @@ class Coordinator:
                 traj = traj.model_copy(update={"status": "stagnated"})
                 print("[Coordinator] Auto-STOP (stagnation limit)")
                 assert traj.alm_state is not None
-                candidates.append(
-                    {
-                        "params": state_to_boundary_params(alm_context, traj.alm_state),
-                        "objective": result.objective,
-                        "max_violation": result.max_violation,
-                        "source": "aso_stagnation",
-                        "seed": traj.seed.get("seed", 0),
-                    }
+                self._append_validated_aso_candidate(
+                    candidates=candidates,
+                    params=state_to_boundary_params(alm_context, traj.alm_state),
+                    objective=result.objective,
+                    max_violation=result.max_violation,
+                    source="aso_stagnation",
+                    seed=traj.seed.get("seed", 0),
                 )
                 break
+
+        if not candidates and traj.alm_state is not None:
+            # Preserve the terminal ALM state as a candidate even when we never hit
+            # STOP/RESTART branches. Without this, budget-exhausted runs emit zero
+            # candidates despite spending evaluations.
+            constraints = [float(c) for c in traj.alm_state.constraints]
+            max_violation = max(0.0, max(constraints)) if constraints else 0.0
+            self._append_validated_aso_candidate(
+                candidates=candidates,
+                params=state_to_boundary_params(alm_context, traj.alm_state),
+                objective=float(traj.alm_state.objective),
+                max_violation=max_violation,
+                source="aso_terminal_state",
+                seed=traj.seed.get("seed", 0),
+            )
 
         print(
             f"[Coordinator] Trajectory done: {traj.status}, {traj.steps} steps, "
@@ -720,6 +798,44 @@ class Coordinator:
         )
 
         return candidates
+
+    def _is_vmec_failure_step(self, result: Any) -> bool:
+        """Detect ALM steps dominated by VMEC/runtime failures."""
+        if getattr(result, "metrics", None) is not None:
+            return False
+        objective = float(getattr(result, "objective", 0.0))
+        max_violation = float(getattr(result, "max_violation", 0.0))
+        return (
+            objective >= _VMEC_FAILURE_OBJECTIVE_SENTINEL
+            or max_violation >= _VMEC_FAILURE_VIOLATION_SENTINEL
+        )
+
+    def _append_validated_aso_candidate(
+        self,
+        *,
+        candidates: List[Dict[str, Any]],
+        params: Mapping[str, Any],
+        objective: float,
+        max_violation: float,
+        source: str,
+        seed: int,
+    ) -> None:
+        try:
+            make_boundary_from_params(params)
+        except Exception as exc:
+            print(
+                f"[Coordinator] Dropping invalid ASO candidate (source={source}, seed={seed}): {exc}"
+            )
+            return
+        candidates.append(
+            {
+                "params": dict(params),
+                "objective": float(objective),
+                "max_violation": float(max_violation),
+                "source": source,
+                "seed": int(seed),
+            }
+        )
 
     def _generate_diagnostics(
         self,
@@ -855,6 +971,66 @@ class Coordinator:
 
         return traj.model_copy(update=updates)
 
+    def _assess_intent_agreement(
+        self,
+        *,
+        planner_intent: Mapping[str, Any] | None,
+        diagnostics: OptimizerDiagnostics,
+        directive: OptimizationDirective,
+    ) -> tuple[str, str | None]:
+        if not planner_intent:
+            return "unavailable", None
+
+        constraint_priority = planner_intent.get("primary_constraint_order")
+        focus_indices = planner_intent.get("penalty_focus_indices")
+        restart_policy = planner_intent.get("restart_policy")
+
+        if directive.action == DirectiveAction.ADJUST:
+            if (
+                isinstance(focus_indices, list)
+                and focus_indices
+                and directive.alm_overrides
+                and isinstance(directive.alm_overrides.get("penalty_parameters"), list)
+            ):
+                focus_set = {int(idx) for idx in focus_indices}
+                penalties = diagnostics.penalty_parameters
+                adjusted_indices = []
+                for idx, value in enumerate(directive.alm_overrides["penalty_parameters"]):
+                    if idx >= len(penalties):
+                        continue
+                    if float(value) != float(penalties[idx]):
+                        adjusted_indices.append(idx)
+                if any(idx in focus_set for idx in adjusted_indices):
+                    return "aligned", None
+                return (
+                    "overridden",
+                    "directive penalty edits did not follow planner penalty_focus_indices.",
+                )
+            return "unknown", None
+
+        if directive.action == DirectiveAction.RESTART and restart_policy is not None:
+            restart_policy_text = str(restart_policy).strip().lower()
+            if restart_policy_text in {"on_stagnation", "aggressive"}:
+                return "aligned", None
+            return (
+                "overridden",
+                f"directive requested restart against planner restart_policy={restart_policy}.",
+            )
+
+        if (
+            isinstance(constraint_priority, list)
+            and constraint_priority
+            and diagnostics.constraint_diagnostics
+        ):
+            top_constraint = max(
+                diagnostics.constraint_diagnostics,
+                key=lambda item: item.violation,
+            ).name
+            if str(constraint_priority[0]) == str(top_constraint):
+                return "aligned", None
+
+        return "unknown", None
+
     def _log_telemetry(
         self,
         experiment_id: int,
@@ -864,6 +1040,12 @@ class Coordinator:
         directive: OptimizationDirective,
         wall_time_ms: float,
         llm_called: bool,
+        planner_intent: Mapping[str, Any] | None,
+        intent_agreement: str,
+        override_reason: str | None,
+        violation_delta: float | None,
+        vmec_step_failed: bool,
+        vmec_failure_streak: int,
     ):
         """Record telemetry event with full ALM state."""
         from datetime import datetime, timezone
@@ -881,6 +1063,14 @@ class Coordinator:
                 "bounds_norm": diag.bounds_norm,
                 "penalties": diag.penalty_parameters,
                 "multipliers": diag.multipliers,
+                "planner_intent": planner_intent,
+                "aso_action": directive.action.value,
+                "intent_agreement": intent_agreement,
+                "override_reason": override_reason,
+                "objective_delta": diag.objective_delta,
+                "violation_delta": violation_delta,
+                "vmec_step_failed": vmec_step_failed,
+                "vmec_failure_streak": vmec_failure_streak,
                 "directive_action": directive.action.value,
                 "directive_source": directive.source.value,
                 "directive_reasoning": directive.reasoning,
@@ -979,13 +1169,24 @@ class Coordinator:
     def _prepare_seeds(self, initial_seeds, cycle, n_needed):
         """Prepare and validate seeds using ExplorationWorker + GeometerWorker."""
         if initial_seeds:
-            return initial_seeds
+            normalized_initial = self._normalize_seed_batch(
+                initial_seeds,
+                cycle,
+                limit=n_needed,
+            )
+            if normalized_initial:
+                return normalized_initial
+            fallback = self._stable_fallback_seed(cycle)
+            if fallback is not None:
+                return [fallback]
+            return []
 
         # Generate using Explore worker
         # Generate a batch to ensure we have enough valid seeds
         explore_ctx = {"n_samples": max(n_needed, 10), "cycle": cycle}
         res = self.explore_worker.run(explore_ctx)
         candidates = res.get("candidates", [])
+        raw_candidates = list(candidates)
 
         # Filter with Geometer
         if candidates:
@@ -994,9 +1195,102 @@ class Coordinator:
             candidates = geo_res.get("candidates", [])
 
         if not candidates:
+            fallback = self._stable_fallback_seed(cycle)
+            if fallback is not None:
+                print(
+                    "[Coordinator] Geometer rejected all seeds; using stable fallback seed."
+                )
+                return [fallback]
+            if raw_candidates:
+                print(
+                    "[Coordinator] Geometer rejected all seeds; using unfiltered seeds as fallback."
+                )
+                return self._normalize_seed_batch(
+                    raw_candidates,
+                    cycle,
+                    limit=n_needed,
+                )
             return []
 
-        return candidates[:n_needed]
+        return self._normalize_seed_batch(
+            candidates,
+            cycle,
+            limit=n_needed,
+        )
+
+    def _normalize_seed_batch(
+        self,
+        seeds: list[Any],
+        cycle: int,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized = [
+            seed_entry
+            for seed_entry in (
+                self._normalize_seed_entry(seed, cycle) for seed in seeds
+            )
+            if seed_entry is not None
+        ]
+        if limit is None:
+            return normalized
+        return normalized[:limit]
+
+    def _default_seed_for_cycle(self, cycle: int) -> int:
+        return int(self.cfg.random_seed + cycle)
+
+    def _normalize_seed_entry(self, seed: Any, cycle: int) -> dict[str, Any] | None:
+        if not isinstance(seed, Mapping):
+            return None
+
+        default_seed = self._default_seed_for_cycle(cycle)
+        if "params" in seed and isinstance(seed["params"], Mapping):
+            normalized = dict(seed)
+            normalized["params"] = dict(seed["params"])
+            normalized["seed"] = int(seed.get("seed", default_seed))
+            return normalized
+
+        if "r_cos" not in seed or "z_sin" not in seed:
+            return None
+        return {
+            "seed": int(seed.get("seed", default_seed)),
+            "params": dict(seed),
+            "source": str(seed.get("source", "seed_normalized")),
+        }
+
+    def _stable_fallback_seed(self, cycle: int) -> dict[str, Any] | None:
+        problem_key = (self.cfg.problem or "p3").lower()
+        if problem_key.startswith("p1"):
+            seed_path = Path("configs/seeds/p1_seeds.json")
+        elif problem_key.startswith("p2"):
+            seed_path = Path("configs/seeds/p2_seeds.json")
+        else:
+            seed_path = Path("configs/seeds/rotating_ellipse_p3.json")
+            if not seed_path.exists():
+                seed_path = Path("configs/seeds/p3_seeds.json")
+        if not seed_path.exists():
+            return None
+        payload = json.loads(seed_path.read_text(encoding="utf-8"))
+        params: dict[str, Any] | None = None
+        if isinstance(payload, Mapping):
+            if "r_cos" in payload and "z_sin" in payload:
+                params = dict(payload)
+        elif isinstance(payload, list) and payload:
+            first = payload[0]
+            if isinstance(first, Mapping):
+                if "json" in first and isinstance(first["json"], str):
+                    parsed = json.loads(first["json"])
+                    if isinstance(parsed, Mapping):
+                        params = dict(parsed)
+                elif "r_cos" in first and "z_sin" in first:
+                    params = dict(first)
+        if params is None:
+            return None
+        return {
+            "seed": self._default_seed_for_cycle(cycle),
+            "params": params,
+            "source": "stable_seed_fallback",
+        }
 
     def _seed_to_boundary(self, seed):
         """Convert seed dict to SurfaceRZFourier."""
@@ -1004,6 +1298,8 @@ class Coordinator:
 
         # Handle both "seed" dict and direct params dict
         params_map = seed.get("params", seed)
+        r_sin = params_map.get("r_sin")
+        z_cos = params_map.get("z_cos")
 
         return surface_rz_fourier.SurfaceRZFourier(
             r_cos=np.array(params_map["r_cos"]),
@@ -1012,8 +1308,8 @@ class Coordinator:
             is_stellarator_symmetric=bool(
                 params_map.get("is_stellarator_symmetric", True)
             ),
-            r_sin=np.array(params_map["r_sin"]) if "r_sin" in params_map else None,
-            z_cos=np.array(params_map["z_cos"]) if "z_cos" in params_map else None,
+            r_sin=np.array(r_sin) if r_sin is not None else None,
+            z_cos=np.array(z_cos) if z_cos is not None else None,
         )
 
     def _get_problem(self, config):
@@ -1041,10 +1337,27 @@ class Coordinator:
             NevergradSettings,
             OptimizationSettings,
         )
+        from constellaration.mhd import vmec_settings as vmec_settings_module
 
-        # Determine forward model settings
-        # For ASO we default to high fidelity (P3/P2 style)
-        fm_settings = ConstellarationSettings.default_high_fidelity()
+        problem_key = (config.problem or "p3").lower()
+        if problem_key.startswith("p3"):
+            vmec_fidelity = "very_low_fidelity"
+        else:
+            vmec_fidelity = "low_fidelity"
+
+        fm_settings = ConstellarationSettings(
+            vmec_preset_settings=vmec_settings_module.VmecPresetSettings(
+                fidelity=vmec_fidelity,
+            )
+        )
+        if problem_key.startswith("p1"):
+            fm_settings = fm_settings.model_copy(
+                update={
+                    "boozer_preset_settings": None,
+                    "qi_settings": None,
+                    "turbulent_settings": None,
+                }
+            )
 
         return OptimizationSettings(
             max_poloidal_mode=config.boundary_template.max_poloidal_mode,

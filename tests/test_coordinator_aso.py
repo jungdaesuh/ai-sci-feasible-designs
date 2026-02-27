@@ -139,6 +139,7 @@ class TestCoordinatorASO:
         cfg.aso = ASOConfig(enabled=True)
         cfg.alm = ALMConfig()
         cfg.problem = "p3"
+        cfg.random_seed = 123
         cfg.reporting_dir = "reports"
         # Add proposal_mix for produce_candidates_aso
         cfg.proposal_mix = MagicMock()
@@ -339,3 +340,339 @@ class TestCoordinatorASO:
 
         # Use numpy comparison to avoid JAX/Mock recursion issues
         assert np.allclose(passed_state.penalty_parameters, np.array([100.0, 1.0, 1.0]))
+
+    @patch("ai_scientist.coordinator.step_alm")
+    @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.coordinator.state_to_boundary_params")
+    def test_aso_emits_terminal_candidate_on_budget_exhaustion(
+        self, mock_state_to_params, mock_create_context, mock_step_alm, coordinator
+    ):
+        from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+        from ai_scientist.planner import (
+            DirectiveAction,
+            DirectiveSource,
+            OptimizationDirective,
+        )
+
+        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
+        coordinator._get_problem = MagicMock(return_value=MagicMock())
+        coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
+
+        mock_context = MagicMock(spec=ALMContext)
+        state = create_mock_alm_state(
+            objective=jnp.array(1.23),
+            constraints=jnp.array([0.2, 0.1, 0.0]),
+        )
+        mock_create_context.return_value = (mock_context, state)
+        mock_step_alm.return_value = ALMStepResult(
+            state=state,
+            n_evals=5,
+            objective=1.23,
+            max_violation=0.2,
+            metrics=None,
+        )
+        coordinator.planner.supervise.return_value = OptimizationDirective(
+            action=DirectiveAction.CONTINUE,
+            source=DirectiveSource.HEURISTIC,
+        )
+        mock_state_to_params.return_value = {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        }
+
+        candidates = coordinator.produce_candidates_aso(
+            cycle=1,
+            experiment_id=1,
+            eval_budget=5,
+            template=MagicMock(),
+        )
+
+        assert len(candidates) == 1
+        assert candidates[0]["source"] == "aso_terminal_state"
+        assert candidates[0]["objective"] == pytest.approx(1.23)
+        assert candidates[0]["max_violation"] == pytest.approx(0.2)
+
+    @patch("ai_scientist.coordinator.step_alm")
+    @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.coordinator.state_to_boundary_params")
+    def test_aso_forces_restart_on_repeated_vmec_failure_sentinel(
+        self, mock_state_to_params, mock_create_context, mock_step_alm, coordinator
+    ):
+        from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+        from ai_scientist.planner import (
+            DirectiveAction,
+            DirectiveSource,
+            OptimizationDirective,
+        )
+
+        seed_a = {
+            "params": {
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            }
+        }
+        seed_b = {
+            "params": {
+                "r_cos": [[1.1]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            }
+        }
+
+        coordinator._prepare_seeds = MagicMock(side_effect=[[seed_a], [seed_b]])
+        coordinator._surrogate_rank_seeds = MagicMock(side_effect=lambda seeds, _cycle: seeds)
+        coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
+        coordinator._get_problem = MagicMock(return_value=MagicMock())
+        coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
+        coordinator._persist_telemetry = MagicMock()
+
+        mock_context = MagicMock(spec=ALMContext)
+        initial_state = create_mock_alm_state(
+            objective=jnp.array(10.0),
+            constraints=jnp.array([10.0, 10.0, 10.0]),
+        )
+        mock_create_context.return_value = (mock_context, initial_state)
+
+        # Two sentinel VMEC-failure-like steps followed by a stop.
+        fail_state_1 = create_mock_alm_state(
+            objective=jnp.array(10.0),
+            constraints=jnp.array([10.0, 10.0, 10.0]),
+        )
+        fail_state_2 = create_mock_alm_state(
+            objective=jnp.array(10.0),
+            constraints=jnp.array([10.0, 10.0, 10.0]),
+        )
+        post_restart_state = create_mock_alm_state(
+            objective=jnp.array(1.0),
+            constraints=jnp.array([0.0, 0.0, 0.0]),
+        )
+        mock_step_alm.side_effect = [
+            ALMStepResult(
+                state=fail_state_1,
+                n_evals=1,
+                objective=10.0,
+                max_violation=10.0,
+                metrics=None,
+            ),
+            ALMStepResult(
+                state=fail_state_2,
+                n_evals=1,
+                objective=10.0,
+                max_violation=10.0,
+                metrics=None,
+            ),
+            ALMStepResult(
+                state=post_restart_state,
+                n_evals=1,
+                objective=1.0,
+                max_violation=0.0,
+                metrics=MagicMock(),
+            ),
+        ]
+
+        # Planner keeps asking CONTINUE, coordinator should force a RESTART on failure streak.
+        coordinator.planner.supervise.side_effect = [
+            OptimizationDirective(
+                action=DirectiveAction.CONTINUE,
+                source=DirectiveSource.HEURISTIC,
+            ),
+            OptimizationDirective(
+                action=DirectiveAction.CONTINUE,
+                source=DirectiveSource.HEURISTIC,
+            ),
+            OptimizationDirective(
+                action=DirectiveAction.STOP,
+                reasoning="Converged",
+                source=DirectiveSource.HEURISTIC,
+            ),
+        ]
+        mock_state_to_params.return_value = {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        }
+
+        coordinator.produce_candidates_aso(
+            cycle=1,
+            experiment_id=1,
+            eval_budget=3,
+            template=MagicMock(),
+        )
+
+        assert coordinator._prepare_seeds.call_count >= 2
+        assert mock_create_context.call_count >= 2
+        assert any(event["aso_action"] == "RESTART" for event in coordinator.telemetry)
+        assert any(
+            event["vmec_failure_streak"] >= 2 for event in coordinator.telemetry
+        )
+        assert any(event["vmec_step_failed"] for event in coordinator.telemetry)
+
+    @patch("ai_scientist.coordinator.make_boundary_from_params")
+    @patch("ai_scientist.coordinator.step_alm")
+    @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.coordinator.state_to_boundary_params")
+    def test_aso_drops_invalid_terminal_candidate(
+        self,
+        mock_state_to_params,
+        mock_create_context,
+        mock_step_alm,
+        mock_make_boundary,
+        coordinator,
+    ):
+        from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+        from ai_scientist.planner import (
+            DirectiveAction,
+            DirectiveSource,
+            OptimizationDirective,
+        )
+
+        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
+        coordinator._get_problem = MagicMock(return_value=MagicMock())
+        coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
+
+        mock_context = MagicMock(spec=ALMContext)
+        state = create_mock_alm_state(
+            objective=jnp.array(1.23),
+            constraints=jnp.array([0.2, 0.1, 0.0]),
+        )
+        mock_create_context.return_value = (mock_context, state)
+        mock_step_alm.return_value = ALMStepResult(
+            state=state,
+            n_evals=5,
+            objective=1.23,
+            max_violation=0.2,
+            metrics=None,
+        )
+        coordinator.planner.supervise.return_value = OptimizationDirective(
+            action=DirectiveAction.CONTINUE,
+            source=DirectiveSource.HEURISTIC,
+        )
+        mock_state_to_params.return_value = {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        }
+        mock_make_boundary.side_effect = ValueError("bad-boundary")
+
+        candidates = coordinator.produce_candidates_aso(
+            cycle=1,
+            experiment_id=1,
+            eval_budget=5,
+            template=MagicMock(),
+        )
+
+        assert candidates == []
+        mock_make_boundary.assert_called_once()
+
+    def test_prepare_seeds_uses_stable_fallback_when_geometer_rejects_all(
+        self, coordinator
+    ):
+        raw = [{"params": {"dummy": True}}]
+        fallback = {
+            "seed": 7,
+            "params": {
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            },
+        }
+
+        coordinator.explore_worker.run.return_value = {"candidates": raw}
+        coordinator.geo_worker.run.return_value = {"candidates": []}
+        coordinator._stable_fallback_seed = MagicMock(return_value=fallback)
+
+        result = coordinator._prepare_seeds(initial_seeds=None, cycle=3, n_needed=2)
+
+        assert result == [fallback]
+        coordinator._stable_fallback_seed.assert_called_once_with(3)
+
+    def test_prepare_seeds_keeps_initial_seeds_without_forced_fallback(
+        self, coordinator
+    ):
+        initial = [
+            {
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 1,
+                "is_stellarator_symmetric": True,
+            }
+        ]
+        fallback = {"seed": 99, "params": {"x": 2}}
+        coordinator._stable_fallback_seed = MagicMock(return_value=fallback)
+
+        result = coordinator._prepare_seeds(initial_seeds=initial, cycle=2, n_needed=4)
+
+        assert len(result) == 1
+        assert result[0]["params"]["r_cos"] == [[1.0]]
+        coordinator._stable_fallback_seed.assert_not_called()
+
+    @patch("ai_scientist.coordinator.step_alm")
+    @patch("ai_scientist.coordinator.create_alm_context")
+    @patch("ai_scientist.coordinator.state_to_boundary_params")
+    def test_aso_receives_and_logs_planner_intent(
+        self, mock_state_to_params, mock_create_context, mock_step_alm, coordinator
+    ):
+        from ai_scientist.optim.alm_bridge import ALMContext, ALMStepResult
+        from ai_scientist.planner import (
+            DirectiveAction,
+            DirectiveSource,
+            OptimizationDirective,
+        )
+
+        coordinator._prepare_seeds = MagicMock(return_value=[{"params": {}}])
+        coordinator._seed_to_boundary = MagicMock(return_value=MagicMock())
+        coordinator._get_problem = MagicMock(return_value=MagicMock())
+        coordinator._build_optimization_settings = MagicMock(return_value=MagicMock())
+        coordinator._persist_telemetry = MagicMock()
+
+        mock_context = MagicMock(spec=ALMContext)
+        state = create_mock_alm_state(
+            objective=jnp.array(1.0),
+            constraints=jnp.array([0.2, 0.1, 0.0]),
+        )
+        mock_create_context.return_value = (mock_context, state)
+        mock_step_alm.return_value = ALMStepResult(
+            state=state,
+            n_evals=5,
+            objective=1.0,
+            max_violation=0.2,
+            metrics=None,
+        )
+        coordinator.planner.supervise.return_value = OptimizationDirective(
+            action=DirectiveAction.CONTINUE,
+            source=DirectiveSource.HEURISTIC,
+        )
+        mock_state_to_params.return_value = {
+            "r_cos": [[1.0]],
+            "z_sin": [[0.0]],
+            "n_field_periods": 1,
+            "is_stellarator_symmetric": True,
+        }
+
+        planner_intent = {
+            "primary_constraint_order": ["c1", "c2"],
+            "penalty_focus_indices": [0],
+            "confidence": 0.8,
+        }
+        coordinator.produce_candidates_aso(
+            cycle=1,
+            experiment_id=1,
+            eval_budget=5,
+            template=MagicMock(),
+            planner_intent=planner_intent,
+        )
+
+        supervise_kwargs = coordinator.planner.supervise.call_args.kwargs
+        assert supervise_kwargs["planner_intent"] == planner_intent
+        assert coordinator.telemetry[0]["planner_intent"] == planner_intent
+        assert coordinator.telemetry[0]["aso_action"] == "CONTINUE"

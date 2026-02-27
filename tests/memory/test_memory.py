@@ -232,7 +232,9 @@ def test_candidate_data_plane_summary_counts_metadata(tmp_path):
         assert summary["operator_families"]["scale_groups"] == 1
         assert summary["model_routes"]["governor_static_recipe/mirror"] == 1
         assert summary["model_routes"]["governor_static_recipe"] == 1
-        assert summary["model_routes"]["governor_adaptive_scaffold/static_delegate"] == 1
+        assert (
+            summary["model_routes"]["governor_adaptive_scaffold/static_delegate"] == 1
+        )
         assert summary["static_path_rows"] == 2
         assert summary["adaptive_path_rows"] == 1
         assert summary["fallback_static_delegate_rows"] == 1
@@ -267,9 +269,7 @@ def test_model_router_reward_event_persistence_and_summary(tmp_path):
         assert summary["sampled_event_count"] == 1
         assert summary["avg_reward"] == pytest.approx(0.3)
         assert summary["last_reward"] == pytest.approx(0.3)
-        assert (
-            summary["model_routes"]["governor_adaptive/near_feasible/mirror"] == 1
-        )
+        assert summary["model_routes"]["governor_adaptive/near_feasible/mirror"] == 1
         plane = wm.candidate_data_plane_summary(experiment_id, problem="p3")
         reward_summary = plane["model_router_reward"]
         assert reward_summary["event_count"] == 1
@@ -756,3 +756,118 @@ def test_recent_failures_include_error_taxonomy_fields(tmp_path):
         assert failures[0]["failure_signature"] == "vmec_jacobian_bad:abc12345"
         assert failures[0]["vmec_status"] == "exception"
         assert failures[0]["error"] == "JACOBIAN IS BAD, 75 TIMES BAD"
+
+
+def test_recent_experience_pack_balances_success_near_failure(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.0]], "z_sin": [[0.0]]},
+            seed=1,
+            status="screen",
+            evaluation={
+                "stage": "p3",
+                "objective": 2.0,
+                "feasibility": 0.35,
+                "metrics": {"aspect_ratio": 8.0},
+                "constraint_margins": {"mhd": 0.3, "qi": 0.05},
+            },
+            design_hash="failure-case",
+            operator_family="blend",
+            model_route="route-failure",
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.1]], "z_sin": [[0.0]]},
+            seed=2,
+            status="screen",
+            evaluation={
+                "stage": "p3",
+                "objective": 1.5,
+                "feasibility": 0.05,
+                "metrics": {"aspect_ratio": 7.8},
+                "constraint_margins": {"qi": 0.05},
+            },
+            design_hash="near-case",
+            operator_family="mutate",
+            model_route="route-near",
+        )
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params={"r_cos": [[1.2]], "z_sin": [[0.0]]},
+            seed=3,
+            status="promote",
+            evaluation={
+                "stage": "p3",
+                "objective": 1.0,
+                "feasibility": 0.0,
+                "metrics": {"aspect_ratio": 7.5},
+                "constraint_margins": {},
+            },
+            design_hash="success-case",
+            operator_family="exploit",
+            model_route="route-success",
+        )
+
+        pack = wm.recent_experience_pack(
+            experiment_id=experiment_id,
+            problem="p3",
+            limit_per_bucket=2,
+            near_feasibility_threshold=0.1,
+        )
+
+        assert len(pack["recent_successes"]) == 1
+        assert len(pack["recent_near_successes"]) == 1
+        assert len(pack["recent_failures"]) == 1
+        failure = pack["recent_failures"][0]
+        assert failure["worst_constraint"] == "mhd"
+        assert (
+            pytest.approx(sum(failure["normalized_violations"].values()), rel=1e-8)
+            == 1.0
+        )
+        adapter = pack["feedback_adapter"]
+        assert "worst_constraint_trend" in adapter
+        assert "recent_effective_deltas" in adapter
+        assert len(adapter["recent_effective_deltas"]) >= 1
+
+
+def test_scratchpad_event_persistence_and_summary(tmp_path):
+    db_path = tmp_path / "world.db"
+    with memory.WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_scratchpad_event(
+            experiment_id=experiment_id,
+            cycle=2,
+            step=1,
+            planner_intent={"penalty_focus_indices": [0]},
+            aso_action="ADJUST",
+            intent_agreement="aligned",
+            override_reason=None,
+            diagnostics={"status": "STAGNATION", "max_violation": 0.2},
+            outcome={"objective_delta": -0.1, "violation_delta": -0.05},
+        )
+        wm.log_scratchpad_event(
+            experiment_id=experiment_id,
+            cycle=2,
+            step=2,
+            planner_intent={"penalty_focus_indices": [1]},
+            aso_action="RESTART",
+            intent_agreement="overridden",
+            override_reason="restart requested by diagnostics",
+            diagnostics={"status": "DIVERGING", "max_violation": 0.4},
+            outcome={"objective_delta": 0.0, "violation_delta": 0.2},
+        )
+
+        summary = wm.scratchpad_cycle_summary(experiment_id=experiment_id, cycle=2)
+
+        assert summary["event_count"] == 2
+        assert summary["action_counts"]["ADJUST"] == 1
+        assert summary["action_counts"]["RESTART"] == 1
+        assert summary["events"][0]["step"] == 1
+        assert summary["events"][1]["intent_agreement"] == "overridden"
