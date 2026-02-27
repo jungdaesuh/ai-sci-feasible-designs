@@ -12,18 +12,22 @@ Build one robust optimization stack that integrates ideas from AlphaEvolve, Shin
 
 - `ai_scientist/experiment_runner.py` orchestrates cycles and stage gates.
 - `ai_scientist/cycle_executor.py` is still the central runtime path.
-- `scripts/p3_governor.py` is deterministic and recipe-driven (`_select_recipe`), not LLM- or bandit-driven.
+- `scripts/p3_governor.py` default path is deterministic/recipe-driven (`_select_recipe`), while `--adaptive` now provides parent-group selection + operator-family ranking + novelty gating with static rollback.
 - `scripts/p3_worker.py` is the deterministic evaluator and must remain SSOT.
 
-### Hard gaps before adaptive evolution works
+### Hard gaps before full adaptive-evolution closure
 
-1. **No adaptive control plane yet**
-   - No novelty service, no model-router bandit, no parent-group policy in runtime.
-2. **Data plane is only partially complete**
-   - `candidates` now persists lineage/novelty/operator/model-route fields.
-   - Runtime now reads/writes those fields in governor/propose/enqueue/reporting paths.
-   - Shared enqueue SSOT module is still missing and there are still duplicate enqueue callsites.
-3. **Deprecated wrappers still sit on the active path**
+1. **P3 adaptive path and performance-evidence gate are landed**
+   - `--adaptive` path (parent group + operator-family bandit + novelty gate + fallback) is implemented.
+   - Meaningful fixed-budget non-regression evidence gate is closed (`M2.4`, 2026-02-25; `exp13` vs `exp12`, budget `20`).
+2. **P1/P2 lightweight adaptive layer is landed**
+   - Adaptive restart seed selector is landed and hardening-closed (`M3.1`), including runtime + AST wiring coverage and reviewer PASS.
+   - Constrained novelty gating is now landed (`M3.2`, 2026-02-25).
+   - M3.3 fixed-budget evidence gate is closed (`M3.3`, 2026-02-26) via budget-20 P1/P2 validator passes in legacy metadata mode (`artifacts/m3/m33_probe/p1_report_b20_legacy.json`, `artifacts/m3/m33_probe/p2_report_b20_legacy.json`).
+3. **Cross-problem policy hardening is closed**
+   - Shared two-stage novelty gate interface and model-router reward contract are implemented (`M3.4` + `M3.5`, 2026-02-25).
+   - M3.6 validator tooling and paired-run evidence are both landed (`scripts/m3_policy_hardening_validate.py`, 2026-02-26; strict pass artifact: `artifacts/m3/m36_probe/m36_policy_report_b21.json`).
+4. **Deprecated wrappers still sit on non-primary paths**
    - Main cycle execution already routes through `forward_model_batch`.
    - Deprecated `tools.evaluate_*` wrappers still persist in bootstrap/tooling/experimental paths and block clean removal.
 
@@ -89,11 +93,10 @@ Per batch:
 ## 5.2 Becomes dead if new plan lands
 
 1. `scripts/p3_governor.py` static recipe tree (`_select_recipe`, static branch logic).
-2. Duplicate enqueue internals in both:
-   - `scripts/p3_propose.py`
-   - `scripts/p3_enqueue_submission.py`
-3. Legacy fallback/legacy ALM branch in `ai_scientist/cycle_executor.py`.
-4. Deprecated wrappers in `ai_scientist/tools/evaluation.py` once non-runtime callers also move to `forward_model_batch`.
+2. Legacy fallback/legacy ALM branch in `ai_scientist/cycle_executor.py`.
+3. Deprecated wrappers in `ai_scientist/tools/evaluation.py` once non-runtime callers also move to `forward_model_batch`.
+
+Shared enqueue internals are already consolidated in `ai_scientist/p3_enqueue.py` (done 2026-02-25).
 
 ## 5.3 Mandatory removal order
 
@@ -108,12 +111,15 @@ Per batch:
 
 1. **Schema migration**
    - Add fields/tables for: `parent_candidate_ids`, `operator_family`, `novelty_score`, `model_route`, `trace_summary`, `constraint_signature`.
+   - Status: completed (2026-02-25).
 2. **Shared enqueue module**
    - Create one enqueue library used by both propose and submission CLIs.
+   - Status: completed (2026-02-25).
 3. **Evaluation API migration**
    - Move remaining bootstrap/tooling/experimental callers from deprecated wrappers to `forward_model_batch`.
 4. **Governor contract**
    - Define strict IO contract for adaptive governor decisions and rollback fallback.
+   - Status: contract gate completed (M2.3, 2026-02-25); performance-evidence gate completed (M2.4, 2026-02-25).
 
 ---
 
@@ -175,18 +181,18 @@ Per batch:
 
 ## 9) Immediate Next Actions
 
-1. Implement shared enqueue library and switch both enqueue callsites to it.
-2. Add telemetry for currently deprecated/legacy paths.
-3. Integrate adaptive governor behind flag and run A/B.
-4. Migrate remaining bootstrap/tooling/experimental evaluation calls to `forward_model_batch`.
-5. Start dead-code retirement only after objective gates pass.
+1. Run strict-metadata P1/P2 paired fixed-budget comparisons (without `--allow-legacy-restart-metadata`) so adaptive arms carry restart-label evidence directly in-budget.
+2. Execute codex-native expansion validation gates (`M4.5`-`M4.6`) after the pinned canary-default rollout (`M4.4`).
+3. Migrate remaining bootstrap/tooling/experimental evaluation callers away from deprecated wrappers.
+4. Run a fresh-proposal P3 paired A/B (non-seeded) for adaptive-vs-static performance characterization beyond gate closure.
 
 ---
 
 ## 10) Reviewer-Verified Open Gaps (Current State)
 
-1. Schema/data plane persistence is landed, but enqueue logic is still duplicated in `p3_propose` and `p3_enqueue_submission`.
-2. P3 governor still uses static `_select_recipe` flow; adaptive branch and explicit feature flag are not landed.
-3. P1/P2 lightweight adaptive restart/novelty layer is not landed.
-4. Native codex subscription integration is still partial: local adapter server + OAuth/profile management remain pending.
+1. P3 adaptive contract and performance-evidence gates are closed (`M2.3` + `M2.4`).
+   - Latest passing evidence: budget `20`, static `exp13` vs adaptive `exp12`, `m24_performance_evidence_pass=true`.
+2. P1/P2 adaptive restart seed selector + constrained novelty gate + fixed-budget evidence are closed (`M3.1` + `M3.2` + `M3.3`), with a follow-up hardening task to refresh strict restart-label metadata evidence.
+3. Cross-problem policy hardening is closed through fixed-budget validation: two-stage novelty gate and router reward contract are landed (`M3.4` + `M3.5`), and strict M3.6 evidence gate passed (`M3.6`, artifact: `artifacts/m3/m36_probe/m36_policy_report_b21.json`).
+4. Native codex subscription integration is still partial: canary defaults are pinned, but local adapter server + OAuth/profile management remain pending.
 5. Deprecated wrappers are no longer primary runtime path but are still used in bootstrap/tooling/experimental paths.
