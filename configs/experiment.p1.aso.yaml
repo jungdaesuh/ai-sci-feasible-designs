@@ -17,8 +17,8 @@ experiment_tag: "aso_p1_prod"
 
 boundary_template:
   n_poloidal_modes: 6 # Increased resolution for NAE stability
-  n_toroidal_modes: 6
-  n_field_periods: 1 # Simplified to 1 to avoid NAE generation errors
+  n_toroidal_modes: 5
+  n_field_periods: 3 # Align with stable P1 baseline/canary runs
   base_major_radius: 1.0
   base_minor_radius: 0.2
   perturbation_scale: 0.05 # Reduced perturbation for stability

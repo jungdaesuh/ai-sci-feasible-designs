@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# ruff: noqa: E402
 """ALM-NGOpt style P2 optimization with multi-fidelity promotion.
 
 Goal: find a boundary that is high-fidelity feasible for P2 and maximizes
@@ -35,6 +36,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ai_scientist.forward_model import ForwardModelSettings, forward_model_batch
+from ai_scientist.restart_runtime import (
+    append_restart_history,
+    select_adaptive_restart_runtime,
+)
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,19 @@ def _constraints_for_alm(
 
 def _constraint_violation_inf(constraints: np.ndarray) -> float:
     return float(np.max(np.maximum(0.0, constraints)))
+
+
+def _restart_lgradb(record: dict) -> float:
+    value = record.get("lgradb", float("-inf"))
+    result = float(value)
+    return result if math.isfinite(result) else float("-inf")
+
+
+def _telemetry_lgradb(record: dict) -> float | None:
+    if "lgradb" not in record:
+        return None
+    value = float(record["lgradb"])
+    return value if math.isfinite(value) else None
 
 
 def _surface_to_boundary(surface: surface_rz_fourier.SurfaceRZFourier) -> dict:
@@ -235,6 +253,51 @@ def main() -> None:
     parser.add_argument("--penalty-increase", type=float, default=5.0)
     parser.add_argument("--penalty-max", type=float, default=1e8)
     parser.add_argument("--constraint-tol-factor", type=float, default=0.8)
+    parser.add_argument(
+        "--adaptive-restart",
+        action="store_true",
+        help="Enable adaptive restart seed selector across ALM outer iterations.",
+    )
+    parser.add_argument("--restart-feasibility-weight", type=float, default=0.45)
+    parser.add_argument("--restart-objective-weight", type=float, default=0.45)
+    parser.add_argument("--restart-diversity-weight", type=float, default=0.10)
+    parser.add_argument("--restart-saturation-penalty", type=float, default=0.15)
+    parser.add_argument(
+        "--restart-novelty-min-distance",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum L2 distance from current state required for restart-seed "
+            "novelty gating; falls back to ungated selection if no candidate passes."
+        ),
+    )
+    parser.add_argument(
+        "--restart-novelty-feasibility-max",
+        type=float,
+        default=float("inf"),
+        help=(
+            "Optional maximum feasibility violation allowed by restart novelty gate "
+            "(infinity disables feasibility filtering)."
+        ),
+    )
+    parser.add_argument(
+        "--restart-novelty-near-duplicate-distance",
+        type=float,
+        default=0.08,
+        help=(
+            "Near-duplicate distance band for two-stage novelty gate LLM adjudication. "
+            "Must be >= --restart-novelty-min-distance."
+        ),
+    )
+    parser.add_argument(
+        "--restart-novelty-judge-mode",
+        choices=["disabled", "heuristic"],
+        default="heuristic",
+        help=(
+            "Second-stage near-duplicate adjudication mode. "
+            "Use 'heuristic' as deterministic fallback before provider-backed LLM judge."
+        ),
+    )
     parser.add_argument("--feas-tol", type=float, default=1e-2)
     parser.add_argument("--promote-every", type=int, default=2)
     parser.add_argument("--promote-budget", type=int, default=2)
@@ -253,7 +316,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    rng = np.random.default_rng(args.seed)
     np.random.seed(args.seed)  # noqa: NPY002
 
     output_dir = args.output_dir
@@ -417,24 +479,91 @@ def main() -> None:
     )
 
     best_low = {
-        "lgradb": float(rec0.get("lgradb", 0.0)),
+        "lgradb": _restart_lgradb(rec0),
         "objective": obj0,
         "feasibility": _constraint_violation_inf(cons0),
         "record": rec0,
         "x": x0.tolist(),
     }
     best_violation = {
-        "lgradb": float(rec0.get("lgradb", 0.0)),
+        "lgradb": _restart_lgradb(rec0),
         "objective": obj0,
         "feasibility": _constraint_violation_inf(cons0),
         "record": rec0,
         "x": x0.tolist(),
     }
     best_high = None
+    restart_selection_counts: dict[str, int] = {}
+    restart_history_path = output_dir / "restart_history.jsonl"
 
     budget = int(args.budget_initial)
     for outer in range(1, args.outer_iters + 1):
-        x_center = np.asarray(state.x, dtype=float)
+        state_x = np.asarray(state.x, dtype=float)
+        x_center = state_x
+        restart_decision = None
+        if args.adaptive_restart:
+            state_feasibility = _constraint_violation_inf(np.asarray(state.constraints))
+            best_high_x = (
+                None if best_high is None else np.asarray(best_high["x"], dtype=float)
+            )
+            best_high_metrics = (
+                {} if best_high is None else best_high.get("metrics", {})
+            )
+            best_high_objective = (
+                None
+                if best_high is None
+                else float(
+                    best_high_metrics.get(
+                        "minimum_normalized_magnetic_gradient_scale_length",
+                        float("-inf"),
+                    )
+                )
+            )
+            best_high_feasibility = (
+                None
+                if best_high is None
+                else float(best_high.get("high_fidelity_feasibility", float("inf")))
+            )
+            (
+                x_center,
+                selected_seed_label,
+                selected_identity,
+                restart_decision,
+                restart_selection_counts,
+            ) = select_adaptive_restart_runtime(
+                problem="p2",
+                state_x=state_x,
+                state_objective=-float(state.objective),
+                state_feasibility=state_feasibility,
+                best_violation_x=np.asarray(best_violation["x"], dtype=float),
+                best_violation_objective=float(best_violation["lgradb"]),
+                best_violation_feasibility=float(best_violation["feasibility"]),
+                best_low_x=np.asarray(best_low["x"], dtype=float),
+                best_low_objective=float(best_low["lgradb"]),
+                best_low_feasibility=float(best_low["feasibility"]),
+                best_high_x=best_high_x,
+                best_high_objective=best_high_objective,
+                best_high_feasibility=best_high_feasibility,
+                selection_counts=restart_selection_counts,
+                feasibility_weight=float(args.restart_feasibility_weight),
+                objective_weight=float(args.restart_objective_weight),
+                diversity_weight=float(args.restart_diversity_weight),
+                saturation_penalty=float(args.restart_saturation_penalty),
+                novelty_min_distance=float(args.restart_novelty_min_distance),
+                novelty_feasibility_max=float(args.restart_novelty_feasibility_max),
+                novelty_near_duplicate_distance=float(
+                    args.restart_novelty_near_duplicate_distance
+                ),
+                novelty_judge_mode=str(args.restart_novelty_judge_mode),
+            )
+            append_restart_history(
+                restart_history_path,
+                outer=outer,
+                selected_seed=selected_seed_label,
+                selected_seed_identity=selected_identity,
+                counts=restart_selection_counts,
+                decision=restart_decision,
+            )
         bounds = np.asarray(state.bounds, dtype=float)
         lower = x_center - bounds
         upper = x_center + bounds
@@ -464,7 +593,7 @@ def main() -> None:
             viol = _constraint_violation_inf(constraints)
             if viol < best_violation["feasibility"]:
                 best_violation = {
-                    "lgradb": float(record.get("lgradb", 0.0)),
+                    "lgradb": _restart_lgradb(record),
                     "objective": objective,
                     "feasibility": viol,
                     "record": record,
@@ -472,9 +601,10 @@ def main() -> None:
                 }
 
             is_feasible = viol <= 0.0
-            if is_feasible and float(record.get("lgradb", 0.0)) > best_low["lgradb"]:
+            record_lgradb = _restart_lgradb(record)
+            if is_feasible and record_lgradb > best_low["lgradb"]:
                 best_low = {
-                    "lgradb": float(record.get("lgradb", 0.0)),
+                    "lgradb": record_lgradb,
                     "objective": objective,
                     "feasibility": viol,
                     "record": record,
@@ -487,10 +617,13 @@ def main() -> None:
                 "budget": budget,
                 "elapsed_sec": time.time() - t0,
                 "loss": loss,
-                "lgradb": float(record.get("lgradb", 0.0)),
+                "lgradb": _telemetry_lgradb(record),
                 "constraint_violation_inf": viol,
                 "feasibility_official": float(record.get("feasibility", float("inf"))),
                 "error": record.get("error"),
+                "restart_seed": None
+                if restart_decision is None
+                else restart_decision.get("selected_label"),
             }
             with history_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(log) + "\n")

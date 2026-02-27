@@ -1,12 +1,13 @@
-
 import numpy as np
-import jax.numpy as jnp
 from constellaration import problems
 from constellaration.geometry import surface_rz_fourier
 from constellaration.optimization import settings as opt_settings
-from constellaration.optimization.augmented_lagrangian import AugmentedLagrangianSettings
+from constellaration.optimization.augmented_lagrangian import (
+    AugmentedLagrangianSettings,
+)
 import constellaration.forward_model as forward_model
 from ai_scientist.optim.alm_bridge import create_alm_context
+
 
 def reproduce():
     print("Setting up inputs...")
@@ -16,7 +17,7 @@ def reproduce():
     r_cos[0, 1] = 1.0
     r_cos[1, 1] = 0.1
     z_sin[1, 1] = 0.1
-    
+
     boundary = surface_rz_fourier.SurfaceRZFourier(
         r_cos=r_cos, z_sin=z_sin, n_field_periods=1, is_stellarator_symmetric=True
     )
@@ -64,7 +65,9 @@ def reproduce():
     except Exception as e:
         print(f"Caught exception: {e}")
         import traceback
+
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     reproduce()

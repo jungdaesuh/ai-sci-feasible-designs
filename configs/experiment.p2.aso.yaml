@@ -16,7 +16,7 @@ experiment_tag: "aso_p2_prod"
 
 boundary_template:
   n_poloidal_modes: 4
-  n_toroidal_modes: 4
+  n_toroidal_modes: 5
   n_field_periods: 4 # P2 often targets 4-5 field periods
   base_major_radius: 1.0
   base_minor_radius: 0.2
