@@ -2,6 +2,9 @@
 
 Purpose: merge autonomy, production-hardening, and research-grounding plans into a single, conflict-resolved blueprint that delivers an autonomous, physics-grounded AI scientist capable of producing feasible P2/P3 stellarator designs using the existing `ai_scientist` scaffold.
 
+Decision record for LLM-integration scope and rollout gates:
+`docs/decisions/2026-02-25_llm-evolution-integration.md`
+
 ## Guiding Principles
 - Single source of truth: constraints, margins, hashes, and schema are shared across evaluators, surrogates, caching, and logging.
 - Reliability first: direction-correct objectives, NaN/Inf safe eval, deterministic feature ordering, schema-versioned hashes.
@@ -55,16 +58,16 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - [x] Roles: planning (retrieve_rag, make_boundary, evaluate_p3), literature (retrieve_rag, write_note), analysis (evaluate_p3, make_boundary); gate tools via AgentGate and log role/tool/context_hash.
 - [x] PropertyGraph per cycle from world-model + literature notes; snapshot to `reports/graphs/`; feed to planner prompt.
 - [x] Daemon (`scripts/daemon.py`): checkpoint per cycle, wall-clock guard, resume flag, `OMP_NUM_THREADS=1` in workers.
-- Canonical implementation: `ai_scientist/memory.py` (structured world model with PropertyGraph, statements, citations, candidates, cycles). Legacy `world_model.py` (boundaries/evals only) has been removed.
+- Canonical implementation: `ai_scientist/memory/` package (structured world model with PropertyGraph, statements, citations, candidates, cycles). Legacy `world_model.py` (boundaries/evals only) has been removed.
 
 ### 7) RAG Rebuild (RPF)
 - [x] Convert PDFs with `markitdown 2506.19583v1.pdf -o docs/papers/2506.19583v1.md` and similarly for 2511.02824v2.
 - [x] Build unified index over papers + MASTER plan + Production + Updated/Unified plans at `ai_scientist/rag_index.db`.
-- [x] Tests: `tests/test_rag_indexing.py` asserts top-k hits from both papers.
+- [x] Tests: `tests/rag/test_rag_indexing.py` asserts top-k hits from both papers.
 
 ### 8) Adapter Loop (Autonomy + RPF)
 - [x] `scripts/train_adapters.py`: read preferences DB, build SFT/DPO dataset, train PEFT adapter, save to `reports/adapters/<tool>/<stage>/adapter.safetensors` + metadata.
-- [x] Loader in `adapter.py`: load newest adapter when `AI_SCIENTIST_PEFT=1`; log adapter version in run metadata.
+- [x] Loader in `ai_scientist/adapter.py`: load newest adapter when `AI_SCIENTIST_PEFT=1`; log adapter version in run metadata.
 - [x] Cadence: nightly/manual; keep last N adapters, track in `reports/adapters/queue.jsonl`.
 
 ### 9) Observability, Safety, CI
@@ -91,8 +94,8 @@ Purpose: merge autonomy, production-hardening, and research-grounding plans into
 - Keep configs/presets conservative by default; experimental features stay behind explicit flags.
 
 ## Reference Map (where the details came from)
-- Reliability backbone, surrogate RF spec, safe eval, schema/hash, tests: `docs/AI_SCIENTIST_PRODUCTION_PLAN.md` (Architecture Changes, Tests sections).
-- Feasibility-first loop, SurrogateBundle abstraction, SQLite world-model schema, budgets/HV phase: `docs/AI_SCIENTIST_UPDATED_PLAN.md` (Fast Wins, Architecture sections).
-- Planner/agent roles, PropertyGraph, daemon/checkpointing, adapter loop, multi-agent presets: `docs/AI_SCIENTIST_AUTONOMY_PLAN.md` (Planning Loop, Supervisor, Adaptation, Safety, CI sections).
-- RAG rebuild commands, rotating-ellipse seed preset, benchmark-aligned configs, literature/analysis role definitions, PEFT trainer steps: `docs/AI_SCIENTIST_RESEARCH_PRODUCTION_FIX.md` (Sections 1–5).
+- Reliability backbone, surrogate RF spec, safe eval, schema/hash, tests: `docs/archive/plans/AI_SCIENTIST_PRODUCTION_PLAN.md` (Architecture Changes, Tests sections).
+- Feasibility-first loop, SurrogateBundle abstraction, SQLite world-model schema, budgets/HV phase: `docs/archive/plans/AI_SCIENTIST_UPDATED_PLAN.md` (Fast Wins, Architecture sections).
+- Planner/agent roles, PropertyGraph, daemon/checkpointing, adapter loop, multi-agent presets: `docs/archive/plans/AI_SCIENTIST_AUTONOMY_PLAN.md` (Planning Loop, Supervisor, Adaptation, Safety, CI sections).
+- RAG rebuild commands, rotating-ellipse seed preset, benchmark-aligned configs, literature/analysis role definitions, PEFT trainer steps: `docs/archive/notes/AI_SCIENTIST_RESEARCH_PRODUCTION_FIX.md` (Sections 1–5).
 - Additional context and constraints: `docs/archive/plans/MASTER_PLAN_AI_SCIENTIST.md`, `docs/ai_scientist_onboarding.md`, `docs/run_protocol.md` for run protocol and governance reminders.

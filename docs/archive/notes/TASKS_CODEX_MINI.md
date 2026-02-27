@@ -23,9 +23,9 @@ Updated: 2025‑11‑10
   - Files: `configs/model.yaml`, `configs/experiment.example.yaml`, `ai_scientist/config.py`
   - DoD: `python -c "from ai_scientist.config import load; print(type(load()))"` prints a dict.
 
-- [x] Task 0.3 — Repo guardrails
-  - Files: `ai_scientist/guards.py`
-  - DoD: `python -c "from ai_scientist.guards import verify; verify()"` passes.
+- [x] Task 0.3 — Repo guardrails (legacy, module removed in PR-1 cleanup)
+  - Files: `ai_scientist/guards.py` (historical)
+  - DoD: historical checkpoint only; no active runtime module.
 
 ---
 
