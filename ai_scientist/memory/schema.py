@@ -262,6 +262,40 @@ CREATE TABLE IF NOT EXISTS surrogate_checkpoints (
     created_at TEXT NOT NULL,
     FOREIGN KEY(experiment_id) REFERENCES experiments(id)
 );
+
+CREATE TABLE IF NOT EXISTS model_router_reward_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    problem TEXT NOT NULL,
+    model_route TEXT NOT NULL,
+    window_size INTEGER NOT NULL,
+    previous_feasible_yield REAL NOT NULL,
+    current_feasible_yield REAL NOT NULL,
+    previous_hv REAL NOT NULL,
+    current_hv REAL NOT NULL,
+    reward REAL NOT NULL,
+    reward_components_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
+CREATE TABLE IF NOT EXISTS scratchpad_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    step INTEGER NOT NULL,
+    planner_intent_json TEXT NOT NULL,
+    aso_action TEXT NOT NULL,
+    intent_agreement TEXT NOT NULL,
+    override_reason TEXT,
+    diagnostics_json TEXT NOT NULL,
+    outcome_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scratchpad_events_cycle_step
+ON scratchpad_events(experiment_id, cycle, step);
 """
 
 

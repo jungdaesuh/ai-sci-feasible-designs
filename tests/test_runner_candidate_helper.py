@@ -1,7 +1,21 @@
 from pathlib import Path
 from typing import Any, Mapping, cast
 
+import importlib.util
+from importlib.machinery import ModuleSpec
 import numpy as np
+import sys
+import types
+
+if "jax" not in sys.modules and importlib.util.find_spec("jax") is None:
+    jax_module = types.ModuleType("jax")
+    jax_module.__spec__ = ModuleSpec("jax", loader=None)
+    jax_numpy_module = types.ModuleType("jax.numpy")
+    jax_numpy_module.__dict__.update(np.__dict__)
+    jax_numpy_module.__spec__ = ModuleSpec("jax.numpy", loader=None)
+    jax_module.numpy = jax_numpy_module
+    sys.modules["jax"] = jax_module
+    sys.modules["jax.numpy"] = jax_numpy_module
 
 from ai_scientist import config as ai_config
 from ai_scientist import cycle_executor, memory
@@ -150,6 +164,172 @@ def test_propose_p3_candidates_mixes_sampler_and_random() -> None:
     assert sampler_count > 0
     assert random_count > 0
     assert sampler_count + random_count == len(candidates)
+
+
+def test_propose_p3_candidates_canonicalizes_agent_seed_before_enqueue() -> None:
+    budgets = ai_config.BudgetConfig(
+        screen_evals_per_cycle=1,
+        promote_top_k=1,
+        max_high_fidelity_evals_per_cycle=1,
+        wall_clock_minutes=1.0,
+        n_workers=1,
+        pool_type="thread",
+    )
+    cfg = ai_config.ExperimentConfig(
+        problem="p3",
+        cycles=1,
+        random_seed=7,
+        budgets=budgets,
+        adaptive_budgets=_default_adaptive_config(budgets),
+        fidelity_ladder=ai_config.FidelityLadder(screen="screen", promote="promote"),
+        boundary_template=ai_config.BoundaryTemplateConfig(
+            n_poloidal_modes=3,
+            n_toroidal_modes=5,
+            n_field_periods=3,
+            base_major_radius=1.5,
+            base_minor_radius=0.5,
+            perturbation_scale=0.02,
+        ),
+        stage_gates=ai_config.StageGateConfig(
+            s1_to_s2_feasibility_margin=0.01,
+            s1_to_s2_objective_improvement=0.01,
+            s1_to_s2_lookback_cycles=2,
+            s2_to_s3_hv_delta=0.01,
+            s2_to_s3_lookback_cycles=2,
+        ),
+        governance=ai_config.GovernanceConfig(
+            min_feasible_for_promotion=1,
+            hv_lookback=2,
+        ),
+        proposal_mix=ai_config.ProposalMixConfig(
+            constraint_ratio=0.7,
+            exploration_ratio=0.3,
+            jitter_scale=0.005,
+        ),
+        generative=ai_config.GenerativeConfig(
+            enabled=False,
+            backend="vae",
+            latent_dim=8,
+            learning_rate=0.001,
+            epochs=100,
+            kl_weight=0.001,
+        ),
+        reporting_dir=Path("."),
+        memory_db=Path("reports/ai_scientist.sqlite"),
+        source_config=Path("configs/experiment.example.yaml"),
+        constraint_weights=ai_config.ConstraintWeightsConfig(
+            mhd=1.0,
+            qi=1.0,
+            elongation=1.0,
+        ),
+        initialization_strategy="template",
+    )
+    suggested_params = [
+        {
+            "r_cos": [[0.0, 0.0, 1.5, 0.0], [0.0, 0.0, 0.4, 0.0]],
+            "z_sin": [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.3, 0.0]],
+            "nfp": "3",
+            "unknown": "drop-me",
+        }
+    ]
+
+    candidates, _, _, _ = cycle_executor._propose_p3_candidates_for_cycle(
+        cfg,
+        cycle_index=0,
+        world_model=cast(memory.WorldModel, _FakeWorldModel()),
+        experiment_id=11,
+        screen_budget=1,
+        total_candidates=1,
+        suggested_params=suggested_params,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["source"] == "agent_suggestion"
+    params = candidates[0]["params"]
+    assert "unknown" not in params
+    assert params["n_field_periods"] == 3
+    assert params["is_stellarator_symmetric"] is True
+    assert np.asarray(params["r_cos"], dtype=float).shape == (3, 5)
+    assert np.asarray(params["z_sin"], dtype=float).shape == (3, 5)
+
+
+def test_coerce_bool_flag_parses_string_values() -> None:
+    assert cycle_executor._coerce_bool_flag("false", label="flag") is False
+    assert cycle_executor._coerce_bool_flag("true", label="flag") is True
+
+
+def test_propose_p3_candidates_rejects_invalid_agent_seed_pre_eval() -> None:
+    budgets = ai_config.BudgetConfig(
+        screen_evals_per_cycle=1,
+        promote_top_k=1,
+        max_high_fidelity_evals_per_cycle=1,
+        wall_clock_minutes=1.0,
+        n_workers=1,
+        pool_type="thread",
+    )
+    cfg = ai_config.ExperimentConfig(
+        problem="p3",
+        cycles=1,
+        random_seed=9,
+        budgets=budgets,
+        adaptive_budgets=_default_adaptive_config(budgets),
+        fidelity_ladder=ai_config.FidelityLadder(screen="screen", promote="promote"),
+        boundary_template=ai_config.BoundaryTemplateConfig(
+            n_poloidal_modes=3,
+            n_toroidal_modes=5,
+            n_field_periods=3,
+            base_major_radius=1.5,
+            base_minor_radius=0.5,
+            perturbation_scale=0.02,
+        ),
+        stage_gates=ai_config.StageGateConfig(
+            s1_to_s2_feasibility_margin=0.01,
+            s1_to_s2_objective_improvement=0.01,
+            s1_to_s2_lookback_cycles=2,
+            s2_to_s3_hv_delta=0.01,
+            s2_to_s3_lookback_cycles=2,
+        ),
+        governance=ai_config.GovernanceConfig(
+            min_feasible_for_promotion=1,
+            hv_lookback=2,
+        ),
+        proposal_mix=ai_config.ProposalMixConfig(
+            constraint_ratio=0.7,
+            exploration_ratio=0.3,
+            jitter_scale=0.005,
+        ),
+        generative=ai_config.GenerativeConfig(
+            enabled=False,
+            backend="vae",
+            latent_dim=8,
+            learning_rate=0.001,
+            epochs=100,
+            kl_weight=0.001,
+        ),
+        reporting_dir=Path("."),
+        memory_db=Path("reports/ai_scientist.sqlite"),
+        source_config=Path("configs/experiment.example.yaml"),
+        constraint_weights=ai_config.ConstraintWeightsConfig(
+            mhd=1.0,
+            qi=1.0,
+            elongation=1.0,
+        ),
+        initialization_strategy="template",
+    )
+    invalid_suggested_params = [{"r_cos": [[1.0, 0.0, 0.0]], "n_field_periods": 3}]
+
+    candidates, _, _, _ = cycle_executor._propose_p3_candidates_for_cycle(
+        cfg,
+        cycle_index=0,
+        world_model=cast(memory.WorldModel, _FakeWorldModel()),
+        experiment_id=12,
+        screen_budget=1,
+        total_candidates=1,
+        suggested_params=invalid_suggested_params,
+    )
+
+    assert len(candidates) == 1
+    assert all(candidate["source"] != "agent_suggestion" for candidate in candidates)
 
 
 def _sum_r_cos(params: Mapping[str, Any]) -> float:

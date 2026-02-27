@@ -714,6 +714,108 @@ class WorldModel:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def log_scratchpad_event(
+        self,
+        experiment_id: int,
+        cycle: int,
+        step: int,
+        planner_intent: Mapping[str, Any] | None,
+        aso_action: str,
+        intent_agreement: str,
+        override_reason: str | None,
+        diagnostics: Mapping[str, Any],
+        outcome: Mapping[str, Any],
+        *,
+        created_at: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        timestamp = created_at or datetime.now(timezone.utc).isoformat()
+        cursor = self._conn.execute(
+            """
+            INSERT INTO scratchpad_events (
+                experiment_id,
+                cycle,
+                step,
+                planner_intent_json,
+                aso_action,
+                intent_agreement,
+                override_reason,
+                diagnostics_json,
+                outcome_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                experiment_id,
+                cycle,
+                step,
+                json.dumps(
+                    _normalize_to_json(planner_intent or {}), separators=(",", ":")
+                ),
+                aso_action,
+                intent_agreement,
+                override_reason,
+                json.dumps(_normalize_to_json(diagnostics), separators=(",", ":")),
+                json.dumps(_normalize_to_json(outcome), separators=(",", ":")),
+                timestamp,
+            ),
+        )
+        event_id = cursor.lastrowid
+        assert event_id is not None
+        if commit:
+            self._conn.commit()
+        return event_id
+
+    def scratchpad_cycle_summary(
+        self,
+        experiment_id: int,
+        cycle: int,
+        *,
+        limit: int = 20,
+    ) -> Mapping[str, Any]:
+        rows = self._conn.execute(
+            """
+            SELECT step,
+                   planner_intent_json,
+                   aso_action,
+                   intent_agreement,
+                   override_reason,
+                   diagnostics_json,
+                   outcome_json,
+                   created_at
+            FROM scratchpad_events
+            WHERE experiment_id = ? AND cycle = ?
+            ORDER BY step DESC, id DESC
+            LIMIT ?
+            """,
+            (experiment_id, cycle, limit),
+        ).fetchall()
+        events = [
+            {
+                "step": int(row["step"]),
+                "planner_intent": json.loads(row["planner_intent_json"]),
+                "aso_action": row["aso_action"],
+                "intent_agreement": row["intent_agreement"],
+                "override_reason": row["override_reason"],
+                "diagnostics": json.loads(row["diagnostics_json"]),
+                "outcome": json.loads(row["outcome_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        events.reverse()
+        action_counts: dict[str, int] = {}
+        for event in events:
+            action = str(event["aso_action"])
+            action_counts[action] = action_counts.get(action, 0) + 1
+
+        return {
+            "cycle": cycle,
+            "event_count": len(events),
+            "action_counts": action_counts,
+            "events": events,
+        }
+
     def statements_for_cycle(
         self, experiment_id: int, cycle: int
     ) -> list[StatementRecord]:
@@ -901,6 +1003,171 @@ class WorldModel:
                 continue
 
         return failures
+
+    def recent_experience_pack(
+        self,
+        experiment_id: int,
+        problem: str,
+        *,
+        limit_per_bucket: int = 3,
+        near_feasibility_threshold: float = 0.1,
+        delta_window: int = 5,
+    ) -> Mapping[str, Any]:
+        """Return balanced recent experience slices plus compact feedback adapters."""
+
+        rows = self._conn.execute(
+            """
+            SELECT c.design_hash,
+                   c.seed,
+                   c.operator_family,
+                   c.model_route,
+                   m.raw_json,
+                   m.feasibility,
+                   m.objective,
+                   m.is_feasible
+            FROM metrics m
+            JOIN candidates c ON m.candidate_id = c.id
+            WHERE c.experiment_id = ? AND c.problem = ?
+            ORDER BY m.id DESC
+            LIMIT ?
+            """,
+            (experiment_id, problem, max(24, limit_per_bucket * 20)),
+        ).fetchall()
+
+        recent_successes: list[Mapping[str, Any]] = []
+        recent_near_successes: list[Mapping[str, Any]] = []
+        recent_failures: list[Mapping[str, Any]] = []
+        timeline: list[Mapping[str, Any]] = []
+
+        for row in rows:
+            try:
+                metrics_raw = json.loads(row["raw_json"])
+            except (json.JSONDecodeError, TypeError):
+                metrics_raw = {}
+
+            constraint_margins = metrics_raw.get("constraint_margins", {})
+            violations: dict[str, float] = {}
+            for name, value in dict(constraint_margins).items():
+                try:
+                    magnitude = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if magnitude > 0.0:
+                    violations[str(name)] = magnitude
+
+            total_violation = sum(violations.values())
+            if total_violation > 0.0:
+                normalized_violations = {
+                    name: magnitude / total_violation
+                    for name, magnitude in sorted(
+                        violations.items(), key=lambda item: item[1], reverse=True
+                    )
+                }
+                worst_constraint = max(
+                    violations.items(), key=lambda item: item[1]
+                )[0]
+                worst_constraint_violation = float(violations[worst_constraint])
+            else:
+                normalized_violations = {}
+                worst_constraint = None
+                worst_constraint_violation = 0.0
+
+            objective_raw = row["objective"]
+            objective = float(objective_raw) if objective_raw is not None else None
+            feasibility = float(row["feasibility"])
+            entry: dict[str, Any] = {
+                "design_hash": str(row["design_hash"] or ""),
+                "seed": int(row["seed"] or 0),
+                "feasibility": feasibility,
+                "objective": objective,
+                "normalized_violations": normalized_violations,
+                "worst_constraint": worst_constraint,
+                "worst_constraint_violation": worst_constraint_violation,
+                "stage": metrics_raw.get("stage"),
+                "operator_family": str(row["operator_family"] or ""),
+                "model_route": str(row["model_route"] or ""),
+            }
+            for key in (
+                "error",
+                "error_normalized",
+                "failure_label",
+                "failure_source",
+                "failure_signature",
+                "vmec_status",
+            ):
+                value = metrics_raw.get(key)
+                if value is not None:
+                    entry[key] = value
+
+            timeline.append(entry)
+
+            is_feasible = int(row["is_feasible"]) == 1
+            if is_feasible:
+                if len(recent_successes) < limit_per_bucket:
+                    recent_successes.append(entry)
+                continue
+
+            if feasibility <= near_feasibility_threshold:
+                if len(recent_near_successes) < limit_per_bucket:
+                    recent_near_successes.append(entry)
+                continue
+
+            if len(recent_failures) < limit_per_bucket:
+                recent_failures.append(entry)
+
+            if (
+                len(recent_successes) >= limit_per_bucket
+                and len(recent_near_successes) >= limit_per_bucket
+                and len(recent_failures) >= limit_per_bucket
+            ):
+                break
+
+        worst_constraint_sequence = [
+            str(item["worst_constraint"])
+            for item in timeline
+            if item.get("worst_constraint")
+        ]
+        worst_constraint_counts: dict[str, int] = {}
+        for name in worst_constraint_sequence:
+            worst_constraint_counts[name] = worst_constraint_counts.get(name, 0) + 1
+
+        recent_effective_deltas: list[Mapping[str, Any]] = []
+        for newer, older in zip(timeline, timeline[1:]):
+            feasibility_delta = float(newer["feasibility"]) - float(
+                older["feasibility"]
+            )
+            objective_new = newer.get("objective")
+            objective_old = older.get("objective")
+            objective_delta = None
+            if objective_new is not None and objective_old is not None:
+                objective_delta = float(objective_new) - float(objective_old)
+            violation_delta = float(newer["worst_constraint_violation"]) - float(
+                older["worst_constraint_violation"]
+            )
+            recent_effective_deltas.append(
+                {
+                    "from_design_hash": older.get("design_hash"),
+                    "to_design_hash": newer.get("design_hash"),
+                    "feasibility_delta": feasibility_delta,
+                    "objective_delta": objective_delta,
+                    "worst_constraint_delta": violation_delta,
+                }
+            )
+            if len(recent_effective_deltas) >= delta_window:
+                break
+
+        return {
+            "recent_successes": recent_successes,
+            "recent_near_successes": recent_near_successes,
+            "recent_failures": recent_failures,
+            "feedback_adapter": {
+                "worst_constraint_trend": {
+                    "sequence": worst_constraint_sequence[:delta_window],
+                    "counts": worst_constraint_counts,
+                },
+                "recent_effective_deltas": recent_effective_deltas,
+            },
+        }
 
     def previous_best_hv(self, experiment_id: int, cycle_number: int) -> float | None:
         row = self._conn.execute(

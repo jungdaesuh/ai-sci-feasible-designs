@@ -26,6 +26,7 @@ from .evaluation import (
     make_boundary_from_params,
 )
 from .hypervolume import summarize_p3_candidates
+from .integration import retrieve_rag, write_note
 
 __all__ = [
     "_DEFAULT_RELATIVE_TOLERANCE",
@@ -47,4 +48,6 @@ __all__ = [
     "_max_violation",
     "normalized_constraint_distance_sampler",
     "summarize_p3_candidates",
+    "retrieve_rag",
+    "write_note",
 ]

@@ -131,7 +131,9 @@ def _problem_tool_name(problem: str) -> str:
 
 
 def serialize_experiment_config(
-    cfg: ai_config.ExperimentConfig, constellaration_sha: str | None = None
+    cfg: ai_config.ExperimentConfig,
+    constellaration_sha: str | None = None,
+    planner_override: str | None = None,
 ) -> dict[str, Any]:
     boundary_template = asdict(cfg.boundary_template)
     seed_path = boundary_template.get("seed_path")
@@ -153,7 +155,7 @@ def serialize_experiment_config(
         "memory_db": str(cfg.memory_db),
         "constellaration_sha": constellaration_sha or "unknown",
         "reporting": cfg.reporting,
-        "planner": cfg.planner,
+        "planner": planner_override or cfg.planner,
     }
 
 
@@ -185,6 +187,7 @@ class CycleExecutor:
         prev_feasibility_rate: float | None = None,
         suggested_params: list[dict[str, Any]] | None = None,
         config_overrides: Mapping[str, Any] | None = None,
+        planner_intent: Mapping[str, Any] | None = None,
         # Runtime flags passed as kwargs to avoid coupling with RunnerCLIConfig
         verbose: bool = False,
         slow: bool = False,
@@ -389,6 +392,15 @@ class CycleExecutor:
                     f"[runner][cycle={cycle_number}] Prefilter training failed: {e}. Continuing without prefilter."
                 )
 
+        canonical_suggested_params = _canonicalize_agent_seed_list(
+            active_cfg.boundary_template,
+            cast(Sequence[Mapping[str, Any]] | None, suggested_params),
+        )
+        if suggested_params and not canonical_suggested_params:
+            print(
+                f"[runner][cycle={cycle_number}] All planner suggested seeds were rejected by canonicalization."
+            )
+
         candidate_pool: list[dict[str, Any]] = []
 
         # Initialize Coordinator (Phase 5)
@@ -408,8 +420,8 @@ class CycleExecutor:
                 print(f"[runner][cycle={cycle_number}] ASO mode with real ALM state.")
 
             initial_seeds = []
-            if suggested_params:
-                initial_seeds = suggested_params
+            if canonical_suggested_params:
+                initial_seeds = canonical_suggested_params
 
             candidate_pool = cast(
                 list[dict[str, Any]],
@@ -420,6 +432,7 @@ class CycleExecutor:
                     template=active_cfg.boundary_template,
                     initial_seeds=initial_seeds,
                     initial_config=active_cfg,
+                    planner_intent=planner_intent,
                 ),
             )
             candidates = candidate_pool
@@ -454,7 +467,7 @@ class CycleExecutor:
                     screen_budget=active_budgets.screen_evals_per_cycle,
                     total_candidates=pool_size,
                     generative_model=generative_model,
-                    suggested_params=suggested_params,
+                    suggested_params=canonical_suggested_params,
                 )
 
             candidates = _surrogate_rank_screen_candidates(
@@ -476,7 +489,7 @@ class CycleExecutor:
                 cycle_index,
                 experiment_id,
                 surrogate_model,
-                suggested_params,
+                canonical_suggested_params,
                 optimizer_mode,
                 alm_settings_overrides,
                 active_budgets,
@@ -509,13 +522,13 @@ class CycleExecutor:
                     screen_budget=active_budgets.screen_evals_per_cycle,
                     total_candidates=pool_size,
                     prev_feasibility_rate=prev_feasibility_rate,
-                    suggested_params=suggested_params,
+                    suggested_params=canonical_suggested_params,
                     generative_model=generative_model,
                 ),
             )
             if verbose:
                 print(
-                    f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count} vae={vae_count} agent={len(suggested_params or [])}"
+                    f"[runner][cycle={cycle_number}] candidate mix (pool={len(candidate_pool)}): sampler={sampler_count} random={random_count} vae={vae_count} agent={len(canonical_suggested_params)}"
                 )
 
             # Apply Feasibility Prefilter
@@ -671,23 +684,55 @@ class CycleExecutor:
         self.budget_controller.consume(len(promote_results))
 
         aggregated = screen_results + promote_results
+
+        def _record_empty_cycle_state() -> None:
+            cycle_duration = time.perf_counter() - cycle_start
+            placeholder_eval = {
+                "objective": None,
+                "feasibility": float("inf"),
+                "score": 0.0,
+                "stage": governance_stage,
+                "design_hash": "",
+            }
+            with self.world_model.transaction():
+                self.world_model.record_cycle(
+                    experiment_id=experiment_id,
+                    cycle_number=cycle_number,
+                    screen_evals=len(screen_results),
+                    promoted_evals=len(promote_results),
+                    high_fidelity_evals=len(promote_results),
+                    wall_seconds=cycle_duration,
+                    best_params={},
+                    best_evaluation=placeholder_eval,
+                    seed=int(active_cfg.random_seed + cycle_index),
+                    problem=self.config.problem,
+                    log_best_candidate=False,
+                    commit=False,
+                )
+                self.world_model.record_cycle_summary(
+                    experiment_id=experiment_id,
+                    cycle_number=cycle_number,
+                    stage=governance_stage,
+                    feasible_count=0,
+                    hv_score=0.0,
+                    commit=False,
+                )
+                self.world_model.record_stage_history(
+                    experiment_id=experiment_id,
+                    cycle=cycle_number,
+                    stage=governance_stage,
+                    commit=False,
+                )
+
         if not aggregated:
-            self.world_model.record_stage_history(
-                experiment_id=experiment_id,
-                cycle=cycle_number,
-                stage=governance_stage,
-            )
+            _record_empty_cycle_state()
             return CycleResult(cycle_index, 0, 0, None, None, 0.0, None, None, None)
 
         latest_by_design = _latest_evaluations_by_design(
             aggregated, self.config.fidelity_ladder.promote
         )
         if not latest_by_design:
-            self.world_model.record_stage_history(
-                experiment_id=experiment_id,
-                cycle=cycle_number,
-                stage=governance_stage,
-            )
+            _record_empty_cycle_state()
             return CycleResult(
                 cycle_index,
                 len(screen_results),
@@ -1682,22 +1727,134 @@ def _expand_matrix_to_mode(
     )
 
     expanded = np.zeros((target_rows, target_cols), dtype=float)
-
-    # Copy existing values, centering the toroidal modes
-    seed_ntor = (matrix.shape[1] - 1) // 2
-    target_ntor = max_toroidal_mode
-    col_offset = target_ntor - seed_ntor
-
     rows_to_copy = min(matrix.shape[0], target_rows)
-    cols_to_copy = min(matrix.shape[1], target_cols)
 
-    for m in range(rows_to_copy):
-        for n_idx in range(cols_to_copy):
-            target_col = n_idx + col_offset
-            if 0 <= target_col < target_cols:
-                expanded[m, target_col] = matrix[m, n_idx]
+    seed_center = (matrix.shape[1] - 1) // 2
+    target_center = max_toroidal_mode
+    source_col_start = max(0, seed_center - target_center)
+    source_col_end = min(matrix.shape[1], seed_center + target_center + 1)
+    target_col_start = max(0, target_center - seed_center)
+    target_col_end = target_col_start + (source_col_end - source_col_start)
+
+    expanded[:rows_to_copy, target_col_start:target_col_end] = matrix[
+        :rows_to_copy, source_col_start:source_col_end
+    ]
 
     return expanded
+
+
+def _coerce_float_matrix(value: Any, *, label: str) -> np.ndarray:
+    matrix = np.asarray(value, dtype=float)
+    if matrix.ndim != 2:
+        raise ValueError(f"{label} must be a 2D coefficient matrix.")
+    if matrix.shape[0] <= 0 or matrix.shape[1] <= 0:
+        raise ValueError(f"{label} must have non-empty dimensions.")
+    return matrix
+
+
+def _enforce_odd_toroidal_columns(matrix: np.ndarray, *, label: str) -> np.ndarray:
+    if matrix.shape[1] % 2 == 1:
+        return matrix
+    logging.warning(
+        "[canonicalization] %s had even toroidal column count %d; padding one zero column to enforce odd mode count.",
+        label,
+        matrix.shape[1],
+    )
+    return np.pad(matrix, ((0, 0), (0, 1)), mode="constant")
+
+
+def _coerce_bool_flag(value: Any, *, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"{label} must be a boolean value.")
+
+
+def _canonicalize_optional_matrix(
+    template: ai_config.BoundaryTemplateConfig,
+    params: Mapping[str, Any],
+    *,
+    key: str,
+) -> list[list[float]] | None:
+    raw = params.get(key)
+    if raw is None:
+        return None
+    matrix = _coerce_float_matrix(raw, label=key)
+    matrix = _enforce_odd_toroidal_columns(matrix, label=key)
+    return _expand_matrix_to_mode(
+        matrix,
+        template.max_poloidal_mode,
+        template.max_toroidal_mode,
+    ).tolist()
+
+
+def _canonicalize_agent_seed_params(
+    template: ai_config.BoundaryTemplateConfig,
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    if "r_cos" not in params or "z_sin" not in params:
+        raise ValueError("suggested seed must include r_cos and z_sin.")
+
+    r_cos = _coerce_float_matrix(params["r_cos"], label="r_cos")
+    z_sin = _coerce_float_matrix(params["z_sin"], label="z_sin")
+    r_cos = _enforce_odd_toroidal_columns(r_cos, label="r_cos")
+    z_sin = _enforce_odd_toroidal_columns(z_sin, label="z_sin")
+    canonical: dict[str, Any] = {
+        "r_cos": _expand_matrix_to_mode(
+            r_cos,
+            template.max_poloidal_mode,
+            template.max_toroidal_mode,
+        ).tolist(),
+        "z_sin": _expand_matrix_to_mode(
+            z_sin,
+            template.max_poloidal_mode,
+            template.max_toroidal_mode,
+        ).tolist(),
+        "n_field_periods": int(
+            params.get("n_field_periods", params.get("nfp", template.n_field_periods))
+        ),
+        "is_stellarator_symmetric": _coerce_bool_flag(
+            params.get("is_stellarator_symmetric", True),
+            label="is_stellarator_symmetric",
+        ),
+    }
+    if canonical["n_field_periods"] <= 0:
+        raise ValueError("n_field_periods must be a positive integer.")
+
+    r_sin = _canonicalize_optional_matrix(template, params, key="r_sin")
+    if r_sin is not None:
+        canonical["r_sin"] = r_sin
+    z_cos = _canonicalize_optional_matrix(template, params, key="z_cos")
+    if z_cos is not None:
+        canonical["z_cos"] = z_cos
+
+    # Validate canonical payload before entering candidate pools.
+    tools.make_boundary_from_params(canonical)
+    return canonical
+
+
+def _canonicalize_agent_seed_list(
+    template: ai_config.BoundaryTemplateConfig,
+    suggested_params: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    canonical_seeds: list[dict[str, Any]] = []
+    if not suggested_params:
+        return canonical_seeds
+    for idx, raw in enumerate(suggested_params):
+        try:
+            canonical_seeds.append(_canonicalize_agent_seed_params(template, raw))
+        except Exception as exc:
+            logging.warning(
+                "[canonicalization] rejecting suggested_params[%d] before eval: %s",
+                idx,
+                exc,
+            )
+    return canonical_seeds
 
 
 def _load_seed_boundary(path: Path) -> dict[str, Any]:
@@ -1988,8 +2145,12 @@ def _propose_p3_candidates_for_cycle(
         return [], 0, 0, 0
 
     agent_results: list[dict[str, Any]] = []
-    if suggested_params:
-        for idx, params in enumerate(suggested_params):
+    canonical_agent_params = _canonicalize_agent_seed_list(
+        cfg.boundary_template,
+        suggested_params,
+    )
+    if canonical_agent_params:
+        for idx, params in enumerate(canonical_agent_params):
             agent_results.append(
                 {
                     "seed": cfg.random_seed + cycle_index * 1000 + idx,
