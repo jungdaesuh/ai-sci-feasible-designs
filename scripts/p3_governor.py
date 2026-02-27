@@ -30,6 +30,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from ai_scientist.model_router_reward import compute_model_router_reward
+from ai_scientist.novelty_gate import NoveltyCandidate, apply_two_stage_novelty_gate
 from ai_scientist.p3_data_plane import DataPlaneSample, summarize_data_plane
 from ai_scientist.memory.schema import init_db
 
@@ -37,9 +39,13 @@ from ai_scientist.memory.schema import init_db
 _DEFAULT_RECORD_HV = 135.15669906272515
 _NOVELTY_REJECT_THRESHOLD = 0.05
 _ADAPTIVE_NOVELTY_GATE = 0.03
+_ADAPTIVE_NEAR_DUPLICATE_GATE = 0.05
 _ADAPTIVE_MAX_COMMANDS = 8
 _ADAPTIVE_EXPLORATION_WEIGHT = 0.35
 _ADAPTIVE_PARENT_SATURATION_PENALTY = 0.15
+_ROUTER_REWARD_WINDOW = 20
+_ROUTER_REWARD_FEASIBLE_WEIGHT = 0.5
+_ROUTER_REWARD_HV_WEIGHT = 0.5
 
 
 def _utc_now_iso() -> str:
@@ -421,11 +427,7 @@ def _command_novelty(cmd: ProposalCommand) -> float:
     if family == "blend":
         t_min = _cmd_flag_value(cmd, "--t-min")
         t_max = _cmd_flag_value(cmd, "--t-max")
-        t_values = [
-            abs(float(value))
-            for value in (t_min, t_max)
-            if value is not None
-        ]
+        t_values = [abs(float(value)) for value in (t_min, t_max) if value is not None]
         return float(max(t_values) if t_values else 0.0)
 
     if family != "scale_groups":
@@ -446,6 +448,128 @@ def _command_novelty(cmd: ProposalCommand) -> float:
         if token == "--scale-m-ge" and idx + 2 < len(argv):
             novelty = max(novelty, abs(float(argv[idx + 2]) - 1.0))
     return float(novelty)
+
+
+def _allow_near_duplicate_command(candidate: NoveltyCandidate) -> bool:
+    novelty = candidate.novelty_score
+    if novelty is None:
+        novelty = candidate.embedding_distance
+    if novelty is None:
+        return False
+    novelty_value = float(novelty)
+    if not math.isfinite(novelty_value):
+        return False
+    midpoint = 0.5 * (
+        float(_ADAPTIVE_NOVELTY_GATE) + float(_ADAPTIVE_NEAR_DUPLICATE_GATE)
+    )
+    return novelty_value >= midpoint
+
+
+def _gate_adaptive_commands(
+    cmds: list[ProposalCommand],
+) -> tuple[list[tuple[ProposalCommand, str, float]], dict]:
+    command_by_label: dict[str, tuple[ProposalCommand, str, float]] = {}
+    novelty_candidates: list[NoveltyCandidate] = []
+    for idx, cmd in enumerate(cmds):
+        label = str(idx)
+        family = _command_family(cmd)
+        novelty = _command_novelty(cmd)
+        command_by_label[label] = (cmd, family, novelty)
+        novelty_candidates.append(
+            NoveltyCandidate(
+                label=label,
+                embedding_distance=novelty,
+                novelty_score=novelty,
+                feasibility=0.0,
+            )
+        )
+
+    near_duplicate_distance = max(
+        float(_ADAPTIVE_NOVELTY_GATE),
+        float(_ADAPTIVE_NEAR_DUPLICATE_GATE),
+    )
+    selected_candidates, diagnostics = apply_two_stage_novelty_gate(
+        novelty_candidates,
+        embedding_prefilter_min_distance=float(_ADAPTIVE_NOVELTY_GATE),
+        near_duplicate_distance=near_duplicate_distance,
+        judge=_allow_near_duplicate_command,
+        judge_label="heuristic",
+        fallback_to_ungated=False,
+    )
+    selected = [
+        command_by_label[candidate.label]
+        for candidate in selected_candidates
+        if candidate.label in command_by_label
+    ]
+    return selected, diagnostics
+
+
+def _feasible_yield_per_100(rows: list[CandidateRow]) -> float:
+    if not rows:
+        return 0.0
+    feasible_count = sum(1 for row in rows if row.is_feasible)
+    return 100.0 * float(feasible_count) / float(len(rows))
+
+
+def _route_hv(rows: list[CandidateRow]) -> float:
+    points = [
+        (float(row.lgradb), float(row.aspect))
+        for row in rows
+        if row.is_feasible and row.lgradb is not None and row.aspect is not None
+    ]
+    return _compute_hv(points)
+
+
+def _compute_model_router_reward_event(
+    *,
+    history_candidates: list[CandidateRow],
+    model_route: str,
+    window_size: int,
+) -> dict:
+    route_key = str(model_route)
+    window = int(window_size)
+    route_rows = [
+        row
+        for row in history_candidates
+        if str(row.model_route or "unknown") == route_key
+    ]
+    current_window = route_rows[:window]
+    previous_window = route_rows[window : (2 * window)]
+    previous_feasible_yield = _feasible_yield_per_100(previous_window)
+    current_feasible_yield = _feasible_yield_per_100(current_window)
+    previous_hv = _route_hv(previous_window)
+    current_hv = _route_hv(current_window)
+    reward_eligible = len(current_window) == window and len(previous_window) == window
+    payload = compute_model_router_reward(
+        previous_feasible_yield=previous_feasible_yield,
+        current_feasible_yield=current_feasible_yield,
+        previous_hv=previous_hv,
+        current_hv=current_hv,
+        feasible_weight=float(_ROUTER_REWARD_FEASIBLE_WEIGHT),
+        hv_weight=float(_ROUTER_REWARD_HV_WEIGHT),
+    )
+    if not reward_eligible:
+        payload.update(
+            {
+                "delta_feasible_yield": 0.0,
+                "relative_feasible_yield": 0.0,
+                "delta_hv": 0.0,
+                "relative_hv": 0.0,
+                "reward_raw": float(payload.get("reward", 0.0)),
+                "reward": 0.0,
+                "reward_eligible": False,
+                "eligibility_reason": "insufficient_route_history",
+            }
+        )
+    else:
+        payload["reward_eligible"] = True
+        payload["eligibility_reason"] = "ok"
+    payload["model_route"] = route_key
+    payload["window_size"] = window
+    payload["current_window_rows"] = len(current_window)
+    payload["previous_window_rows"] = len(previous_window)
+    payload["route_rows_available"] = len(route_rows)
+    return payload
 
 
 def _operator_reward(candidate: CandidateRow) -> float:
@@ -594,6 +718,12 @@ def _recent_data_plane_summary(
         samples,
         novelty_reject_threshold=float(novelty_reject_threshold),
     )
+
+
+def _bootstrap_route_label(*, adaptive: bool) -> str:
+    if adaptive:
+        return "governor_adaptive/bootstrap"
+    return "governor_static_recipe/bootstrap"
 
 
 def _ensure_parent_file(run_dir: Path, *, design_hash: str, boundary: dict) -> Path:
@@ -890,14 +1020,9 @@ def _select_adaptive_recipe(
         families=families,
     )
 
+    gated_commands, novelty_gate = _gate_adaptive_commands(cmds)
     scored: list[tuple[float, ProposalCommand, str, float]] = []
-    novelty_rejects = 0
-    for cmd in cmds:
-        family = _command_family(cmd)
-        novelty = _command_novelty(cmd)
-        if novelty < _ADAPTIVE_NOVELTY_GATE:
-            novelty_rejects += 1
-            continue
+    for cmd, family, novelty in gated_commands:
         score = bandit_scores.get(family, 0.0) + novelty
         scored.append((score, cmd, family, novelty))
 
@@ -918,8 +1043,8 @@ def _select_adaptive_recipe(
             "strategy": "static_delegate_fallback",
             "parent_group": str(parent_group),
             "bandit_scores": bandit_scores,
-            "novelty_gate": float(_ADAPTIVE_NOVELTY_GATE),
-            "novelty_reject_count": novelty_rejects,
+            "novelty_gate": novelty_gate,
+            "novelty_reject_count": int(novelty_gate.get("rejected_count", 0)),
             "candidate_command_count": len(cmds),
             "selected_command_count": len(fallback_cmds),
         }
@@ -938,8 +1063,8 @@ def _select_adaptive_recipe(
         "strategy": "parent_group_operator_bandit_novelty_gate",
         "parent_group": str(parent_group),
         "bandit_scores": bandit_scores,
-        "novelty_gate": float(_ADAPTIVE_NOVELTY_GATE),
-        "novelty_reject_count": novelty_rejects,
+        "novelty_gate": novelty_gate,
+        "novelty_reject_count": int(novelty_gate.get("rejected_count", 0)),
         "candidate_command_count": len(cmds),
         "selected_command_count": len(selected_cmds),
         "selected_operator_families": selected_families,
@@ -955,6 +1080,37 @@ def _select_adaptive_recipe(
 def _run_cmds(cmds: Iterable[ProposalCommand]) -> None:
     for cmd in cmds:
         subprocess.run(cmd.argv, check=True)
+
+
+def _log_model_router_reward_event(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    problem: str,
+    event: dict,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO model_router_reward_events
+        (experiment_id, problem, model_route, window_size, previous_feasible_yield,
+         current_feasible_yield, previous_hv, current_hv, reward, reward_components_json,
+         created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            experiment_id,
+            str(problem),
+            str(event.get("model_route", "unknown")),
+            int(event.get("window_size", 0)),
+            float(event.get("previous_feasible_yield", 0.0)),
+            float(event.get("current_feasible_yield", 0.0)),
+            float(event.get("previous_hv", 0.0)),
+            float(event.get("current_hv", 0.0)),
+            float(event.get("reward", 0.0)),
+            json.dumps(event, separators=(",", ":")),
+            _utc_now_iso(),
+        ),
+    )
 
 
 def _log_governor_artifact(
@@ -1076,6 +1232,7 @@ def main() -> None:
 
                 batch_id = _next_batch_id(args.run_dir)
                 seed_base = int(args.experiment_id) * 10_000_000 + int(batch_id) * 1_000
+                bootstrap_route = _bootstrap_route_label(adaptive=bool(args.adaptive))
                 cmd = _build_blend_cmd(
                     db=args.db,
                     experiment_id=exp_id,
@@ -1087,13 +1244,13 @@ def main() -> None:
                     t_min=float(args.bootstrap_t_min),
                     t_max=float(args.bootstrap_t_max),
                     t_step=float(args.bootstrap_t_step),
-                    model_route="governor_bootstrap",
+                    model_route=bootstrap_route,
                 )
                 decision = {
                     "batch_id": batch_id,
                     "bootstrap": True,
                     "commands": [_cmd_str(cmd)],
-                    "model_route": "governor_bootstrap",
+                    "model_route": bootstrap_route,
                     "governor_mode": "adaptive" if bool(args.adaptive) else "static",
                     "created_at": _utc_now_iso(),
                 }
@@ -1187,6 +1344,13 @@ def main() -> None:
             decision["hv_at_decision"] = hv_value
             decision["record_hv"] = float(args.record_hv)
             decision["governor_mode"] = "adaptive" if bool(args.adaptive) else "static"
+            model_route = str(decision.get("model_route", "unknown"))
+            reward_event = _compute_model_router_reward_event(
+                history_candidates=candidates,
+                model_route=model_route,
+                window_size=int(_ROUTER_REWARD_WINDOW),
+            )
+            decision["model_router_reward"] = reward_event
 
             artifact_path = (
                 args.run_dir
@@ -1196,6 +1360,12 @@ def main() -> None:
             _write_json(artifact_path, decision)
             with conn:
                 _log_governor_artifact(conn, experiment_id=exp_id, path=artifact_path)
+                _log_model_router_reward_event(
+                    conn,
+                    experiment_id=exp_id,
+                    problem="p3",
+                    event=reward_event,
+                )
 
             for cmd in cmds:
                 print(_cmd_str(cmd))

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from ai_scientist.memory.schema import init_db
@@ -185,6 +186,9 @@ def test_adaptive_recipe_emits_adaptive_route_and_policy(tmp_path: Path) -> None
         decision["adaptive_policy"]["strategy"]
         == "parent_group_operator_bandit_novelty_gate"
     )
+    novelty_gate = decision["adaptive_policy"]["novelty_gate"]
+    assert novelty_gate["version"] == "m3.4_two_stage_novelty_v1"
+    assert "judge_call_count" in novelty_gate
     route = str(decision["model_route"])
     assert route.startswith("governor_adaptive/near_feasible/")
     for cmd in cmds:
@@ -193,7 +197,9 @@ def test_adaptive_recipe_emits_adaptive_route_and_policy(tmp_path: Path) -> None
         assert cmd.argv[idx + 1].startswith("governor_adaptive/near_feasible/")
 
 
-def test_adaptive_recipe_falls_back_when_novelty_gate_rejects_all(tmp_path: Path) -> None:
+def test_adaptive_recipe_falls_back_when_novelty_gate_rejects_all(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "wm.sqlite"
     run_dir = tmp_path / "run"
     (run_dir / "candidates").mkdir(parents=True, exist_ok=True)
@@ -349,3 +355,187 @@ def test_recent_data_plane_summary_tracks_fallback_delegate_usage() -> None:
     assert summary["adaptive_path_rows"] == 2
     assert summary["static_path_rows"] == 1
     assert summary["fallback_static_delegate_rows"] == 1
+
+
+def test_allow_near_duplicate_command_is_not_unconditional() -> None:
+    low = governor.NoveltyCandidate(
+        label="low", embedding_distance=0.035, novelty_score=0.035
+    )
+    high = governor.NoveltyCandidate(
+        label="high", embedding_distance=0.05, novelty_score=0.05
+    )
+    assert governor._allow_near_duplicate_command(low) is False
+    assert governor._allow_near_duplicate_command(high) is True
+
+
+def test_compute_model_router_reward_event_returns_contract_fields(monkeypatch) -> None:
+    route = "governor_adaptive/near_feasible/mirror"
+    monkeypatch.setattr(governor, "_compute_hv", lambda points: float(len(points)))
+    history = [
+        _candidate_row(
+            candidate_id=1,
+            design_hash="a",
+            feasibility=0.0,
+            is_feasible=True,
+            lgradb=1.0,
+            aspect=8.0,
+        ),
+        _candidate_row(
+            candidate_id=2,
+            design_hash="b",
+            feasibility=0.1,
+            is_feasible=False,
+            lgradb=0.8,
+            aspect=9.0,
+        ),
+        _candidate_row(
+            candidate_id=3,
+            design_hash="c",
+            feasibility=0.0,
+            is_feasible=True,
+            lgradb=1.2,
+            aspect=7.5,
+        ),
+        _candidate_row(
+            candidate_id=4,
+            design_hash="d",
+            feasibility=0.2,
+            is_feasible=False,
+            lgradb=1.1,
+            aspect=8.2,
+        ),
+    ]
+    history[0] = replace(history[0], model_route=route)
+    history[1] = replace(history[1], model_route=route)
+    history[2] = replace(history[2], model_route=route)
+    history[3] = replace(history[3], model_route=route)
+
+    payload = governor._compute_model_router_reward_event(
+        history_candidates=history,
+        model_route=route,
+        window_size=2,
+    )
+
+    assert payload["model_route"] == route
+    assert payload["window_size"] == 2
+    assert "reward" in payload
+    assert "relative_feasible_yield" in payload
+    assert "relative_hv" in payload
+    assert payload["reward_eligible"] is True
+    assert payload["eligibility_reason"] == "ok"
+
+
+def test_compute_model_router_reward_event_is_neutral_when_window_incomplete(
+    monkeypatch,
+) -> None:
+    route = "governor_adaptive/near_feasible/mirror"
+    monkeypatch.setattr(governor, "_compute_hv", lambda points: float(len(points)))
+    history = [
+        replace(
+            _candidate_row(
+                candidate_id=1,
+                design_hash="a",
+                feasibility=0.0,
+                is_feasible=True,
+                lgradb=1.0,
+                aspect=8.0,
+            ),
+            model_route=route,
+        ),
+        replace(
+            _candidate_row(
+                candidate_id=2,
+                design_hash="b",
+                feasibility=0.1,
+                is_feasible=False,
+                lgradb=0.8,
+                aspect=9.0,
+            ),
+            model_route=route,
+        ),
+        replace(
+            _candidate_row(
+                candidate_id=3,
+                design_hash="c",
+                feasibility=0.0,
+                is_feasible=True,
+                lgradb=1.2,
+                aspect=7.5,
+            ),
+            model_route=route,
+        ),
+    ]
+
+    payload = governor._compute_model_router_reward_event(
+        history_candidates=history,
+        model_route=route,
+        window_size=2,
+    )
+
+    assert payload["reward_eligible"] is False
+    assert payload["eligibility_reason"] == "insufficient_route_history"
+    assert payload["reward"] == 0.0
+    assert payload["current_window_rows"] == 2
+    assert payload["previous_window_rows"] == 1
+
+
+def test_log_model_router_reward_event_inserts_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "wm.sqlite"
+    init_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO experiments
+            (id, started_at, config_json, git_sha, constellaration_sha, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                99,
+                "2026-02-25T00:00:00+00:00",
+                "{}",
+                "deadbeef",
+                "const-sha",
+                None,
+            ),
+        )
+        governor._log_model_router_reward_event(
+            conn,
+            experiment_id=99,
+            problem="p3",
+            event={
+                "model_route": "governor_adaptive/near_feasible/mirror",
+                "window_size": 20,
+                "previous_feasible_yield": 10.0,
+                "current_feasible_yield": 20.0,
+                "previous_hv": 1.0,
+                "current_hv": 1.5,
+                "reward": 0.25,
+            },
+        )
+        row = conn.execute(
+            """
+            SELECT model_route, window_size, reward
+            FROM model_router_reward_events
+            WHERE experiment_id = ?
+            """,
+            (99,),
+        ).fetchone()
+        assert row is not None
+        assert str(row[0]) == "governor_adaptive/near_feasible/mirror"
+        assert int(row[1]) == 20
+        assert float(row[2]) == 0.25
+    finally:
+        conn.close()
+
+
+def test_bootstrap_route_label_is_static_for_static_mode() -> None:
+    assert governor._bootstrap_route_label(adaptive=False) == (
+        "governor_static_recipe/bootstrap"
+    )
+
+
+def test_bootstrap_route_label_is_adaptive_for_adaptive_mode() -> None:
+    assert governor._bootstrap_route_label(adaptive=True) == (
+        "governor_adaptive/bootstrap"
+    )

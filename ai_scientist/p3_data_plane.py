@@ -73,9 +73,7 @@ def summarize_data_plane(
         float(sum(novelty_values) / len(novelty_values)) if novelty_values else None
     )
     novelty_reject_rate = (
-        float(novelty_reject_count) / float(with_novelty)
-        if with_novelty > 0
-        else None
+        float(novelty_reject_count) / float(with_novelty) if with_novelty > 0 else None
     )
     return {
         "candidate_rows": len(sample_list),
