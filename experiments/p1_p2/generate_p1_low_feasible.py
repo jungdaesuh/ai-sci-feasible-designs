@@ -161,7 +161,6 @@ def _fit_iota_regressor(
     nfp_filter: int,
     seed: int,
 ) -> tuple[RandomForestRegressor, tuple[int, int], list[tuple[np.ndarray, np.ndarray]]]:
-    rng = np.random.default_rng(seed)
     X: list[np.ndarray] = []
     y: list[float] = []
     bases: list[tuple[np.ndarray, np.ndarray]] = []

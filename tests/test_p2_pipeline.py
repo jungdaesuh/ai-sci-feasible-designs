@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock, patch
+from dataclasses import replace
 from ai_scientist.experiment_runner import run_experiment
 from ai_scientist.config import ExperimentConfig
 from ai_scientist.experiment_setup import RunnerCLIConfig
@@ -153,3 +154,59 @@ def test_p2_pipeline_execution(
 
     # Verify start_experiment was called
     mock_wm_instance.start_experiment.assert_called_once()
+
+
+@patch("ai_scientist.experiment_runner.create_generative_model")
+@patch("ai_scientist.experiment_runner.create_surrogate")
+@patch("ai_scientist.experiment_runner.CycleExecutor")
+@patch("ai_scientist.experiment_runner.memory.WorldModel")
+@patch("ai_scientist.experiment_runner.rag.ensure_index")
+def test_runtime_planner_is_serialized_in_experiment_metadata(
+    mock_ensure_index,
+    mock_world_model,
+    _mock_cycle_executor,
+    _mock_create_surrogate,
+    _mock_create_generative_model,
+    tmp_path,
+):
+    mock_ensure_index.return_value = MagicMock(chunks_indexed=1, index_path="dummy")
+    mock_wm_instance = MagicMock()
+    mock_world_model.return_value.__enter__.return_value = mock_wm_instance
+    mock_wm_instance.start_experiment.return_value = 7
+    mock_wm_instance.budget_usage.return_value = MagicMock(
+        screen_evals=0,
+        promoted_evals=0,
+        high_fidelity_evals=0,
+    )
+
+    cfg = replace(
+        ExperimentConfig.p3_quick_validation(),
+        cycles=0,
+        planner="agent",
+        reporting_dir=tmp_path / "reports",
+        memory_db=tmp_path / "world.db",
+    )
+    runtime = RunnerCLIConfig(
+        config_path=Path("dummy"),
+        problem=None,
+        cycles=None,
+        memory_db=None,
+        eval_budget=None,
+        workers=None,
+        pool_type=None,
+        screen_only=False,
+        promote_only=False,
+        slow=False,
+        verbose=False,
+        log_cache_stats=False,
+        run_preset=None,
+        planner="deterministic",
+        resume_from=None,
+        aso=False,
+        preset=None,
+    )
+
+    run_experiment(cfg, runtime=runtime)
+
+    payload = mock_wm_instance.start_experiment.call_args.args[0]
+    assert payload["planner"] == "deterministic"

@@ -30,8 +30,8 @@ os.environ.setdefault("SKBUILD_EDITABLE_VERBOSE", "0")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ai_scientist.forward_model import forward_model_batch, get_backend
-from ai_scientist.tools.evaluation import (
+from ai_scientist.forward_model import forward_model_batch, get_backend  # noqa: E402
+from ai_scientist.tools.evaluation import (  # noqa: E402
     _DEFAULT_RELATIVE_TOLERANCE,
     _settings_for_stage,
 )
@@ -187,7 +187,6 @@ def _fit_iota_regressor(
     seed: int,
     history_path: Path,
 ) -> tuple[RandomForestRegressor, tuple[int, int]]:
-    rng = np.random.default_rng(seed)
     X: list[np.ndarray] = []
     y: list[float] = []
 
@@ -402,7 +401,6 @@ def main() -> None:
         R, Z = _fourier_to_real_space(r_tensor, z_tensor, nfp=args.nfp)
         aspect_ratio = _aspect_ratio(R).cpu().numpy()
         triangularity = _triangularity(R, Z).cpu().numpy()
-        elongation = _elongation(R, Z).cpu().numpy()
 
         geom_mask = (aspect_ratio <= args.ar_max) & (triangularity <= args.tri_max)
         if not np.any(geom_mask):

@@ -9,7 +9,7 @@ experiment_tag: "aso_v4_demo"
 
 boundary_template:
   n_poloidal_modes: 4
-  n_toroidal_modes: 4
+  n_toroidal_modes: 5
   n_field_periods: 3
   base_major_radius: 1.0
   base_minor_radius: 0.2
