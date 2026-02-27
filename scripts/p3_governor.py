@@ -33,6 +33,10 @@ if str(_REPO_ROOT) not in sys.path:
 from ai_scientist.model_router_reward import compute_model_router_reward
 from ai_scientist.novelty_gate import NoveltyCandidate, apply_two_stage_novelty_gate
 from ai_scientist.p3_data_plane import DataPlaneSample, summarize_data_plane
+from ai_scientist.staged_governor import (
+    build_staged_seed_plan_from_snapshots,
+    worst_constraint_from_violations,
+)
 from ai_scientist.memory.schema import init_db
 
 
@@ -122,6 +126,7 @@ class CandidateRow:
     novelty_score: float | None
     operator_family: str
     model_route: str
+    params: dict | None = None
 
 
 def _fetch_candidates(
@@ -130,6 +135,7 @@ def _fetch_candidates(
     rows = conn.execute(
         """
         SELECT c.id AS candidate_id, c.design_hash AS design_hash, c.seed AS seed,
+               c.params_json AS params_json,
                c.lineage_parent_hashes_json AS lineage_parent_hashes_json,
                c.novelty_score AS novelty_score,
                c.operator_family AS operator_family,
@@ -148,8 +154,25 @@ def _fetch_candidates(
     out: list[CandidateRow] = []
     for row in rows:
         payload = json.loads(str(row["raw_json"]))
-        metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
-        violations = payload.get("violations", {}) if isinstance(payload, dict) else {}
+        params_payload = json.loads(str(row["params_json"]))
+        if isinstance(payload, dict):
+            nested_metrics = payload.get("metrics")
+            if isinstance(nested_metrics, dict):
+                metrics = nested_metrics
+            else:
+                metrics = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"constraint_margins", "violations", "meta"}
+                }
+        else:
+            metrics = {}
+        margins = (
+            payload.get("constraint_margins", {}) if isinstance(payload, dict) else {}
+        )
+        if not isinstance(margins, dict):
+            margins = payload.get("violations", {}) if isinstance(payload, dict) else {}
+        violations = margins if isinstance(margins, dict) else {}
         meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
 
         aspect = None
@@ -171,10 +194,14 @@ def _fetch_candidates(
         vio_clean: dict[str, float] = {}
         if isinstance(violations, dict):
             for k, v in violations.items():
+                if isinstance(v, bool):
+                    continue
                 try:
-                    vio_clean[str(k)] = float(v)
+                    value_f = float(v)
                 except (TypeError, ValueError):
                     continue
+                if value_f > 0.0 and math.isfinite(value_f):
+                    vio_clean[str(k)] = value_f
         lineage_payload = []
         lineage_raw = row["lineage_parent_hashes_json"]
         if isinstance(lineage_raw, str) and lineage_raw:
@@ -209,21 +236,14 @@ def _fetch_candidates(
                 novelty_score=novelty_score,
                 operator_family=str(row["operator_family"] or ""),
                 model_route=str(row["model_route"] or ""),
+                params=params_payload if isinstance(params_payload, dict) else None,
             )
         )
     return out
 
 
 def _worst_constraint(violations: dict[str, float]) -> tuple[str | None, float]:
-    if not violations:
-        return None, 0.0
-    worst_name = None
-    worst_val = -float("inf")
-    for name, val in violations.items():
-        if val > worst_val:
-            worst_val = val
-            worst_name = name
-    return worst_name, float(worst_val)
+    return worst_constraint_from_violations(violations)
 
 
 def _potential_area(lgradb: float, aspect: float) -> float:
@@ -294,6 +314,53 @@ def _choose_partner(
     if worst_constraint == "vacuum":
         return max(pool, key=metric_value)
     return min(pool, key=metric_value)
+
+
+def _focus_partner_via_shared_staged_plan(
+    candidates: list[CandidateRow],
+    *,
+    max_feasibility: float,
+) -> tuple[CandidateRow, CandidateRow | None] | None:
+    snapshots: list[dict] = []
+    for candidate in candidates:
+        if candidate.params is None:
+            continue
+        snapshots.append(
+            {
+                "design_hash": candidate.design_hash,
+                "params": candidate.params,
+                "feasibility": candidate.feasibility,
+                "objective": candidate.lgradb,
+                "is_feasible": candidate.is_feasible,
+                "constraint_margins": dict(candidate.violations),
+                "metrics": dict(candidate.metrics),
+            }
+        )
+    if not snapshots:
+        return None
+    staged_plan = build_staged_seed_plan_from_snapshots(
+        snapshots=snapshots,
+        problem="p3",
+        near_feasibility_threshold=float(max_feasibility),
+        max_repair_candidates=1,
+        bridge_blend_t=0.86,
+    )
+    if staged_plan is None:
+        return None
+    by_hash: dict[str, CandidateRow] = {}
+    for candidate in candidates:
+        # candidates are fetched newest-first; keep first seen row per hash.
+        if candidate.design_hash not in by_hash:
+            by_hash[candidate.design_hash] = candidate
+    focus = by_hash.get(staged_plan.focus_hash)
+    if focus is None:
+        return None
+    partner = (
+        by_hash.get(staged_plan.partner_hash)
+        if staged_plan.partner_hash is not None
+        else None
+    )
+    return focus, partner
 
 
 def _lineage_child_counts(candidates: list[CandidateRow]) -> dict[str, int]:
@@ -1292,18 +1359,27 @@ def main() -> None:
                     "candidate_count": parent_selection.candidate_count,
                 }
             else:
-                focus = _choose_focus(
-                    candidates, max_feasibility=float(args.max_focus_feas)
+                shared_selection = _focus_partner_via_shared_staged_plan(
+                    candidates,
+                    max_feasibility=float(args.max_focus_feas),
                 )
-                if focus is None:
-                    print("No near-feasible focus candidate found in recent window.")
-                    if not args.loop:
-                        break
-                    time.sleep(float(args.sleep_sec))
-                    continue
-                worst_name, _worst_val = _worst_constraint(focus.violations)
-                worst = str(worst_name) if worst_name is not None else ""
-                partner = _choose_partner(candidates, worst_constraint=worst)
+                if shared_selection is None:
+                    focus = _choose_focus(
+                        candidates, max_feasibility=float(args.max_focus_feas)
+                    )
+                    if focus is None:
+                        print(
+                            "No near-feasible focus candidate found in recent window."
+                        )
+                        if not args.loop:
+                            break
+                        time.sleep(float(args.sleep_sec))
+                        continue
+                    worst_name, _worst_val = _worst_constraint(focus.violations)
+                    worst = str(worst_name) if worst_name is not None else ""
+                    partner = _choose_partner(candidates, worst_constraint=worst)
+                else:
+                    focus, partner = shared_selection
 
             batch_id = _next_batch_id(args.run_dir)
             seed_base = int(args.experiment_id) * 10_000_000 + int(batch_id) * 1_000

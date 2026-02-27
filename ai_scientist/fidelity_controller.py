@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol, Tuple
 
@@ -170,11 +171,31 @@ def _with_failure_metadata(evaluation: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _verification_phase_for_stage(stage: str) -> str:
+    stage_key = str(stage).strip().lower()
+    if stage_key in {"screen", "low"} or stage_key.startswith("screen"):
+        return "cheap"
+    if stage_key in {"promote", "strict"} or stage_key.startswith("promote"):
+        return "strict"
+    return "vmec"
+
+
 class FidelityController:
     """Manages candidate evaluation, fidelity ladders, and promotion gates."""
 
     def __init__(self, config: ai_config.ExperimentConfig):
         self.config = config
+
+    def passes_cheap_stage_evidence(self, entry: Mapping[str, Any]) -> bool:
+        """AlphaEvolve-style spend gate: only spend strict budget on improving branches."""
+        delta_raw = entry.get("violation_delta_vs_parent")
+        if isinstance(delta_raw, bool) or not isinstance(delta_raw, (int, float)):
+            return False
+        delta = float(delta_raw)
+        if not math.isfinite(delta):
+            return False
+        epsilon = float(self.config.aso.cheap_stage_violation_delta_epsilon)
+        return delta < (-epsilon)
 
     def evaluate_stage(
         self,
@@ -193,6 +214,7 @@ class FidelityController:
         candidate_list = list(candidates)
         if not candidate_list:
             return []
+        verify_phase = _verification_phase_for_stage(stage)
 
         # Check wall clock before starting batch
         wall_limit = budgets.wall_clock_minutes
@@ -215,11 +237,27 @@ class FidelityController:
                     candidate["params"], stage=stage, use_cache=True
                 )
                 evaluation = _with_failure_metadata(evaluation)
+                evaluation["verify_phase"] = verify_phase
+                evaluation["verify_contract_phases"] = list(
+                    candidate.get("verify_contract_phases", ["cheap", "strict", "vmec"])
+                )
                 design_id = (
                     candidate.get("design_hash")
                     or evaluation.get("design_hash")
                     or tools.design_hash(candidate["params"])
                 )
+                parent_feasibility = candidate.get("parent_feasibility")
+                parent_objective = candidate.get("parent_objective")
+                violation_delta_vs_parent = candidate.get("violation_delta_vs_parent")
+                cheap_stage_evidence_pass = bool(
+                    candidate.get("cheap_stage_evidence_pass", False)
+                )
+                if verify_phase == "cheap":
+                    cheap_stage_evidence_pass = self.passes_cheap_stage_evidence(
+                        {
+                            "violation_delta_vs_parent": violation_delta_vs_parent,
+                        }
+                    )
                 results.append(
                     {
                         "params": candidate["params"],
@@ -230,6 +268,22 @@ class FidelityController:
                         "novelty_score": candidate.get("novelty_score"),
                         "operator_family": candidate.get("operator_family"),
                         "model_route": candidate.get("model_route"),
+                        "bridge_flag": bool(candidate.get("bridge_flag", False)),
+                        "parent_feasibility": parent_feasibility,
+                        "parent_objective": parent_objective,
+                        "violation_delta_vs_parent": violation_delta_vs_parent,
+                        "improvement_reason": candidate.get("improvement_reason"),
+                        "cheap_stage_evidence_pass": cheap_stage_evidence_pass,
+                        "fairness_seed_bank_hash": candidate.get(
+                            "fairness_seed_bank_hash"
+                        ),
+                        "verify_phase": verify_phase,
+                        "verify_contract_phases": list(
+                            candidate.get(
+                                "verify_contract_phases",
+                                ["cheap", "strict", "vmec"],
+                            )
+                        ),
                     }
                 )
 
@@ -366,6 +420,22 @@ class FidelityController:
                     1e9 if eval_dict.get("minimize_objective", True) else -1e9
                 )
             eval_dict = _with_failure_metadata(eval_dict)
+            eval_dict["verify_phase"] = verify_phase
+            eval_dict["verify_contract_phases"] = list(
+                candidate.get("verify_contract_phases", ["cheap", "strict", "vmec"])
+            )
+            parent_feasibility = candidate.get("parent_feasibility")
+            parent_objective = candidate.get("parent_objective")
+            violation_delta_vs_parent = candidate.get("violation_delta_vs_parent")
+            cheap_stage_evidence_pass = bool(
+                candidate.get("cheap_stage_evidence_pass", False)
+            )
+            if verify_phase == "cheap":
+                cheap_stage_evidence_pass = self.passes_cheap_stage_evidence(
+                    {
+                        "violation_delta_vs_parent": violation_delta_vs_parent,
+                    }
+                )
 
             results.append(
                 {
@@ -377,6 +447,20 @@ class FidelityController:
                     "novelty_score": candidate.get("novelty_score"),
                     "operator_family": candidate.get("operator_family"),
                     "model_route": candidate.get("model_route"),
+                    "bridge_flag": bool(candidate.get("bridge_flag", False)),
+                    "parent_feasibility": parent_feasibility,
+                    "parent_objective": parent_objective,
+                    "violation_delta_vs_parent": violation_delta_vs_parent,
+                    "improvement_reason": candidate.get("improvement_reason"),
+                    "cheap_stage_evidence_pass": cheap_stage_evidence_pass,
+                    "fairness_seed_bank_hash": candidate.get("fairness_seed_bank_hash"),
+                    "verify_phase": verify_phase,
+                    "verify_contract_phases": list(
+                        candidate.get(
+                            "verify_contract_phases",
+                            ["cheap", "strict", "vmec"],
+                        )
+                    ),
                 }
             )
 

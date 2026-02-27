@@ -69,6 +69,100 @@ def _prepare_db(db_path: Path, *, experiment_id: int, design_hash: str) -> None:
         conn.close()
 
 
+def test_fetch_candidates_uses_constraint_margins_for_violations(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "wm.sqlite"
+    experiment_id = 101
+    design_hash = "violations-source"
+    _prepare_db(db_path, experiment_id=experiment_id, design_hash=design_hash)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        candidate_id = int(
+            conn.execute(
+                "SELECT id FROM candidates WHERE design_hash = ?",
+                (design_hash,),
+            ).fetchone()["id"]
+        )
+        conn.execute(
+            """
+            INSERT INTO metrics
+            (candidate_id, raw_json, feasibility, objective, hv, is_feasible)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                json.dumps(
+                    {
+                        "metrics": {"mirror": 0.31, "aspect_ratio": 8.4},
+                        "constraint_margins": {
+                            "mirror": 0.11,
+                            "log10_qi": 0.02,
+                            "satisfied": -0.01,
+                            "zero": 0.0,
+                            "bool_margin": True,
+                        },
+                    }
+                ),
+                0.13,
+                3.5,
+                None,
+                0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = governor._fetch_candidates(conn, experiment_id=experiment_id, limit=5)
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    assert rows[0].violations == {"mirror": 0.11, "log10_qi": 0.02}
+
+
+def test_fetch_candidates_supports_flat_raw_json_metrics_shape(tmp_path: Path) -> None:
+    from ai_scientist.memory.repository import WorldModel
+
+    db_path = tmp_path / "wm.sqlite"
+    with WorldModel(db_path) as wm:
+        experiment_id = wm.start_experiment({"problem": "p3"}, "deadbeef")
+        wm.log_candidate(
+            experiment_id=experiment_id,
+            problem="p3",
+            params=_boundary(),
+            seed=7,
+            status="done",
+            evaluation={
+                "stage": "p3",
+                "objective": 2.3,
+                "feasibility": 0.15,
+                "metrics": {"aspect_ratio": 8.4, "mirror": 0.31},
+                "constraint_margins": {"mirror": 0.11},
+            },
+            design_hash="flat-raw-json-shape",
+            operator_family="blend",
+            model_route="governor_static_recipe/mirror",
+        )
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = governor._fetch_candidates(conn, experiment_id=experiment_id, limit=5)
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    assert rows[0].metrics["aspect_ratio"] == 8.4
+    assert rows[0].aspect == 8.4
+
+
 def _candidate_row(
     *,
     candidate_id: int,
@@ -142,6 +236,73 @@ def test_select_parent_group_uses_broad_as_fallback() -> None:
     assert selected is not None
     assert selected.group == "broad"
     assert selected.candidate_count == 1
+
+
+def test_shared_staged_plan_selection_resolves_focus_and_partner() -> None:
+    focus = governor.CandidateRow(
+        candidate_id=1,
+        design_hash="focus",
+        seed=1,
+        feasibility=0.2,
+        is_feasible=False,
+        lgradb=1.2,
+        aspect=8.0,
+        violations={"mirror": 0.1},
+        metrics={"mirror": 0.3, "aspect_ratio": 8.0},
+        meta={},
+        lineage_parent_hashes=[],
+        novelty_score=0.2,
+        operator_family="blend",
+        model_route="governor_static_recipe/mirror",
+        params=_boundary(),
+    )
+    partner = governor.CandidateRow(
+        candidate_id=2,
+        design_hash="partner",
+        seed=2,
+        feasibility=0.0,
+        is_feasible=True,
+        lgradb=1.3,
+        aspect=7.8,
+        violations={},
+        metrics={"mirror": 0.24, "aspect_ratio": 7.8},
+        meta={},
+        lineage_parent_hashes=[],
+        novelty_score=0.2,
+        operator_family="scale_groups",
+        model_route="governor_static_recipe/mirror",
+        params=_boundary(),
+    )
+
+    stale_focus = governor.CandidateRow(
+        candidate_id=99,
+        design_hash="focus",
+        seed=99,
+        feasibility=0.3,
+        is_feasible=False,
+        lgradb=0.7,
+        aspect=9.5,
+        violations={"mirror": 0.3},
+        metrics={"mirror": 0.6, "aspect_ratio": 9.5},
+        meta={},
+        lineage_parent_hashes=[],
+        novelty_score=0.2,
+        operator_family="blend",
+        model_route="governor_static_recipe/mirror",
+        params=_boundary(),
+    )
+
+    selected = governor._focus_partner_via_shared_staged_plan(
+        [focus, stale_focus, partner],
+        max_feasibility=0.5,
+    )
+
+    assert selected is not None
+    resolved_focus, resolved_partner = selected
+    assert resolved_focus.design_hash == "focus"
+    assert resolved_focus.candidate_id == 1
+    assert resolved_partner is not None
+    assert resolved_partner.design_hash == "partner"
 
 
 def test_adaptive_recipe_emits_adaptive_route_and_policy(tmp_path: Path) -> None:

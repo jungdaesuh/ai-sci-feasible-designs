@@ -404,6 +404,26 @@ class ASOConfig:
     llm_timeout_seconds: float = 10.0
     llm_max_retries: int = 2
     use_heuristic_fallback: bool = True
+    seed_fallback_policy: Literal["allow", "forbid"] = "allow"
+    staged_governor_enabled: bool = True
+    staged_recent_limit: int = 128
+    staged_near_feasibility_threshold: float = 0.25
+    staged_repair_candidates: int = 3
+    staged_bridge_blend_t: float = 0.86
+    tree_evolution_enabled: bool = False
+    offspring_per_parent: int = 3
+    parent_group_size: int = 2
+    tree_queue_max: int = 24
+    tree_branch_budget: int = 2
+    experience_injection_probability: float = 0.5
+    cheap_stage_violation_delta_epsilon: float = 0.0
+    parent_selection_leverage_weight: float = 0.35
+    experience_stagnation_decay: float = 0.15
+    delta_replay_top_k: int = 2
+    frontier_objective_tie_epsilon: float = 1e-6
+    runtime_ucb_enabled: bool = True
+    runtime_ucb_min_eligible_events: int = 5
+    fair_ab_lockstep_seed_bank: bool = False
 
     @staticmethod
     def default_event_triggered() -> "ASOConfig":
@@ -803,6 +823,9 @@ def _alm_config_from_dict(data: Mapping[str, Any] | None) -> ALMConfig:
 def _aso_config_from_dict(data: Mapping[str, Any] | None) -> ASOConfig:
     config = data or {}
     supervision_mode = str(config.get("supervision_mode", "event_triggered"))
+    seed_fallback_policy = str(config.get("seed_fallback_policy", "allow")).lower()
+    if seed_fallback_policy not in {"allow", "forbid"}:
+        raise ValueError("aso.seed_fallback_policy must be either 'allow' or 'forbid'.")
     return ASOConfig(
         enabled=bool(config.get("enabled", False)),
         supervision_mode=supervision_mode,  # type: ignore
@@ -827,6 +850,42 @@ def _aso_config_from_dict(data: Mapping[str, Any] | None) -> ASOConfig:
         llm_timeout_seconds=float(config.get("llm_timeout_seconds", 10.0)),
         llm_max_retries=int(config.get("llm_max_retries", 2)),
         use_heuristic_fallback=bool(config.get("use_heuristic_fallback", True)),
+        seed_fallback_policy=seed_fallback_policy,  # type: ignore[arg-type]
+        staged_governor_enabled=bool(config.get("staged_governor_enabled", True)),
+        staged_recent_limit=int(config.get("staged_recent_limit", 128)),
+        staged_near_feasibility_threshold=float(
+            config.get("staged_near_feasibility_threshold", 0.25)
+        ),
+        staged_repair_candidates=int(config.get("staged_repair_candidates", 3)),
+        staged_bridge_blend_t=float(config.get("staged_bridge_blend_t", 0.86)),
+        tree_evolution_enabled=bool(config.get("tree_evolution_enabled", False)),
+        offspring_per_parent=int(config.get("offspring_per_parent", 3)),
+        parent_group_size=int(config.get("parent_group_size", 2)),
+        tree_queue_max=int(config.get("tree_queue_max", 24)),
+        tree_branch_budget=int(config.get("tree_branch_budget", 2)),
+        experience_injection_probability=float(
+            config.get("experience_injection_probability", 0.5)
+        ),
+        cheap_stage_violation_delta_epsilon=float(
+            config.get("cheap_stage_violation_delta_epsilon", 0.0)
+        ),
+        parent_selection_leverage_weight=float(
+            config.get("parent_selection_leverage_weight", 0.35)
+        ),
+        experience_stagnation_decay=float(
+            config.get("experience_stagnation_decay", 0.15)
+        ),
+        delta_replay_top_k=int(config.get("delta_replay_top_k", 2)),
+        frontier_objective_tie_epsilon=float(
+            config.get("frontier_objective_tie_epsilon", 1e-6)
+        ),
+        runtime_ucb_enabled=bool(config.get("runtime_ucb_enabled", True)),
+        runtime_ucb_min_eligible_events=int(
+            config.get("runtime_ucb_min_eligible_events", 5)
+        ),
+        fair_ab_lockstep_seed_bank=bool(
+            config.get("fair_ab_lockstep_seed_bank", False)
+        ),
     )
 
 

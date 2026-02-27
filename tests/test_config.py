@@ -167,6 +167,24 @@ def test_aso_config_factories(config_module):
     assert config.supervision_mode == "event_triggered"
     assert config.max_stagnation_steps == 5
     assert config.use_heuristic_fallback is True
+    assert config.seed_fallback_policy == "allow"
+    assert config.staged_governor_enabled is True
+    assert config.staged_recent_limit == 128
+    assert config.staged_repair_candidates == 3
+    assert config.tree_evolution_enabled is False
+    assert config.offspring_per_parent == 3
+    assert config.parent_group_size == 2
+    assert config.tree_queue_max == 24
+    assert config.tree_branch_budget == 2
+    assert config.experience_injection_probability == pytest.approx(0.5)
+    assert config.cheap_stage_violation_delta_epsilon == pytest.approx(0.0)
+    assert config.parent_selection_leverage_weight == pytest.approx(0.35)
+    assert config.experience_stagnation_decay == pytest.approx(0.15)
+    assert config.delta_replay_top_k == 2
+    assert config.frontier_objective_tie_epsilon == pytest.approx(1e-6)
+    assert config.runtime_ucb_enabled is True
+    assert config.runtime_ucb_min_eligible_events == 5
+    assert config.fair_ab_lockstep_seed_bank is False
 
     # Default periodic
     config = ASOConfig.default_periodic(interval=10)

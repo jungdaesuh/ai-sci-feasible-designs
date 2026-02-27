@@ -175,6 +175,12 @@ class TestFidelityControllerMock(unittest.TestCase):
         self.assertEqual(results[0]["design_hash"], "hash1")
         self.assertEqual(results[0]["evaluation"]["objective"], 0.5)
         self.assertEqual(results[0]["evaluation"]["score"], 0.75)
+        self.assertEqual(results[0]["verify_phase"], "cheap")
+        self.assertEqual(
+            results[0]["verify_contract_phases"],
+            ["cheap", "strict", "vmec"],
+        )
+        self.assertEqual(results[0]["evaluation"]["verify_phase"], "cheap")
 
     @patch("ai_scientist.fidelity_controller._time_exceeded")
     def test_evaluate_stage_handles_errors(self, mock_time_exceeded):
@@ -225,3 +231,26 @@ class TestFidelityControllerMock(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["evaluation"]["error"], "Simulation failed")
         self.assertEqual(results[0]["evaluation"]["feasibility"], float("inf"))
+
+    def test_passes_cheap_stage_evidence_gate(self):
+        self.config.aso = MagicMock()
+        self.config.aso.cheap_stage_violation_delta_epsilon = 0.01
+
+        assert (
+            self.controller.passes_cheap_stage_evidence(
+                {"violation_delta_vs_parent": -0.02}
+            )
+            is True
+        )
+        assert (
+            self.controller.passes_cheap_stage_evidence(
+                {"violation_delta_vs_parent": -0.005}
+            )
+            is False
+        )
+        assert (
+            self.controller.passes_cheap_stage_evidence(
+                {"violation_delta_vs_parent": float("inf")}
+            )
+            is False
+        )
