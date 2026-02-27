@@ -1,0 +1,59 @@
+model:
+  base_url: http://127.0.0.1
+  instruct_model: "codex-native-short-loop"
+  thinking_model: "codex-native-full"
+  request_timeout_seconds: 120
+  rate_limit_per_minute: 240
+  context_length: 256000
+  dtype: bf16
+  tensor_parallel: 1
+  provider: codex_native
+  providers:
+    codex_native:
+      base_url: https://chatgpt.com/backend-api
+      chat_path: /codex/responses
+      auth_env: CODEX_NATIVE_BEARER_TOKEN
+      default_model: gpt-5.3-codex
+    openrouter:
+      base_url: https://openrouter.ai/api/v1
+      chat_path: /chat/completions
+      auth_env: OPENROUTER_API_KEY
+      default_model: "x-ai/grok-4.1-fast:free"
+      extra_headers:
+        HTTP-Referer: https://openrouter.ai/docs
+        X-Title: "ConStellaration Grok"
+    moonshot:
+      base_url: https://api.moonshot.ai/v1
+      chat_path: /chat/completions
+      auth_env: MOONSHOT_API_KEY
+      default_model: kimi-k2-0711-preview
+  agent_gates:
+    "codex-native-short-loop":
+      provider_model: "gpt-5.3-codex"
+      allowed_tools:
+        - make_boundary
+        - propose_boundary
+        - recombine_designs
+        - evaluate_p1
+        - evaluate_p2
+        - evaluate_p3
+        - log_citation
+        - write_report
+      system_prompt: "Focus on short-loop tool usage for stellarator design. Use the provided tools efficiently."
+    "codex-native-full":
+      provider_model: "gpt-5.3-codex"
+      allowed_tools:
+        - make_boundary
+        - propose_boundary
+        - recombine_designs
+        - evaluate_p1
+        - evaluate_p2
+        - evaluate_p3
+        - retrieve_rag
+        - write_report
+        - write_note
+      system_prompt: "You are an expert AI Scientist. Synthesize complex information, plan next steps, and utilize all available tools for stellarator optimization. Leverage RAG for context and write notes to document progress."
+  role_map:
+    planning: "codex-native-full"
+    literature: "codex-native-full"
+    analysis: "codex-native-full"

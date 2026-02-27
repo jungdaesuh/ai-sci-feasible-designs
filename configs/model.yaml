@@ -1,13 +1,13 @@
 model:
   base_url: http://127.0.0.1
-  instruct_model: "grok-planning-short-loop"
-  thinking_model: "grok-planning-full"
+  instruct_model: "codex-native-short-loop"
+  thinking_model: "codex-native-full"
   request_timeout_seconds: 120
   rate_limit_per_minute: 240
   context_length: 256000 # Use a generic large context window, specific model limits can vary
   dtype: bf16
   tensor_parallel: 1
-  provider: openrouter
+  provider: codex_native
   providers:
     openrouter:
       base_url: https://openrouter.ai/api/v1
@@ -23,10 +23,10 @@ model:
       auth_env: MOONSHOT_API_KEY
       default_model: kimi-k2-0711-preview
     codex_native:
-      base_url: http://127.0.0.1:18790/v1
-      chat_path: /chat/completions
+      base_url: https://chatgpt.com/backend-api
+      chat_path: /codex/responses
       auth_env: CODEX_NATIVE_BEARER_TOKEN
-      default_model: openai-codex/gpt-5.3-codex
+      default_model: gpt-5.3-codex
     openclaw:
       base_url: http://127.0.0.1:18789/v1
       chat_path: /chat/completions
@@ -87,7 +87,7 @@ model:
         - write_note
       system_prompt: "You are an expert AI Scientist. Synthesize complex information, plan next steps, and utilize all available tools for stellarator optimization. Leverage RAG for context and write notes to document progress."
     "codex-native-short-loop":
-      provider_model: "openai-codex/gpt-5.3-codex"
+      provider_model: "gpt-5.3-codex"
       allowed_tools:
         - make_boundary
         - propose_boundary
@@ -99,7 +99,7 @@ model:
         - write_report
       system_prompt: "Focus on short-loop tool usage for stellarator design. Use the provided tools efficiently."
     "codex-native-full":
-      provider_model: "openai-codex/gpt-5.3-codex"
+      provider_model: "gpt-5.3-codex"
       allowed_tools:
         - make_boundary
         - propose_boundary
@@ -112,19 +112,19 @@ model:
         - write_note
       system_prompt: "You are an expert AI Scientist. Synthesize complex information, plan next steps, and utilize all available tools for stellarator optimization. Leverage RAG for context and write notes to document progress."
     "literature_agent":
-      provider_model: "x-ai/grok-4.1-fast:free" # Also switch literature agent to Grok
+      provider_model: "gpt-5.3-codex"
       allowed_tools:
         - retrieve_rag
         - write_note
       system_prompt: "You are a literature researcher. Retrieve papers, synthesize insights, and write notes to the world model."
     "analysis_agent":
-      provider_model: "x-ai/grok-4.1-fast:free" # Also switch analysis agent to Grok
+      provider_model: "gpt-5.3-codex"
       allowed_tools:
         - evaluate_p3
         - make_boundary
         - write_note
       system_prompt: "You are a physics analyst. Evaluate designs and document findings."
   role_map:
-    planning: "grok-planning-full"
+    planning: "codex-native-full"
     literature: "literature_agent"
     analysis: "analysis_agent"

@@ -59,7 +59,7 @@ CMD ["python", "-m", "ai_scientist.runner"]
 
 ### Codex-native runtime (partially implemented): local adapter required
 
-The `codex_native` provider and `codex-native-*` aliases exist in `configs/model.yaml`, but this repo does not ship the local OpenAI-compatible adapter server or the OAuth/profile management yet.
+The codex-native canary defaults are now pinned via `configs/model.codex_native_canary.yaml` and `scripts/run_codex_native_canary.sh`, but this repo still does not ship the local OpenAI-compatible adapter server or the OAuth/profile management.
 
 Target-state sketch (requires an external adapter endpoint):
 

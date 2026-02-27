@@ -85,3 +85,55 @@ model:
     monkeypatch.setenv("MODEL_PROVIDER", "moonshot")
     config = load_model_config(config_path)
     assert config.default_provider == "moonshot"
+
+
+def test_env_overrides_model_config_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    model_default = tmp_path / "model.default.yaml"
+    model_default.write_text(
+        """
+model:
+  provider: openrouter
+  instruct_model: default-instruct
+  thinking_model: default-thinking
+  providers:
+    openrouter:
+      base_url: https://dummy
+      chat_path: /chat
+      auth_env: OPENROUTER_KEY
+      default_model: default-model
+""".strip()
+    )
+    model_canary = tmp_path / "model.canary.yaml"
+    model_canary.write_text(
+        """
+model:
+  provider: codex_native
+  instruct_model: codex-native-short-loop
+  thinking_model: codex-native-full
+  role_map:
+    planning: codex-native-full
+    literature: codex-native-full
+    analysis: codex-native-full
+  providers:
+    codex_native:
+      base_url: https://chatgpt.com/backend-api
+      chat_path: /codex/responses
+      auth_env: CODEX_NATIVE_BEARER_TOKEN
+      default_model: gpt-5.3-codex
+""".strip()
+    )
+    monkeypatch.setenv("AI_SCIENTIST_MODEL_CONFIG_PATH", str(model_canary))
+    config = load_model_config(model_default)
+    assert config.default_provider == "openrouter"
+
+    config_from_env = load_model_config()
+    assert config_from_env.default_provider == "codex_native"
+    assert config_from_env.instruct_model == "codex-native-short-loop"
+    assert config_from_env.thinking_model == "codex-native-full"
+    assert config_from_env.role_map["planning"] == "codex-native-full"
+
+    # Empty path should behave like omitted path and still honor env override.
+    config_from_empty = load_model_config("")
+    assert config_from_empty.default_provider == "codex_native"

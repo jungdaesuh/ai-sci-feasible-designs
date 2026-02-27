@@ -44,13 +44,12 @@ This snippet assumes you are working inside `/Users/suhjungdae/code/software/pro
   ```
 - **Codex-native (requires a local OpenAI-compatible adapter endpoint):**
   ```bash
-  export MODEL_PROVIDER=codex_native
-  export AI_SCIENTIST_INSTRUCT_MODEL=codex-native-short-loop
-  export AI_SCIENTIST_THINKING_MODEL=codex-native-full
-  export AI_SCIENTIST_ROLE_PLANNING_MODEL=codex-native-full
-  export AI_SCIENTIST_ROLE_LITERATURE_MODEL=codex-native-full
-  export AI_SCIENTIST_ROLE_ANALYSIS_MODEL=codex-native-full
   export CODEX_NATIVE_BEARER_TOKEN="..."
+  scripts/run_codex_native_canary.sh
+  ```
+  If you need remote provider calls instead of the local mock endpoint:
+  ```bash
+  AI_SCIENTIST_REMOTE_PROVIDER=1 CODEX_NATIVE_BEARER_TOKEN="..." scripts/run_codex_native_canary.sh
   ```
 
 ### ChatGPT subscription integration status

@@ -27,6 +27,10 @@ Add an OpenClaw-like integration pattern in this repo, but without OpenClaw:
 ### Progress update (2026-02-25)
 
 - Provider/alias swappability milestone is complete and validated by unit tests.
+- Canary-default rollout milestone (`M4.4`) is complete:
+  1) `configs/model.codex_native_canary.yaml`
+  2) `AI_SCIENTIST_MODEL_CONFIG_PATH` override in `load_model_config()`
+  3) `scripts/run_codex_native_canary.sh`
 - Cutover to fully native codex subscription remains blocked on two implementation items:
   1) local OpenAI-compatible adapter server
   2) OAuth + credential/profile management primitives
@@ -89,5 +93,6 @@ Note: `codex_native` calls send standard OpenAI chat payloads and use `X-AI-Scie
 1. Add auth/profile primitives behind feature flag (`MODEL_PROVIDER=codex_native`).
 2. Add non-streaming `/v1/chat/completions` adapter and smoke test.
 3. Add streaming support and profile fallback/cooldown.
-4. Cut over planner roles to `codex_native` provider.
-5. Remove obsolete OpenClaw-specific docs/config from this repo branch.
+4. Run fixed-budget provider evidence gates (`M4.6`) on codex-native canary runs.
+5. Cut over expansion path (`M4.5`) only after M4.6 non-regression evidence.
+6. Remove obsolete OpenClaw-specific docs/config from this repo branch.

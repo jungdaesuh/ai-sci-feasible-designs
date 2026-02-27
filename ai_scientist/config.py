@@ -12,6 +12,7 @@ import yaml
 
 DEFAULT_EXPERIMENT_CONFIG_PATH = Path("configs/experiment.example.yaml")
 DEFAULT_MODEL_CONFIG_PATH = Path("configs/model.yaml")
+MODEL_CONFIG_PATH_ENV = "AI_SCIENTIST_MODEL_CONFIG_PATH"
 DEFAULT_MEMORY_DB_PATH = Path("reports/ai_scientist.sqlite")
 
 
@@ -71,8 +72,20 @@ def _env_override(key: str, default: str) -> str:
     return value
 
 
+def _resolve_model_config_path(path: str | Path | None) -> Path:
+    if isinstance(path, str) and path == "":
+        path = None
+    if path is not None:
+        return Path(path)
+
+    env_path = os.getenv(MODEL_CONFIG_PATH_ENV)
+    if env_path:
+        return Path(env_path)
+    return DEFAULT_MODEL_CONFIG_PATH
+
+
 def load_model_config(path: str | Path | None = None) -> ModelConfig:
-    payload = load(path or DEFAULT_MODEL_CONFIG_PATH)
+    payload = load(_resolve_model_config_path(path))
     model_data = payload.get("model", {})
     agent_gates_payload = model_data.get("agent_gates") or {}
     agent_gates = tuple(
