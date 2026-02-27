@@ -80,6 +80,18 @@ def test_stellarator_diffusion_shapes():
     assert out.shape == x.shape  # (B, input_dim)
 
 
+def test_diffusion_model_accepts_legacy_diffusion_timesteps_alias():
+    model = generative.DiffusionDesignModel(
+        min_samples=2,
+        epochs=1,
+        batch_size=2,
+        diffusion_timesteps=17,
+        pca_components=4,
+        device="cpu",
+    )
+    assert model._timesteps == 17
+
+
 def test_diffusion_fine_tune_on_elites():
     """Test fine_tune_on_elites preserves PCA and normalization."""
     from ai_scientist import test_helpers
@@ -116,6 +128,8 @@ def test_diffusion_fine_tune_on_elites():
     assert model._trained
 
     # Store original PCA and normalization
+    assert model.m_mean is not None
+    assert model.m_std is not None
     original_pca = model.pca
     original_m_mean = model.m_mean.clone()
     original_m_std = model.m_std.clone()
@@ -142,6 +156,8 @@ def test_diffusion_fine_tune_on_elites():
 
     # 5. Verify PCA and normalization are preserved (same object/values)
     assert model.pca is original_pca  # Same PCA object
+    assert model.m_mean is not None
+    assert model.m_std is not None
     assert torch.allclose(model.m_mean, original_m_mean)  # Same normalization
     assert torch.allclose(model.m_std, original_m_std)
 

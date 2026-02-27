@@ -459,8 +459,8 @@ class SurrogateBundle(BaseSurrogate):
                 else:
                     prob = np.zeros(scaled.shape[0])  # All "infeasible"
             else:
-                proba = self._classifier.predict_proba(scaled)
-                prob = proba[:, 1]
+                proba = np.asarray(self._classifier.predict_proba(scaled), dtype=float)
+                prob = np.asarray(np.take(proba, indices=1, axis=1), dtype=float)
 
             preds = {}
             for name, reg in self._regressors.items():

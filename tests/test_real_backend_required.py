@@ -67,6 +67,7 @@ def test_constellaration_imports_from_site_packages_when_requested() -> None:
     import constellaration.forward_model as fm
 
     repo_root = Path(__file__).resolve().parents[1]
+    assert fm.__file__ is not None
     fm_path = Path(fm.__file__).resolve()
     prefix_path = Path(sys.prefix).resolve()
 

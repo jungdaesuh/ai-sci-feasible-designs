@@ -37,9 +37,9 @@ def test_batch_fourier_to_real_space():
         )
 
         # Compare
-        assert torch.allclose(R_batch[i], R_single, atol=1e-5)
-        assert torch.allclose(Z_batch[i], Z_single, atol=1e-5)
-        assert torch.allclose(Phi_batch[i], Phi_single, atol=1e-5)
+        assert torch.allclose(R_batch[i], torch.as_tensor(R_single), atol=1e-5)
+        assert torch.allclose(Z_batch[i], torch.as_tensor(Z_single), atol=1e-5)
+        assert torch.allclose(Phi_batch[i], torch.as_tensor(Phi_single), atol=1e-5)
 
 
 def test_batch_gradients():

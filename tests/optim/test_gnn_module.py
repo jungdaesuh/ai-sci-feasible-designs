@@ -20,7 +20,9 @@ def test_toroidal_grid_edges():
     # (0,1) -> 1
     # (0,3) -> 3 (wrap)
 
-    neighbors = graph.edge_index[1, graph.edge_index[0] == 0].tolist()
+    edge_index = graph.edge_index
+    assert isinstance(edge_index, torch.Tensor)
+    neighbors = edge_index[1, edge_index[0] == 0].tolist()
     neighbors.sort()
     assert neighbors == [1, 3, 4, 12]
 

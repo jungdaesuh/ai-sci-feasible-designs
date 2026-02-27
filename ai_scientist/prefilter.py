@@ -38,7 +38,8 @@ class FeasibilityPrefilter:
             return np.ones(len(X), dtype=bool)  # Pass all if not trained
 
         try:
-            probs = self.model.predict_proba(X)[:, 1]
+            proba = np.asarray(self.model.predict_proba(X), dtype=float)
+            probs = np.asarray(np.take(proba, indices=1, axis=1), dtype=float)
             return probs >= threshold
         except Exception as e:
             print(f"[Prefilter] Prediction failed: {e}. Passing all.")

@@ -210,7 +210,8 @@ class OfflineSeedSampler:
 
         for seed in seeds:
             # Pick a random seed from the loaded list
-            base_params = rng.choice(self._seeds)
+            base_index = int(rng.integers(0, len(self._seeds)))
+            base_params = self._seeds[base_index]
 
             # Perturb it slightly to avoid duplicates and explore vicinity
             perturbed_params = tools.propose_boundary(

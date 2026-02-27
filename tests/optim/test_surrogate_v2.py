@@ -39,6 +39,27 @@ def _training_history(rows: int) -> tuple[list[dict], list[float]]:
     return metrics_list, targets
 
 
+def _fit_small_surrogate() -> NeuralOperatorSurrogate:
+    surrogate = NeuralOperatorSurrogate(
+        min_samples=4,
+        epochs=1,
+        batch_size=2,
+        learning_rate=0.01,
+        n_ensembles=1,
+        device="cpu",
+    )
+    metrics, targets = _training_history(8)
+    surrogate.fit(metrics, targets, minimize_objective=False, cycle=1)
+    return surrogate
+
+
+def _rank_single_candidate(surrogate: NeuralOperatorSurrogate):
+    return surrogate.rank_candidates(
+        [{"params": _make_params(0.5)}],
+        minimize_objective=False,
+    )
+
+
 def test_neural_surrogate_init():
     surrogate = NeuralOperatorSurrogate(min_samples=2, epochs=1)
     assert not surrogate._trained
@@ -123,16 +144,7 @@ def test_load_checkpoint_full_object_restores_normalization_stats(tmp_path):
     load_checkpoint() should restore the normalization tensors (_y_* stats) so that
     predict_torch() returns values in the original physical units (not z-scored space).
     """
-    surrogate = NeuralOperatorSurrogate(
-        min_samples=4,
-        epochs=1,
-        batch_size=2,
-        learning_rate=0.01,
-        n_ensembles=1,
-        device="cpu",
-    )
-    metrics, targets = _training_history(8)
-    surrogate.fit(metrics, targets, minimize_objective=False, cycle=1)
+    surrogate = _fit_small_surrogate()
 
     checkpoint_path = tmp_path / "surrogate_full_object.pt"
     torch.save(surrogate, checkpoint_path)
@@ -170,6 +182,72 @@ def test_load_checkpoint_full_object_restores_normalization_stats(tmp_path):
     assert loaded._trained
     assert len(loaded._models) == len(surrogate._models)
     assert all(not model.training for model in loaded._models)
+
+
+def test_rank_candidates_handles_legacy_model_missing_checkpoint_flag():
+    """Legacy pickled models without _use_checkpointing must still rank."""
+    surrogate = _fit_small_surrogate()
+
+    # Simulate legacy model loaded from old pickle artifact.
+    delattr(surrogate._models[0], "_use_checkpointing")
+
+    ranked = _rank_single_candidate(surrogate)
+    assert len(ranked) == 1
+    assert ranked[0].predicted_objective is not None
+
+
+def test_rank_candidates_handles_legacy_model_missing_cached_grid_buffer():
+    """Legacy pickled models missing cached Fourier grids must still rank."""
+    surrogate = _fit_small_surrogate()
+
+    model = surrogate._models[0]
+    model._buffers.pop("_cached_zeta", None)
+
+    ranked = _rank_single_candidate(surrogate)
+    assert len(ranked) == 1
+    assert ranked[0].predicted_objective is not None
+    assert "_cached_zeta" in model._buffers
+
+
+def test_rank_candidates_handles_legacy_model_without_fidelity_embedding():
+    """Legacy checkpoints without fidelity embedding must still rank."""
+    surrogate = _fit_small_surrogate()
+
+    model = surrogate._models[0]
+    base_input_dim = model.head_base[0].in_features - model.fidelity_embedding_dim
+    hidden_dim = model.head_base[0].out_features
+
+    # Simulate legacy architecture that predates fidelity conditioning.
+    delattr(model, "fidelity_embedding")
+    delattr(model, "fidelity_embedding_dim")
+    model.head_base = torch.nn.Sequential(
+        torch.nn.Linear(base_input_dim, hidden_dim),
+        torch.nn.SiLU(),
+        torch.nn.Dropout(p=0.1),
+        torch.nn.Linear(hidden_dim, hidden_dim),
+        torch.nn.SiLU(),
+        torch.nn.Dropout(p=0.1),
+    )
+
+    ranked = _rank_single_candidate(surrogate)
+    assert len(ranked) == 1
+    assert ranked[0].predicted_objective is not None
+
+
+def test_rank_candidates_handles_legacy_model_missing_auxiliary_heads():
+    """Legacy checkpoints missing iota/mirror/flux heads must still rank."""
+    surrogate = _fit_small_surrogate()
+
+    model = surrogate._models[0]
+    delattr(model, "head_iota")
+    delattr(model, "head_mirror_ratio")
+    delattr(model, "head_flux_compression")
+
+    ranked = _rank_single_candidate(surrogate)
+    assert len(ranked) == 1
+    assert ranked[0].predicted_objective is not None
+    assert ranked[0].predicted_mhd is not None
+    assert ranked[0].predicted_qi is not None
 
 
 class TestMultiConstraintFeasibility:
@@ -324,11 +402,13 @@ class TestElongationIsoperimetricUsed:
         r_cos_t = torch.tensor(r_cos).unsqueeze(0).float()
         z_sin_t = torch.tensor(z_sin).unsqueeze(0).float()
         expected_elo = geometry.elongation_isoperimetric(r_cos_t, z_sin_t, 3)
+        predicted_elongation = ranked[0].predicted_elongation
+        assert predicted_elongation is not None
 
         # The predicted elongation should match the isoperimetric calculation
         assert np.isclose(
-            ranked[0].predicted_elongation, expected_elo.item(), rtol=0.01
-        ), f"Expected {expected_elo.item()}, got {ranked[0].predicted_elongation}"
+            predicted_elongation, expected_elo.item(), rtol=0.01
+        ), f"Expected {expected_elo.item()}, got {predicted_elongation}"
 
 
 if __name__ == "__main__":
