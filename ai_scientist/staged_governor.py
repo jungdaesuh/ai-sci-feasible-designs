@@ -103,18 +103,19 @@ def expand_parent_group_staged_offspring(
 
 def apply_delta_recipe(
     params: Mapping[str, Any],
-    delta_recipe: Sequence[Mapping[str, Any]],
+    delta_recipe: Any,
 ) -> dict[str, Any] | None:
     """Apply sparse additive coefficient deltas onto boundary params."""
     updated = copy.deepcopy(dict(params))
-    if not delta_recipe:
+    normalized_recipe = _normalize_delta_recipe(delta_recipe)
+    if not normalized_recipe:
         return updated
 
     arrays = _matrix_fields(updated)
     if not arrays:
         return None
 
-    for delta_entry in delta_recipe:
+    for delta_entry in normalized_recipe:
         key_raw = delta_entry.get("key")
         delta_raw = delta_entry.get("delta")
         if not isinstance(key_raw, str):
@@ -143,6 +144,72 @@ def apply_delta_recipe(
     return updated
 
 
+def _normalize_delta_recipe(recipe: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    if isinstance(recipe, list):
+        for entry in recipe:
+            if not isinstance(entry, Mapping):
+                continue
+            key_raw = entry.get("key")
+            delta_raw = entry.get("delta")
+            if not isinstance(key_raw, str):
+                continue
+            if isinstance(delta_raw, bool) or not isinstance(delta_raw, (int, float)):
+                continue
+            delta = float(delta_raw)
+            if not math.isfinite(delta):
+                continue
+            normalized.append({"key": key_raw, "delta": delta})
+        return normalized
+
+    if not isinstance(recipe, Mapping):
+        return normalized
+
+    key_raw = recipe.get("key")
+    delta_raw = recipe.get("delta")
+    if isinstance(key_raw, str) and isinstance(delta_raw, (int, float)):
+        if not isinstance(delta_raw, bool):
+            delta = float(delta_raw)
+            if math.isfinite(delta):
+                normalized.append({"key": key_raw, "delta": delta})
+        return normalized
+
+    changes_raw = recipe.get("changes")
+    if not isinstance(changes_raw, list):
+        return normalized
+    for change in changes_raw:
+        if not isinstance(change, Mapping):
+            continue
+        field_raw = change.get("field")
+        row_raw = change.get("row")
+        col_raw = change.get("col")
+        delta_raw = change.get("delta")
+        if not isinstance(field_raw, str):
+            continue
+        if isinstance(row_raw, bool) or not isinstance(row_raw, (int, float)):
+            continue
+        if isinstance(col_raw, bool) or not isinstance(col_raw, (int, float)):
+            continue
+        row_float = float(row_raw)
+        col_float = float(col_raw)
+        if not row_float.is_integer() or not col_float.is_integer():
+            continue
+        if isinstance(delta_raw, bool) or not isinstance(delta_raw, (int, float)):
+            continue
+        delta = float(delta_raw)
+        if not math.isfinite(delta):
+            continue
+        row = int(row_float)
+        col = int(col_float)
+        normalized.append(
+            {
+                "key": f"{field_raw}.{row}.{col}",
+                "delta": delta,
+            }
+        )
+    return normalized
+
+
 def build_delta_replay_seeds(
     *,
     focus_params: Mapping[str, Any],
@@ -157,8 +224,8 @@ def build_delta_replay_seeds(
 
     seeds: list[dict[str, Any]] = []
     for case in case_deltas:
-        recipe = case.get("delta_recipe")
-        if not isinstance(recipe, list) or not recipe:
+        recipe = _normalize_delta_recipe(case.get("delta_recipe"))
+        if not recipe:
             continue
         replayed = apply_delta_recipe(focus_params, recipe)
         if replayed is None:

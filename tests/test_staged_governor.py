@@ -149,3 +149,32 @@ def test_build_delta_replay_seeds_uses_top_k_recipes():
     staged = seeds[0]["staged_governor"]
     assert staged["phase"] == "delta_replay"
     assert seeds[0]["improvement_reason"] == "nearest_case_delta_replay"
+
+
+def test_build_delta_replay_seeds_accepts_sparse_changes_mapping_recipe():
+    focus = _boundary(1.0)
+    nearest = [
+        {
+            "design_hash": "case-a",
+            "delta_recipe": {
+                "type": "sparse_additive_delta",
+                "changes": [
+                    {"field": "r_cos", "row": 1, "col": 0, "delta": 0.02},
+                    {"field": "z_sin", "row": 1, "col": 2, "delta": -0.01},
+                ],
+            },
+        }
+    ]
+
+    seeds = build_delta_replay_seeds(
+        focus_params=focus,
+        case_deltas=nearest,
+        top_k=1,
+        focus_hash="focus",
+        worst_constraint="mirror",
+    )
+
+    assert len(seeds) == 1
+    params = seeds[0]["params"]
+    assert params["r_cos"][1][0] == pytest.approx(0.12)
+    assert params["z_sin"][1][2] == pytest.approx(0.04)
