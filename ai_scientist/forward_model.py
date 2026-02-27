@@ -942,14 +942,8 @@ def forward_model_batch(
             results[idx] = future.result()
         except Exception as exc:
             logger.error(f"Batch evaluation failed for index {idx}: {exc}")
-            # Return a penalized result instead of raising
-            # We need to construct a "failed" EvaluationResult
-            # We'll use a helper or manual construction
-            # Since we don't have the boundary here easily (it's in boundaries[idx]),
-            # we can use a placeholder hash or recompute it if needed.
-            # But EvaluationResult requires metrics.
-
-            # Create dummy metrics with penalized values
+            # Return a penalized result instead of raising.
+            # Keep the original candidate hash so failure rows remain traceable and dedup-safe.
             from ai_scientist.backends.mock import MockMetrics
 
             dummy_metrics = MockMetrics(
@@ -974,7 +968,7 @@ def forward_model_batch(
                 feasibility=float("inf"),
                 is_feasible=False,
                 cache_hit=False,
-                design_hash="error",  # Placeholder
+                design_hash=compute_design_hash(boundaries[idx]),
                 evaluation_time_sec=0.0,
                 settings=settings,
                 fidelity=settings.fidelity,

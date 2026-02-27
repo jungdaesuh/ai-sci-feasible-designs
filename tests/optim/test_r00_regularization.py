@@ -79,6 +79,7 @@ def test_r00_regularization_gradient_direction():
     loss.backward()
 
     # When r00 > target, gradient should be positive (to push r00 down)
+    assert r00.grad is not None
     assert r00.grad > 0, "Gradient should be positive when r00 > target"
 
     # Reset and test other direction
@@ -87,6 +88,7 @@ def test_r00_regularization_gradient_direction():
     loss.backward()
 
     # When r00 < target, gradient should be negative (to push r00 up)
+    assert r00.grad is not None
     assert r00.grad < 0, "Gradient should be negative when r00 < target"
 
 

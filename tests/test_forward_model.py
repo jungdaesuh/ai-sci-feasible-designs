@@ -83,6 +83,36 @@ def test_batch_evaluation(mock_backend):
     assert mock_backend.call_count >= 1
 
 
+def test_batch_failure_preserves_candidate_design_hash(monkeypatch):
+    from ai_scientist import forward_model as fm
+
+    settings = ForwardModelSettings(problem="p1")
+    boundary = {
+        "r_cos": [[1.0, 0.0, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0]],
+        "n_field_periods": 3,
+        "is_stellarator_symmetric": True,
+    }
+    expected_hash = compute_design_hash(boundary)
+
+    def _raise_forward_model(*_args, **_kwargs):
+        raise RuntimeError("forced-batch-failure")
+
+    monkeypatch.setattr(fm, "forward_model", _raise_forward_model)
+
+    results = forward_model_batch(
+        [boundary],
+        settings,
+        n_workers=1,
+        pool_type="thread",
+        use_cache=False,
+    )
+
+    assert len(results) == 1
+    assert results[0].design_hash == expected_hash
+    assert results[0].error_message == "forced-batch-failure"
+
+
 def test_problem_p2_metrics(mock_backend):
     settings = ForwardModelSettings(problem="p2")
     result = run_forward_model(MOCK_BOUNDARY_PARAMS, settings)

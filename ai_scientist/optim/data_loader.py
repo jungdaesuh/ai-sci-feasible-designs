@@ -101,13 +101,27 @@ def _filter_geometric_validity(df: pd.DataFrame) -> pd.DataFrame:
     # 2. Filter extreme/unphysical values
     # Aspect Ratio < 1 is physically impossible for a torus (R/a)
     if "aspect_ratio" in df.columns:
-        df = df[df["aspect_ratio"] >= 1.0]
-        df = df[df["aspect_ratio"] < 100.0]  # Upper bound to remove outliers
+        aspect_ratio = np.asarray(
+            pd.to_numeric(df["aspect_ratio"], errors="coerce"),
+            dtype=float,
+        )
+        in_bounds = np.asarray(
+            (aspect_ratio >= 1.0) & (aspect_ratio < 100.0),
+            dtype=bool,
+        )
+        df = df.loc[in_bounds]  # Upper bound to remove outliers
 
     # Elongation >= 1
     if "max_elongation" in df.columns:
-        df = df[df["max_elongation"] >= 1.0]
-        df = df[df["max_elongation"] < 50.0]
+        elongation = np.asarray(
+            pd.to_numeric(df["max_elongation"], errors="coerce"),
+            dtype=float,
+        )
+        in_bounds = np.asarray(
+            (elongation >= 1.0) & (elongation < 50.0),
+            dtype=bool,
+        )
+        df = df.loc[in_bounds]
 
     logger.info(f"Filtered {initial_len - len(df)} rows based on geometric bounds.")
     return df

@@ -2,8 +2,24 @@ import hypothesis
 from hypothesis import strategies as st
 import numpy as np
 import torch
-from unittest.mock import MagicMock
 from ai_scientist.optim.surrogate_v2 import NeuralOperatorSurrogate
+
+
+class _MockEnsembleModel(torch.nn.Module):
+    def __init__(self, predictions: list[float]):
+        super().__init__()
+        self._predictions = torch.tensor(predictions, dtype=torch.float32)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        zeros = torch.zeros_like(self._predictions)
+        return (
+            self._predictions,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+        )
 
 
 @hypothesis.given(
@@ -22,20 +38,7 @@ def test_ensemble_uncertainty_positive(predictions):
     """
     # Create surrogate and mock ensemble models to return specific predictions
     surrogate = NeuralOperatorSurrogate()
-    surrogate._models = [MagicMock() for _ in range(len(predictions))]
-
-    # Setup mocks: each model returns (obj, mhd, qi, iota) tensors
-    for i, model in enumerate(surrogate._models):
-        preds_tensor = torch.tensor(predictions[i], dtype=torch.float32)
-        # H6 FIX: Model now returns 6 outputs (obj, mhd, qi, iota, mirror, flux)
-        model.return_value = (
-            preds_tensor,
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-        )
+    surrogate._models = [_MockEnsembleModel(item) for item in predictions]
 
     # Call the actual predict_torch method to aggregate ensemble predictions
     x = torch.zeros((len(predictions[0]), 10))  # Batch size = len(predictions[0])
@@ -69,20 +72,7 @@ def test_ensemble_variance_decreases_with_agreement(predictions):
     """
     # Create surrogate and mock ensemble models
     surrogate = NeuralOperatorSurrogate()
-    surrogate._models = [MagicMock() for _ in range(len(predictions))]
-
-    # Setup mocks: each model returns 6 outputs (obj, mhd, qi, iota, mirror, flux)
-    for i, model in enumerate(surrogate._models):
-        preds_tensor = torch.tensor(predictions[i], dtype=torch.float32)
-        # H6 FIX: Model now returns 6 outputs (obj, mhd, qi, iota, mirror, flux)
-        model.return_value = (
-            preds_tensor,
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-            torch.zeros_like(preds_tensor),
-        )
+    surrogate._models = [_MockEnsembleModel(item) for item in predictions]
 
     # Call the actual predict_torch method to aggregate ensemble predictions
     x = torch.zeros((len(predictions[0]), 10))

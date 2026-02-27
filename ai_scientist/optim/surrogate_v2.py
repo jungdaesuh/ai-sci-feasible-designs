@@ -46,6 +46,15 @@ class StellaratorNeuralOp(nn.Module):
        We apply Random Rotation Augmentation during training to enforce SE(3) invariance.
     """
 
+    _REQUIRED_GRID_BUFFERS: tuple[str, ...] = (
+        "_cached_theta",
+        "_cached_zeta",
+        "_cached_m_idx",
+        "_cached_n_vals",
+        "_cached_cos_m_theta",
+        "_cached_sin_m_theta",
+    )
+
     def __init__(self, mpol: int, ntor: int, hidden_dim: int = 64):
         super().__init__()
         self.mpol = mpol
@@ -157,13 +166,52 @@ class StellaratorNeuralOp(nn.Module):
         cos_m_theta = torch.cos(m_theta)  # (M, T)
         sin_m_theta = torch.sin(m_theta)  # (M, T)
 
-        # Register as buffers (non-trainable, move with model)
-        self.register_buffer("_cached_theta", theta)
-        self.register_buffer("_cached_zeta", zeta)
-        self.register_buffer("_cached_m_idx", m_idx)
-        self.register_buffer("_cached_n_vals", n_vals)
-        self.register_buffer("_cached_cos_m_theta", cos_m_theta)
-        self.register_buffer("_cached_sin_m_theta", sin_m_theta)
+        # Register as buffers (non-trainable, move with model).
+        # Legacy pickled checkpoints can be missing some of these buffers, so this
+        # path must also support in-place refresh for existing names.
+        self._set_or_refresh_buffer("_cached_theta", theta)
+        self._set_or_refresh_buffer("_cached_zeta", zeta)
+        self._set_or_refresh_buffer("_cached_m_idx", m_idx)
+        self._set_or_refresh_buffer("_cached_n_vals", n_vals)
+        self._set_or_refresh_buffer("_cached_cos_m_theta", cos_m_theta)
+        self._set_or_refresh_buffer("_cached_sin_m_theta", sin_m_theta)
+
+    def _set_or_refresh_buffer(self, name: str, value: torch.Tensor) -> None:
+        """Register a buffer once, then refresh it safely for legacy compatibility."""
+        if name in self._buffers:
+            self._buffers[name] = value
+            return
+        self.register_buffer(name, value)
+
+    def _ensure_runtime_compatibility(self) -> None:
+        """Repair legacy non-state runtime members missing in older pickles."""
+        if not hasattr(self, "_use_checkpointing"):
+            self._use_checkpointing = True
+
+        if any(name not in self._buffers for name in self._REQUIRED_GRID_BUFFERS):
+            self._init_cached_grids()
+
+    def _head_input_features(self) -> int | None:
+        """Return the expected input width for head_base when introspectable."""
+        if not isinstance(self.head_base, nn.Sequential) or len(self.head_base) == 0:
+            return None
+        first_layer = self.head_base[0]
+        if isinstance(first_layer, nn.Linear):
+            return int(first_layer.in_features)
+        return None
+
+    def _predict_optional_head(
+        self,
+        *,
+        head_name: str,
+        base: torch.Tensor,
+        default_value: float,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        if hasattr(self, head_name):
+            head = getattr(self, head_name)
+            return head(base).squeeze(-1)
+        return torch.full_like(reference, default_value)
 
     def _generate_point_cloud(
         self,
@@ -250,6 +298,7 @@ class StellaratorNeuralOp(nn.Module):
                       Values: 0=screen (low-fidelity), 1=promote (high-fidelity).
                       If None, defaults to high-fidelity (1).
         """
+        self._ensure_runtime_compatibility()
         batch_size = x.shape[0]
 
         # Extract NFP (last column)
@@ -276,9 +325,13 @@ class StellaratorNeuralOp(nn.Module):
         z_sin_in = z_sin_grid.squeeze(1)
 
         # Generate Point Cloud using cached grids (Issue #6 fix)
-        # This avoids regenerating theta/zeta grids every forward pass
+        # This avoids regenerating theta/zeta grids every forward pass.
+        # Legacy checkpoint compatibility: older pickled models may not carry
+        # this non-state_dict attribute, so default to enabled behavior.
+        use_checkpointing = getattr(self, "_use_checkpointing", True)
+
         # Gradient checkpointing (Issue #9): recompute activations during backward
-        if self._use_checkpointing and self.training:
+        if use_checkpointing and self.training:
             # Checkpoint point cloud generation (memory-intensive)
             points = torch_checkpoint(
                 self._generate_point_cloud,
@@ -298,30 +351,59 @@ class StellaratorNeuralOp(nn.Module):
             points = torch.bmm(rot_mat, points)
 
         # Checkpoint PointNet encoder (Issue #9)
-        if self._use_checkpointing and self.training:
+        if use_checkpointing and self.training:
             geo_vec = torch_checkpoint(self.geo_encoder, points, use_reentrant=False)
         else:
             geo_vec = self.geo_encoder(points)  # (B, geo_dim)
 
-        # --- Fusion with Fidelity Conditioning (Issue #10) ---
-        # Get fidelity embeddings
-        if fidelity is not None:
-            fid_embed = self.fidelity_embedding(fidelity)  # (B, 8)
-        else:
-            # Default to high-fidelity (1)
-            fid_embed = self.fidelity_embedding(
-                torch.ones(batch_size, dtype=torch.long, device=x.device)
-            )
-        combined = torch.cat([spectral_vec, geo_vec, fid_embed], dim=1)
+        # --- Fusion with optional fidelity conditioning ---
+        # Legacy checkpoints may predate fidelity embeddings entirely. In that case,
+        # we route through the base spectral+geometric features only.
+        base_features = torch.cat([spectral_vec, geo_vec], dim=1)
+        combined = base_features
+        expected_head_input = self._head_input_features()
+
+        if hasattr(self, "fidelity_embedding"):
+            if fidelity is not None:
+                fid_embed = self.fidelity_embedding(fidelity)
+            else:
+                fid_embed = self.fidelity_embedding(
+                    torch.ones(batch_size, dtype=torch.long, device=x.device)
+                )
+            with_fidelity = torch.cat([base_features, fid_embed], dim=1)
+            if (
+                expected_head_input is None
+                or with_fidelity.shape[1] == expected_head_input
+            ):
+                combined = with_fidelity
+            elif base_features.shape[1] == expected_head_input:
+                combined = base_features
 
         base = self.head_base(combined)
 
         pred_obj = self.head_objective(base).squeeze(-1)
         pred_mhd = self.head_mhd(base).squeeze(-1)
         pred_qi = self.head_qi(base).squeeze(-1)
-        pred_iota = self.head_iota(base).squeeze(-1)
-        pred_mirror_ratio = self.head_mirror_ratio(base).squeeze(-1)
-        pred_flux_compression = self.head_flux_compression(base).squeeze(-1)
+
+        # Legacy checkpoints may miss newer auxiliary heads.
+        pred_iota = self._predict_optional_head(
+            head_name="head_iota",
+            base=base,
+            default_value=0.3,
+            reference=pred_obj,
+        )
+        pred_mirror_ratio = self._predict_optional_head(
+            head_name="head_mirror_ratio",
+            base=base,
+            default_value=0.15,
+            reference=pred_obj,
+        )
+        pred_flux_compression = self._predict_optional_head(
+            head_name="head_flux_compression",
+            base=base,
+            default_value=0.5,
+            reference=pred_obj,
+        )
 
         return (
             pred_obj,
@@ -436,6 +518,7 @@ class NeuralOperatorSurrogate(BaseSurrogate):
 
             # Ensure models are on the correct device and in eval mode (inference default).
             for model in self._models:
+                model._ensure_runtime_compatibility()
                 model.to(self._device)
                 model.eval()
             return

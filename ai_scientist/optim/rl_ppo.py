@@ -18,8 +18,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def layer_init(
-    layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0
-) -> nn.Module:
+    layer: nn.Linear,
+    std: float = np.sqrt(2),
+    bias_const: float = 0.0,
+) -> nn.Linear:
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer

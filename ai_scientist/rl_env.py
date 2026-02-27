@@ -209,7 +209,7 @@ class StellaratorEnv(gym.Env):
                 z_sin = torch.tensor(
                     vec[half_size : 2 * half_size], dtype=torch.float32
                 ).view(1, grid_h, grid_w)
-                nfp_val = float(
+                nfp_val = int(
                     self.params.get("n_field_periods") or self.params.get("nfp", 1)
                 )
 
@@ -248,7 +248,7 @@ class StellaratorEnv(gym.Env):
                 z_sin = torch.tensor(
                     vec[half_size : 2 * half_size], dtype=torch.float32
                 ).view(1, grid_h, grid_w)
-                nfp = float(
+                nfp = int(
                     self.params.get("n_field_periods") or self.params.get("nfp", 1)
                 )
 
@@ -288,7 +288,7 @@ class StellaratorEnv(gym.Env):
             z_sin = torch.tensor(
                 vec[half_size : 2 * half_size], dtype=torch.float32
             ).view(1, grid_h, grid_w)
-            nfp = float(self.params.get("n_field_periods") or self.params.get("nfp", 1))
+            nfp = int(self.params.get("n_field_periods") or self.params.get("nfp", 1))
 
             computed_ar = float(geometry.aspect_ratio(r_cos, z_sin, nfp).item())
         except Exception:

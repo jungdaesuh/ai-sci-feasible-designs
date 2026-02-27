@@ -20,7 +20,7 @@ def test_surrogate_uncertainty_execution():
 
     for i in range(10):
         # Let's construct a proper detailed dict
-        detailed_params = {"n_field_periods": 3}
+        detailed_params: dict[str, int | float] = {"n_field_periods": 3}
         for m in range(2):  # mpol=1
             for n in range(-1, 2):  # ntor=1
                 detailed_params[f"rc{m}{n}"] = np.random.randn()

@@ -391,6 +391,7 @@ class DiffusionDesignModel:
         batch_size: int = 4096,  # Default to paper spec
         device: str = "cpu",
         timesteps: int = 200,  # Paper: 200
+        diffusion_timesteps: int | None = None,
         # Architecture args
         hidden_dim: int = 2048,
         n_layers: int = 4,
@@ -412,7 +413,14 @@ class DiffusionDesignModel:
             _LOGGER.warning("MPS requested but not available. Falling back to CPU.")
             self._device = "cpu"
 
-        self._timesteps = timesteps
+        resolved_timesteps = (
+            int(diffusion_timesteps)
+            if diffusion_timesteps is not None
+            else int(timesteps)
+        )
+        if resolved_timesteps <= 0:
+            raise ValueError("timesteps must be a positive integer.")
+        self._timesteps = resolved_timesteps
 
         # Architecture params
         self._hidden_dim = hidden_dim
