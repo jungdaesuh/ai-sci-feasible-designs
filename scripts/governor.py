@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import math
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -40,7 +41,12 @@ from ai_scientist.llm_controller import (
 from ai_scientist.model_router_reward import compute_model_router_reward
 from ai_scientist.novelty_gate import NoveltyCandidate, apply_two_stage_novelty_gate
 from ai_scientist.p3_data_plane import DataPlaneSample, summarize_data_plane
-from ai_scientist.problem_profiles import ProblemProfile, get_problem_profile
+from ai_scientist.p3_enqueue import candidate_seed
+from ai_scientist.problem_profiles import (
+    FrontierRecipeConfig,
+    ProblemProfile,
+    get_problem_profile,
+)
 from ai_scientist.staged_governor import (
     build_staged_seed_plan_from_snapshots,
     worst_constraint_from_violations,
@@ -312,6 +318,136 @@ def _meta_batch_design_hashes(run_dir: Path) -> dict[int, set[str]]:
     return hashes
 
 
+def _meta_batch_seeds(run_dir: Path) -> dict[int, set[int]]:
+    seeds: dict[int, set[int]] = {}
+    candidates_dir = run_dir / "candidates"
+    for meta_path in candidates_dir.glob("*_meta.json"):
+        try:
+            payload = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        batch_raw = payload.get("batch_id")
+        seed_raw = payload.get("seed")
+        if (
+            isinstance(batch_raw, bool)
+            or not isinstance(batch_raw, int)
+            or isinstance(seed_raw, bool)
+            or not isinstance(seed_raw, int)
+        ):
+            continue
+        batch_id = int(batch_raw)
+        if batch_id not in seeds:
+            seeds[batch_id] = set()
+        seeds[batch_id].add(int(seed_raw))
+    return seeds
+
+
+def _cmd_flag_values(cmd: ProposalCommand, flag: str) -> list[str]:
+    values: list[str] = []
+    argv = cmd.argv
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token != flag:
+            i += 1
+            continue
+        if i + 1 < len(argv):
+            values.append(str(argv[i + 1]))
+            i += 2
+            continue
+        i += 1
+    return values
+
+
+def _blend_t_values_for_command(cmd: ProposalCommand) -> list[float]:
+    explicit_values = _cmd_flag_values(cmd, "--t")
+    if explicit_values:
+        return [float(value) for value in explicit_values]
+    t_min = _cmd_flag_value(cmd, "--t-min")
+    t_max = _cmd_flag_value(cmd, "--t-max")
+    t_step = _cmd_flag_value(cmd, "--t-step")
+    if t_min is None or t_max is None or t_step is None:
+        return []
+    t_min_f = float(t_min)
+    t_max_f = float(t_max)
+    t_step_f = float(t_step)
+    if t_step_f <= 0.0:
+        return []
+    out: list[float] = []
+    t = t_min_f
+    while t <= t_max_f + 1e-12:
+        out.append(float(t))
+        t += t_step_f
+    return out
+
+
+@dataclass(frozen=True)
+class _ReplayCandidateSpec:
+    cmd: ProposalCommand
+    seed: int
+    replay_seed_base: int
+    t_value: float | None
+
+
+def _candidate_replay_specs_for_command(
+    *,
+    cmd: ProposalCommand,
+    batch_id: int,
+) -> list[_ReplayCandidateSpec]:
+    seed_base = _command_seed_base(cmd)
+    expected = _expected_candidates_for_command(cmd)
+    if expected <= 0:
+        return []
+    if _command_family(cmd) != "blend":
+        return [
+            _ReplayCandidateSpec(
+                cmd=cmd,
+                seed=candidate_seed(seed_base=seed_base, batch_id=batch_id, index=0),
+                replay_seed_base=int(seed_base),
+                t_value=None,
+            )
+        ]
+    t_values = _blend_t_values_for_command(cmd)
+    if len(t_values) != expected:
+        return []
+    out: list[_ReplayCandidateSpec] = []
+    for idx, t_value in enumerate(t_values):
+        out.append(
+            _ReplayCandidateSpec(
+                cmd=cmd,
+                seed=candidate_seed(seed_base=seed_base, batch_id=batch_id, index=idx),
+                replay_seed_base=int(seed_base) + int(idx),
+                t_value=float(t_value),
+            )
+        )
+    return out
+
+
+def _build_replay_command_for_spec(spec: _ReplayCandidateSpec) -> ProposalCommand:
+    family = _command_family(spec.cmd)
+    consumed_flags = {"--seed-base"}
+    if family == "blend":
+        consumed_flags.update({"--t", "--t-min", "--t-max", "--t-step"})
+    rebuilt: list[str] = []
+    argv = spec.cmd.argv
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in consumed_flags:
+            i += 2
+            continue
+        rebuilt.append(token)
+        i += 1
+    rebuilt.extend(["--seed-base", str(int(spec.replay_seed_base))])
+    if family == "blend":
+        if spec.t_value is None:
+            raise ValueError("Blend replay candidate is missing a concrete t value.")
+        rebuilt.extend(["--t", f"{float(spec.t_value):.6f}"])
+    return ProposalCommand(argv=rebuilt)
+
+
 def _candidate_status_by_design_hash(
     conn: sqlite3.Connection,
     *,
@@ -356,6 +492,7 @@ def _startup_replay_commands(
         }
     batch_counts = _meta_batch_counts(run_dir)
     batch_hashes = _meta_batch_design_hashes(run_dir)
+    batch_seeds = _meta_batch_seeds(run_dir)
     status_by_hash: dict[str, str] = {}
     experiment_id_raw = manifest.get("experiment_id")
     if (
@@ -430,9 +567,33 @@ def _startup_replay_commands(
         if observed_progress >= expected_candidates:
             continue
         if observed_progress > 0:
-            # We only replay completely missing batches; partial batches require
-            # per-candidate recovery, not full command replay.
-            partial_skipped_batches.append(batch_id)
+            remaining = max(int(expected_candidates) - int(observed_progress), 0)
+            if remaining <= 0:
+                continue
+            specs: list[_ReplayCandidateSpec] = []
+            for cmd in cycle_cmds:
+                specs.extend(
+                    _candidate_replay_specs_for_command(cmd=cmd, batch_id=batch_id)
+                )
+            if not specs:
+                partial_skipped_batches.append(batch_id)
+                continue
+            existing_batch_seeds = batch_seeds.get(batch_id, set())
+            replay_specs: list[_ReplayCandidateSpec]
+            overlap = sum(1 for spec in specs if spec.seed in existing_batch_seeds)
+            if not existing_batch_seeds or overlap == 0:
+                replay_specs = specs[int(observed_progress) :]
+            else:
+                replay_specs = [
+                    spec for spec in specs if spec.seed not in existing_batch_seeds
+                ]
+            replay_specs = replay_specs[:remaining]
+            if not replay_specs:
+                partial_skipped_batches.append(batch_id)
+                continue
+            for spec in replay_specs:
+                replay_cmds.append(_build_replay_command_for_spec(spec))
+            partial_replay_batches.append(batch_id)
             continue
         replay_cmds.extend(cycle_cmds)
         replay_batches.append(batch_id)
@@ -535,10 +696,12 @@ def _resolve_llm_transport(
             "--llm-enabled requires --llm-codex-command "
             "(or --llm-decision-file with --llm-allow-decision-file)."
         )
-    if not command.lower().startswith("codex"):
-        raise ValueError(
-            "codex-only transport enforces command paths that start with 'codex'."
-        )
+    command_tokens = shlex.split(command)
+    if not command_tokens:
+        raise ValueError("--llm-codex-command must not be empty.")
+    command_head = Path(command_tokens[0]).name.lower()
+    if command_head != "codex":
+        raise ValueError("codex-only transport requires argv[0] to be 'codex'.")
     return None, command, "codex_command"
 
 
@@ -589,6 +752,24 @@ def _compute_hv(points: list[tuple[float, float]]) -> float:
     out = indicator(X)
     assert out is not None
     return float(out)
+
+
+def _hv_gap_perturbation_scale(
+    *,
+    hv_value: float,
+    record_hv: float,
+    frontier_recipe: FrontierRecipeConfig,
+) -> float:
+    if not math.isfinite(record_hv) or record_hv <= 0.0:
+        return float(frontier_recipe.base_perturbation_scale)
+    gap_frac = max(0.0, (float(record_hv) - float(hv_value)) / float(record_hv))
+    raw = float(frontier_recipe.base_perturbation_scale) * (
+        1.0 + float(frontier_recipe.hv_gap_sensitivity) * gap_frac
+    )
+    return max(
+        float(frontier_recipe.min_perturbation_scale),
+        min(raw, float(frontier_recipe.max_perturbation_scale)),
+    )
 
 
 def _load_boundary(path: Path) -> dict:
@@ -865,6 +1046,46 @@ def _potential_area(lgradb: float, aspect: float) -> float:
     return _objective_area_gain(float(lgradb)) * max(0.0, 20.0 - float(aspect))
 
 
+def _objective_for_profile(
+    row: CandidateRow, *, profile: ProblemProfile
+) -> float | None:
+    metric_name = str(profile.frontier_recipe.objective_metric).strip().lower()
+    if metric_name in {"lgradb", "objective"} and row.lgradb is not None:
+        return float(row.lgradb)
+
+    metric_value = row.metrics.get(profile.frontier_recipe.objective_metric)
+    if metric_value is None and metric_name == "lgradb":
+        metric_value = row.metrics.get("lgradB")
+    if metric_value is not None:
+        try:
+            raw_value = float(metric_value)
+        except (TypeError, ValueError):
+            raw_value = None
+        if raw_value is not None:
+            if profile.frontier_recipe.objective_direction == "minimize":
+                return -raw_value
+            return raw_value
+
+    if row.lgradb is not None:
+        return float(row.lgradb)
+    return None
+
+
+def _aspect_for_profile(row: CandidateRow, *, profile: ProblemProfile) -> float | None:
+    metric_name = profile.frontier_recipe.aspect_metric
+    if metric_name is None:
+        return None
+    if metric_name == "aspect_ratio" and row.aspect is not None:
+        return float(row.aspect)
+    metric_value = row.metrics.get(metric_name)
+    if metric_value is None:
+        return None
+    try:
+        return float(metric_value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _focus_score(row: CandidateRow) -> float:
     if row.lgradb is None or row.aspect is None:
         return -float("inf")
@@ -941,6 +1162,83 @@ def _choose_partner(
     if worst_constraint in {"vacuum", "iota", "iota_edge"}:
         return max(pool, key=metric_value)
     return min(pool, key=metric_value)
+
+
+def _choose_frontier_focus(
+    candidates: list[CandidateRow],
+    *,
+    profile: ProblemProfile,
+) -> CandidateRow | None:
+    if profile.frontier_recipe.aspect_metric is not None:
+        scored_with_aspect: list[tuple[CandidateRow, float, float]] = []
+        for candidate in candidates:
+            if not candidate.is_feasible:
+                continue
+            objective_utility = _objective_for_profile(candidate, profile=profile)
+            aspect_value = _aspect_for_profile(candidate, profile=profile)
+            if objective_utility is None or aspect_value is None:
+                continue
+            scored_with_aspect.append((candidate, objective_utility, aspect_value))
+        if not scored_with_aspect:
+            return None
+        best_candidate, _obj, _asp = max(
+            scored_with_aspect,
+            key=lambda item: _potential_area(item[1], item[2]),
+        )
+        return best_candidate
+
+    scored: list[tuple[CandidateRow, float]] = []
+    for candidate in candidates:
+        if not candidate.is_feasible:
+            continue
+        objective_utility = _objective_for_profile(candidate, profile=profile)
+        if objective_utility is None:
+            continue
+        scored.append((candidate, objective_utility))
+    if not scored:
+        return None
+    best_candidate, _score = max(scored, key=lambda item: item[1])
+    return best_candidate
+
+
+def _choose_frontier_partner(
+    candidates: list[CandidateRow],
+    *,
+    focus: CandidateRow,
+    profile: ProblemProfile,
+) -> CandidateRow | None:
+    if profile.frontier_recipe.aspect_metric is None:
+        return None
+    focus_obj = _objective_for_profile(focus, profile=profile)
+    focus_asp = _aspect_for_profile(focus, profile=profile)
+    if focus_obj is None or focus_asp is None:
+        return None
+    feasible: list[tuple[CandidateRow, float, float]] = []
+    for candidate in candidates:
+        if not candidate.is_feasible or candidate.candidate_id == focus.candidate_id:
+            continue
+        candidate_obj = _objective_for_profile(candidate, profile=profile)
+        candidate_asp = _aspect_for_profile(candidate, profile=profile)
+        if candidate_obj is None or candidate_asp is None:
+            continue
+        feasible.append((candidate, candidate_obj, candidate_asp))
+    if not feasible:
+        return None
+
+    obj_values = [item[1] for item in feasible] + [focus_obj]
+    asp_values = [item[2] for item in feasible] + [focus_asp]
+    obj_range = max(obj_values) - min(obj_values) if len(obj_values) > 1 else 1.0
+    asp_range = max(asp_values) - min(asp_values) if len(asp_values) > 1 else 1.0
+
+    def pareto_distance(item: tuple[CandidateRow, float, float]) -> float:
+        candidate_obj = item[1]
+        candidate_asp = item[2]
+        d_obj = abs(candidate_obj - focus_obj) / max(obj_range, 1e-6)
+        d_asp = abs(candidate_asp - focus_asp) / max(asp_range, 1e-6)
+        return d_obj + d_asp
+
+    best_candidate, _obj, _asp = max(feasible, key=pareto_distance)
+    return best_candidate
 
 
 def _focus_partner_via_shared_staged_plan(
@@ -1496,6 +1794,24 @@ def _dominant_violation(candidates: list[CandidateRow], *, limit: int = 20) -> s
     return max(counts.items(), key=lambda item: item[1])[0]
 
 
+def _dominant_violation_rate(
+    candidates: list[CandidateRow], *, limit: int = 20
+) -> float:
+    recent = candidates[:limit]
+    if not recent:
+        return 1.0
+    dominant = _dominant_violation(recent, limit=len(recent))
+    if dominant == "none":
+        return 0.0
+    hit_count = 0
+    for row in recent:
+        value = _as_finite_float(row.violations.get(dominant))
+        if value is None or value <= 0.0:
+            continue
+        hit_count += 1
+    return float(hit_count) / float(len(recent))
+
+
 def _lesson_summary(candidates: list[CandidateRow], *, limit: int = 40) -> dict:
     family_counts: dict[str, int] = {}
     family_feasible: dict[str, int] = {}
@@ -1737,6 +2053,23 @@ def _synthesize_recipe_rules(
     return rules[: int(top_k)]
 
 
+def _latest_reflection_event_id(conn: sqlite3.Connection, *, experiment_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT MAX(id) AS max_id
+        FROM scratchpad_events
+        WHERE experiment_id = ? AND step = 1 AND aso_action = 'reflection'
+        """,
+        (int(experiment_id),),
+    ).fetchone()
+    if row is None:
+        return 0
+    value = row["max_id"]
+    if value is None:
+        return 0
+    return int(value)
+
+
 def _constraint_direction(profile: object, *, constraint: str | None) -> str | None:
     if constraint is None:
         return None
@@ -1798,6 +2131,7 @@ def _build_llm_mutation_cmds(
     proposal_script: str,
     problem: str,
     db: Path,
+    conn: sqlite3.Connection | None,
     experiment_id: int,
     run_dir: Path,
     batch_id: int,
@@ -1806,15 +2140,20 @@ def _build_llm_mutation_cmds(
     llm_mutations: Iterable[Mapping[str, object]],
     route_prefix: str,
 ) -> tuple[list[ProposalCommand], dict]:
-    conn = _connect(db)
+    active_conn = conn
+    owns_conn = False
+    if active_conn is None:
+        active_conn = _connect(db)
+        owns_conn = True
     try:
         boundary = _load_candidate_boundary(
-            conn,
+            active_conn,
             experiment_id=experiment_id,
             design_hash=focus.design_hash,
         )
     finally:
-        conn.close()
+        if owns_conn:
+            active_conn.close()
     focus_path = _ensure_parent_file(
         run_dir,
         design_hash=focus.design_hash,
@@ -1922,6 +2261,8 @@ def _build_jump_recipe_cmds(
     proposal_script: str,
     problem: str,
     db: Path,
+    conn: sqlite3.Connection | None,
+    jump_delta_cap: float,
     experiment_id: int,
     run_dir: Path,
     batch_id: int,
@@ -1930,10 +2271,14 @@ def _build_jump_recipe_cmds(
     partner: CandidateRow | None,
     route_prefix: str,
 ) -> tuple[list[ProposalCommand], dict]:
-    conn = _connect(db)
+    active_conn = conn
+    owns_conn = False
+    if active_conn is None:
+        active_conn = _connect(db)
+        owns_conn = True
     try:
         focus_boundary = _load_candidate_boundary(
-            conn,
+            active_conn,
             experiment_id=experiment_id,
             design_hash=focus.design_hash,
         )
@@ -1941,14 +2286,15 @@ def _build_jump_recipe_cmds(
         if partner is not None:
             try:
                 partner_boundary = _load_candidate_boundary(
-                    conn,
+                    active_conn,
                     experiment_id=experiment_id,
                     design_hash=partner.design_hash,
                 )
             except ValueError:
                 partner_boundary = None
     finally:
-        conn.close()
+        if owns_conn:
+            active_conn.close()
 
     focus_path = _ensure_parent_file(
         run_dir,
@@ -1965,6 +2311,11 @@ def _build_jump_recipe_cmds(
         else None
     )
     route_label = f"{route_prefix}/jump"
+    cap = abs(float(jump_delta_cap))
+    axisym_z_delta = cap * 0.27
+    axisym_r_delta = cap * 0.22
+    m_ge_delta = cap * 0.49
+    abs_n_delta = cap * 0.40
     jump_scales: list[
         tuple[
             float | None,
@@ -1973,13 +2324,13 @@ def _build_jump_recipe_cmds(
             tuple[int, float] | None,
         ]
     ] = [
-        (0.88, None, None, None),
-        (1.12, None, None, None),
-        (None, 0.90, None, None),
-        (None, 1.10, None, None),
-        (None, None, (2, 0.78), None),
-        (None, None, (3, 1.22), None),
-        (None, None, None, (1, 1.18)),
+        (1.0 - axisym_z_delta, None, None, None),
+        (1.0 + axisym_z_delta, None, None, None),
+        (None, 1.0 - axisym_r_delta, None, None),
+        (None, 1.0 + axisym_r_delta, None, None),
+        (None, None, (2, 1.0 - m_ge_delta), None),
+        (None, None, (3, 1.0 + m_ge_delta), None),
+        (None, None, None, (1, 1.0 + abs_n_delta)),
     ]
     cmds: list[ProposalCommand] = []
     for index, (axisym_z, axisym_r, scale_m_ge, scale_abs_n) in enumerate(jump_scales):
@@ -2029,11 +2380,183 @@ def _build_jump_recipe_cmds(
     return cmds, diagnostics
 
 
+def _select_frontier_recipe(
+    *,
+    proposal_script: str,
+    problem: str,
+    db: Path,
+    conn: sqlite3.Connection | None,
+    experiment_id: int,
+    run_dir: Path,
+    batch_id: int,
+    seed_base: int,
+    focus: CandidateRow,
+    partner: CandidateRow | None,
+    profile: ProblemProfile,
+    hv_value: float,
+    record_hv: float,
+    route_prefix: str = "governor_frontier_recipe",
+) -> tuple[list[ProposalCommand], dict]:
+    if profile.problem != "p3":
+        return _select_static_recipe(
+            proposal_script=proposal_script,
+            problem=problem,
+            db=db,
+            conn=conn,
+            experiment_id=experiment_id,
+            run_dir=run_dir,
+            batch_id=batch_id,
+            seed_base=seed_base,
+            focus=focus,
+            partner=partner,
+            route_prefix=route_prefix,
+        )
+
+    active_conn = conn
+    owns_conn = False
+    if active_conn is None:
+        active_conn = _connect(db)
+        owns_conn = True
+    try:
+        focus_boundary = _load_candidate_boundary(
+            active_conn,
+            experiment_id=experiment_id,
+            design_hash=focus.design_hash,
+        )
+        partner_boundary = None
+        if partner is not None:
+            row = active_conn.execute(
+                "SELECT params_json FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
+                (experiment_id, partner.design_hash),
+            ).fetchone()
+            if row is not None:
+                partner_boundary = json.loads(str(row["params_json"]))
+    finally:
+        if owns_conn:
+            active_conn.close()
+
+    focus_path = _ensure_parent_file(
+        run_dir,
+        design_hash=focus.design_hash,
+        boundary=focus_boundary,
+    )
+    partner_path = (
+        _ensure_parent_file(
+            run_dir,
+            design_hash=partner.design_hash,
+            boundary=partner_boundary,
+        )
+        if (partner is not None and isinstance(partner_boundary, dict))
+        else None
+    )
+    route_label = f"{str(route_prefix)}/p3_frontier"
+    frontier_recipe = profile.frontier_recipe
+    scale = _hv_gap_perturbation_scale(
+        hv_value=float(hv_value),
+        record_hv=float(record_hv),
+        frontier_recipe=frontier_recipe,
+    )
+
+    cmd_specs: list[
+        tuple[
+            float | None,
+            float | None,
+            tuple[int, float] | None,
+            tuple[int, float] | None,
+        ]
+    ] = [
+        (1.0 - (0.35 * scale), None, None, None),
+        (1.0 + (0.35 * scale), None, None, None),
+        (None, 1.0 - (0.25 * scale), None, None),
+        (None, None, (2, 1.0 + scale), None),
+        (None, None, (3, 1.0 + (0.8 * scale)), None),
+        (None, None, None, (1, 1.0 + (0.7 * scale))),
+        (None, None, None, (2, 1.0 + (0.5 * scale))),
+    ]
+    cmds: list[ProposalCommand] = []
+    if "scale_groups" in frontier_recipe.frontier_move_families:
+        for index, (axisym_z, axisym_r, scale_m_ge, scale_abs_n) in enumerate(
+            cmd_specs
+        ):
+            cmds.append(
+                _build_scale_cmd(
+                    proposal_script=proposal_script,
+                    problem=problem,
+                    db=db,
+                    experiment_id=experiment_id,
+                    run_dir=run_dir,
+                    batch_id=batch_id,
+                    seed_base=seed_base + 100 + index,
+                    parent=focus_path,
+                    axisym_z=axisym_z,
+                    axisym_r=axisym_r,
+                    scale_m_ge=scale_m_ge,
+                    scale_abs_n=scale_abs_n,
+                    model_route=route_label,
+                )
+            )
+
+    if partner_path is not None and "blend" in frontier_recipe.frontier_move_families:
+        cmds.append(
+            _build_blend_cmd(
+                proposal_script=proposal_script,
+                problem=problem,
+                db=db,
+                experiment_id=experiment_id,
+                run_dir=run_dir,
+                batch_id=batch_id,
+                seed_base=seed_base + 200,
+                parent_a=focus_path,
+                parent_b=partner_path,
+                t_min=0.20,
+                t_max=0.80,
+                t_step=0.20,
+                model_route=route_label,
+            )
+        )
+
+    max_candidates = int(profile.mutation_budget.max_candidates_per_cycle)
+    if len(cmds) > max_candidates:
+        cmds = cmds[:max_candidates]
+
+    hv_gap = max(0.0, float(record_hv) - float(hv_value))
+    decision = {
+        "batch_id": batch_id,
+        "focus": {
+            "design_hash": focus.design_hash,
+            "candidate_id": focus.candidate_id,
+            "feasibility": focus.feasibility,
+            "aspect": focus.aspect,
+            "lgradb": focus.lgradb,
+        },
+        "partner": None
+        if partner is None
+        else {
+            "design_hash": partner.design_hash,
+            "candidate_id": partner.candidate_id,
+            "aspect": partner.aspect,
+            "lgradb": partner.lgradb,
+        },
+        "commands": [_cmd_str(cmd) for cmd in cmds],
+        "model_route": route_label,
+        "recipe_mode": "frontier",
+        "frontier_policy": {
+            "scale": scale,
+            "hv_at_decision": float(hv_value),
+            "record_hv": float(record_hv),
+            "hv_gap": hv_gap,
+        },
+        "created_at": _utc_now_iso(),
+    }
+    return cmds, decision
+
+
 def _select_static_recipe(
     *,
     proposal_script: str,
     problem: str,
     db: Path,
+    conn: sqlite3.Connection | None,
     experiment_id: int,
     run_dir: Path,
     batch_id: int,
@@ -2044,79 +2567,52 @@ def _select_static_recipe(
     target_constraint_override: str | None = None,
 ) -> tuple[list[ProposalCommand], dict]:
     # Ensure parent boundary JSONs exist (we can pull from DB if needed).
-    conn = _connect(db)
+    active_conn = conn
+    owns_conn = False
+    if active_conn is None:
+        active_conn = _connect(db)
+        owns_conn = True
     try:
-        row = conn.execute(
+        row = active_conn.execute(
             "SELECT params_json FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
             (experiment_id, focus.design_hash),
         ).fetchone()
         if row is None:
             raise ValueError("Focus candidate missing from candidates table.")
         focus_boundary = json.loads(str(row["params_json"]))
-    finally:
-        conn.close()
 
-    focus_path = _ensure_parent_file(
-        run_dir, design_hash=focus.design_hash, boundary=focus_boundary
-    )
+        focus_path = _ensure_parent_file(
+            run_dir, design_hash=focus.design_hash, boundary=focus_boundary
+        )
 
-    if target_constraint_override is not None and target_constraint_override.strip():
-        worst = str(target_constraint_override).strip().lower()
-        worst_val = float(focus.violations.get(worst, 0.0))
-    else:
-        worst_name, worst_val = _worst_constraint(focus.violations)
-        worst = str(worst_name) if worst_name is not None else ""
+        if (
+            target_constraint_override is not None
+            and target_constraint_override.strip()
+        ):
+            worst = str(target_constraint_override).strip().lower()
+            worst_val = float(focus.violations.get(worst, 0.0))
+        else:
+            worst_name, worst_val = _worst_constraint(focus.violations)
+            worst = str(worst_name) if worst_name is not None else ""
 
-    cmds: list[ProposalCommand] = []
-    route_label = f"{str(route_prefix)}/{worst or 'unknown'}"
+        cmds: list[ProposalCommand] = []
+        route_label = f"{str(route_prefix)}/{worst or 'unknown'}"
 
-    # Scale sweep around the focus point (1D, ~4-6 candidates).
-    if worst == "mirror":
-        axisym_z_values = [
-            0.95,
-            0.96,
-            0.965,
-            0.97,
-            0.975,
-            0.98,
-            0.985,
-            0.99,
-            0.995,
-            1.0,
-        ]
-        for i, sz in enumerate(axisym_z_values):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 10 + i,
-                    parent=focus_path,
-                    axisym_z=sz,
-                    model_route=route_label,
-                )
-            )
-        for j, factor in enumerate([0.85, 0.9, 0.95]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 40 + j,
-                    parent=focus_path,
-                    scale_m_ge=(3, factor),
-                    model_route=route_label,
-                )
-            )
-        combo_index = 0
-        for sz in [0.96, 0.965, 0.97]:
-            for factor in [0.9, 0.95]:
+        # Scale sweep around the focus point (1D, ~4-6 candidates).
+        if worst == "mirror":
+            axisym_z_values = [
+                0.95,
+                0.96,
+                0.965,
+                0.97,
+                0.975,
+                0.98,
+                0.985,
+                0.99,
+                0.995,
+                1.0,
+            ]
+            for i, sz in enumerate(axisym_z_values):
                 cmds.append(
                     _build_scale_cmd(
                         proposal_script=proposal_script,
@@ -2125,170 +2621,201 @@ def _select_static_recipe(
                         experiment_id=experiment_id,
                         run_dir=run_dir,
                         batch_id=batch_id,
-                        seed_base=seed_base + 60 + combo_index,
+                        seed_base=seed_base + 10 + i,
                         parent=focus_path,
                         axisym_z=sz,
+                        model_route=route_label,
+                    )
+                )
+            for j, factor in enumerate([0.85, 0.9, 0.95]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 40 + j,
+                        parent=focus_path,
                         scale_m_ge=(3, factor),
                         model_route=route_label,
                     )
                 )
-                combo_index += 1
-    elif worst == "log10_qi":
-        for i, factor in enumerate([0.85, 0.9, 0.95]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 10 + i,
-                    parent=focus_path,
-                    scale_m_ge=(3, factor),
-                    model_route=route_label,
+            combo_index = 0
+            for sz in [0.96, 0.965, 0.97]:
+                for factor in [0.9, 0.95]:
+                    cmds.append(
+                        _build_scale_cmd(
+                            proposal_script=proposal_script,
+                            problem=problem,
+                            db=db,
+                            experiment_id=experiment_id,
+                            run_dir=run_dir,
+                            batch_id=batch_id,
+                            seed_base=seed_base + 60 + combo_index,
+                            parent=focus_path,
+                            axisym_z=sz,
+                            scale_m_ge=(3, factor),
+                            model_route=route_label,
+                        )
+                    )
+                    combo_index += 1
+        elif worst == "log10_qi":
+            for i, factor in enumerate([0.85, 0.9, 0.95]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 10 + i,
+                        parent=focus_path,
+                        scale_m_ge=(3, factor),
+                        model_route=route_label,
+                    )
                 )
-            )
-        for i, factor in enumerate([0.96, 0.98]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 20 + i,
-                    parent=focus_path,
-                    scale_abs_n=(1, factor),
-                    model_route=route_label,
+            for i, factor in enumerate([0.96, 0.98]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 20 + i,
+                        parent=focus_path,
+                        scale_abs_n=(1, factor),
+                        model_route=route_label,
+                    )
                 )
-            )
-        for i, factor in enumerate([1.02, 1.04, 1.06]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 30 + i,
-                    parent=focus_path,
-                    scale_abs_n=(3, factor),
-                    model_route=route_label,
+            for i, factor in enumerate([1.02, 1.04, 1.06]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 30 + i,
+                        parent=focus_path,
+                        scale_abs_n=(3, factor),
+                        model_route=route_label,
+                    )
                 )
-            )
-    elif worst == "flux":
-        for i, factor in enumerate([0.7, 0.8, 0.9]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 10 + i,
-                    parent=focus_path,
-                    scale_m_ge=(3, factor),
-                    model_route=route_label,
+        elif worst == "flux":
+            for i, factor in enumerate([0.7, 0.8, 0.9]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 10 + i,
+                        parent=focus_path,
+                        scale_m_ge=(3, factor),
+                        model_route=route_label,
+                    )
                 )
-            )
-    elif worst == "vacuum":
-        for i, factor in enumerate([0.9, 0.95, 0.98]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 10 + i,
-                    parent=focus_path,
-                    scale_m_ge=(2, factor),
-                    model_route=route_label,
+        elif worst == "vacuum":
+            for i, factor in enumerate([0.9, 0.95, 0.98]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 10 + i,
+                        parent=focus_path,
+                        scale_m_ge=(2, factor),
+                        model_route=route_label,
+                    )
                 )
-            )
-    elif worst == "iota":
-        for i, factor in enumerate([1.02, 1.04, 1.06]):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 10 + i,
-                    parent=focus_path,
-                    scale_abs_n=(1, factor),
-                    model_route=route_label,
+        elif worst == "iota":
+            for i, factor in enumerate([1.02, 1.04, 1.06]):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 10 + i,
+                        parent=focus_path,
+                        scale_abs_n=(1, factor),
+                        model_route=route_label,
+                    )
                 )
-            )
 
-    # Objective-only exploration fallback when no explicit worst-constraint recipe
-    # applies (for example, feasible parents with empty violations).
-    if not cmds:
-        objective_sweep: list[tuple[float | None, tuple[int, float] | None]] = [
-            (0.96, None),
-            (1.04, None),
-            (None, (3, 0.92)),
-            (None, (3, 1.08)),
-        ]
-        for i, (axisym_z, scale_m_ge) in enumerate(objective_sweep):
-            cmds.append(
-                _build_scale_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base + 10 + i,
-                    parent=focus_path,
-                    axisym_z=axisym_z,
-                    scale_m_ge=scale_m_ge,
-                    model_route=route_label,
+        # Objective-only exploration fallback when no explicit worst-constraint recipe
+        # applies (for example, feasible parents with empty violations).
+        if not cmds:
+            objective_sweep: list[tuple[float | None, tuple[int, float] | None]] = [
+                (0.96, None),
+                (1.04, None),
+                (None, (3, 0.92)),
+                (None, (3, 1.08)),
+            ]
+            for i, (axisym_z, scale_m_ge) in enumerate(objective_sweep):
+                cmds.append(
+                    _build_scale_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base + 10 + i,
+                        parent=focus_path,
+                        axisym_z=axisym_z,
+                        scale_m_ge=scale_m_ge,
+                        model_route=route_label,
+                    )
                 )
-            )
 
-    # Blend sweep towards a partner that is better on the worst constraint.
-    if partner is not None:
-        conn2 = _connect(db)
-        try:
-            row2 = conn2.execute(
+        # Blend sweep towards a partner that is better on the worst constraint.
+        if partner is not None:
+            row2 = active_conn.execute(
                 "SELECT params_json FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
                 (experiment_id, partner.design_hash),
             ).fetchone()
             partner_boundary = (
                 json.loads(str(row2["params_json"])) if row2 is not None else None
             )
-        finally:
-            conn2.close()
 
-        if partner_boundary is not None:
-            partner_path = _ensure_parent_file(
-                run_dir, design_hash=partner.design_hash, boundary=partner_boundary
-            )
-            cmds.append(
-                _build_blend_cmd(
-                    proposal_script=proposal_script,
-                    problem=problem,
-                    db=db,
-                    experiment_id=experiment_id,
-                    run_dir=run_dir,
-                    batch_id=batch_id,
-                    seed_base=seed_base,
-                    parent_a=focus_path,
-                    parent_b=partner_path,
-                    t_min=0.0,
-                    t_max=0.1,
-                    t_step=0.02,
-                    model_route=route_label,
+            if partner_boundary is not None:
+                partner_path = _ensure_parent_file(
+                    run_dir, design_hash=partner.design_hash, boundary=partner_boundary
                 )
-            )
+                cmds.append(
+                    _build_blend_cmd(
+                        proposal_script=proposal_script,
+                        problem=problem,
+                        db=db,
+                        experiment_id=experiment_id,
+                        run_dir=run_dir,
+                        batch_id=batch_id,
+                        seed_base=seed_base,
+                        parent_a=focus_path,
+                        parent_b=partner_path,
+                        t_min=0.0,
+                        t_max=0.1,
+                        t_step=0.02,
+                        model_route=route_label,
+                    )
+                )
+    finally:
+        if owns_conn:
+            active_conn.close()
 
     decision = {
         "batch_id": batch_id,
@@ -2322,6 +2849,7 @@ def _select_adaptive_recipe(
     proposal_script: str,
     problem: str,
     db: Path,
+    conn: sqlite3.Connection | None,
     experiment_id: int,
     run_dir: Path,
     batch_id: int,
@@ -2342,6 +2870,7 @@ def _select_adaptive_recipe(
         proposal_script=proposal_script,
         problem=problem,
         db=db,
+        conn=conn,
         experiment_id=experiment_id,
         run_dir=run_dir,
         batch_id=batch_id,
@@ -2368,6 +2897,7 @@ def _select_adaptive_recipe(
             proposal_script=proposal_script,
             problem=problem,
             db=db,
+            conn=conn,
             experiment_id=experiment_id,
             run_dir=run_dir,
             batch_id=batch_id,
@@ -2817,6 +3347,8 @@ def main(argv: list[str] | None = None) -> None:
                 _run_cmds(replay_cmds)
             if not args.loop:
                 return
+        recipe_rules_cache: list[dict] = []
+        recipe_rules_cache_reflection_id = -1
         while True:
             if max_cycles > 0 and proposal_cycles_emitted >= max_cycles:
                 print(
@@ -2963,6 +3495,29 @@ def main(argv: list[str] | None = None) -> None:
                 time.sleep(float(args.sleep_sec))
                 continue
 
+            recent_20 = candidates[:20]
+            recent_10 = candidates[:10]
+            accepted_feasible_last20 = sum(1 for row in recent_20 if row.is_feasible)
+            accepted_feasible_last10 = sum(1 for row in recent_10 if row.is_feasible)
+            dominant_violation_rate_last20 = _dominant_violation_rate(
+                candidates,
+                limit=20,
+            )
+            current_phase = (
+                str(resume_manifest.get("phase", "feasibility_recovery"))
+                .strip()
+                .lower()
+            )
+            if current_phase not in {"feasibility_recovery", "frontier_improvement"}:
+                current_phase = "feasibility_recovery"
+            phase_after_policy = evaluate_phase_transition(
+                profile=profile,
+                current_phase=current_phase,
+                accepted_feasible_last20=accepted_feasible_last20,
+                dominant_violation_rate_last20=dominant_violation_rate_last20,
+                accepted_feasible_last10=accepted_feasible_last10,
+            )
+
             parent_group_meta: dict[str, object] | None = None
             if args.adaptive:
                 parent_selection = _select_parent_group(
@@ -2983,28 +3538,54 @@ def main(argv: list[str] | None = None) -> None:
                     "candidate_count": parent_selection.candidate_count,
                 }
             else:
-                shared_selection = _focus_partner_via_shared_staged_plan(
-                    candidates,
-                    max_feasibility=float(args.max_focus_feas),
-                    problem=profile.problem,
-                )
-                if shared_selection is None:
-                    focus = _choose_focus(
-                        candidates, max_feasibility=float(args.max_focus_feas)
-                    )
+                if (
+                    profile.problem == "p3"
+                    and phase_after_policy == "frontier_improvement"
+                ):
+                    focus = _choose_frontier_focus(candidates, profile=profile)
                     if focus is None:
-                        print(
-                            "No near-feasible focus candidate found in recent window."
+                        focus = _choose_focus(
+                            candidates, max_feasibility=float(args.max_focus_feas)
                         )
+                    if focus is None:
+                        print("No frontier focus candidate found in recent window.")
                         if not args.loop:
                             break
                         time.sleep(float(args.sleep_sec))
                         continue
-                    worst_name, _worst_val = _worst_constraint(focus.violations)
-                    worst = str(worst_name) if worst_name is not None else ""
-                    partner = _choose_partner(candidates, worst_constraint=worst)
+                    if focus.is_feasible:
+                        partner = _choose_frontier_partner(
+                            candidates,
+                            focus=focus,
+                            profile=profile,
+                        )
+                    else:
+                        worst_name, _worst_val = _worst_constraint(focus.violations)
+                        worst = str(worst_name) if worst_name is not None else ""
+                        partner = _choose_partner(candidates, worst_constraint=worst)
                 else:
-                    focus, partner = shared_selection
+                    shared_selection = _focus_partner_via_shared_staged_plan(
+                        candidates,
+                        max_feasibility=float(args.max_focus_feas),
+                        problem=profile.problem,
+                    )
+                    if shared_selection is None:
+                        focus = _choose_focus(
+                            candidates, max_feasibility=float(args.max_focus_feas)
+                        )
+                        if focus is None:
+                            print(
+                                "No near-feasible focus candidate found in recent window."
+                            )
+                            if not args.loop:
+                                break
+                            time.sleep(float(args.sleep_sec))
+                            continue
+                        worst_name, _worst_val = _worst_constraint(focus.violations)
+                        worst = str(worst_name) if worst_name is not None else ""
+                        partner = _choose_partner(candidates, worst_constraint=worst)
+                    else:
+                        focus, partner = shared_selection
 
             batch_id = _next_batch_id(args.run_dir)
             seed_base = int(run_seed) + int(batch_id) * 1_000
@@ -3017,24 +3598,17 @@ def main(argv: list[str] | None = None) -> None:
                 )
             recipe_rules: list[dict] = []
             if int(batch_id) % int(recipe_synthesis_interval) == 0:
-                recipe_rules = _synthesize_recipe_rules(conn, experiment_id=exp_id)
-            recent_20 = candidates[:20]
-            recent_10 = candidates[:10]
-            accepted_feasible_last20 = sum(1 for row in recent_20 if row.is_feasible)
-            accepted_feasible_last10 = sum(1 for row in recent_10 if row.is_feasible)
-            dominant_violation_rate_last20 = (
-                float(sum(1 for row in recent_20 if row.violations))
-                / float(len(recent_20))
-                if recent_20
-                else 1.0
-            )
-            current_phase = (
-                str(resume_manifest.get("phase", "feasibility_recovery"))
-                .strip()
-                .lower()
-            )
-            if current_phase not in {"feasibility_recovery", "frontier_improvement"}:
-                current_phase = "feasibility_recovery"
+                latest_reflection_id = _latest_reflection_event_id(
+                    conn,
+                    experiment_id=exp_id,
+                )
+                if latest_reflection_id != recipe_rules_cache_reflection_id:
+                    recipe_rules_cache = _synthesize_recipe_rules(
+                        conn,
+                        experiment_id=exp_id,
+                    )
+                    recipe_rules_cache_reflection_id = latest_reflection_id
+                recipe_rules = list(recipe_rules_cache)
             run_budget_remaining = _remaining_run_budget(
                 proposal_cycles_emitted=proposal_cycles_emitted,
                 max_cycles=max_cycles,
@@ -3048,13 +3622,6 @@ def main(argv: list[str] | None = None) -> None:
             llm_selected_constraint: str | None = None
             llm_fallback_reason: str | None = None
             llm_input_source: str | None = None
-            phase_after_policy = evaluate_phase_transition(
-                profile=profile,
-                current_phase=current_phase,
-                accepted_feasible_last20=accepted_feasible_last20,
-                dominant_violation_rate_last20=dominant_violation_rate_last20,
-                accepted_feasible_last10=accepted_feasible_last10,
-            )
             consecutive_failures = _consecutive_transient_failures(
                 conn,
                 experiment_id=exp_id,
@@ -3067,12 +3634,6 @@ def main(argv: list[str] | None = None) -> None:
                 conn,
                 experiment_id=exp_id,
             )
-            if int(stagnation) >= int(stagnation_stop_cap):
-                print(
-                    "stop_policy:max_stagnation_cycles"
-                    f" reached={int(stagnation)} cap={int(stagnation_stop_cap)}"
-                )
-                break
             invalid_outputs = _invalid_llm_outputs_last20(
                 conn,
                 experiment_id=exp_id,
@@ -3091,10 +3652,15 @@ def main(argv: list[str] | None = None) -> None:
                 schema_compatible=schema_compatible,
                 frontier_integrity_ok=frontier_integrity_ok,
             )
-            hard_restart_lock = policy_restart_plan in {
-                "global_restart",
-                "circuit_break",
-            }
+            if (
+                int(stagnation) >= int(stagnation_stop_cap)
+                and policy_restart_plan != "global_restart"
+            ):
+                print(
+                    "stop_policy:max_stagnation_cycles"
+                    f" reached={int(stagnation)} cap={int(stagnation_stop_cap)}"
+                )
+                break
             if args.llm_enabled:
                 lesson_summary = _lesson_summary(candidates, limit=40)
                 if recipe_rules:
@@ -3161,20 +3727,41 @@ def main(argv: list[str] | None = None) -> None:
                     "global_restart",
                     "circuit_break",
                 }:
-                    if hard_restart_lock and requested_restart != policy_restart_plan:
+                    policy_hard_restart_lock = policy_restart_plan in {
+                        "global_restart",
+                        "circuit_break",
+                    }
+                    if (
+                        policy_hard_restart_lock
+                        and requested_restart != policy_restart_plan
+                    ):
                         llm_fallback_reason = (
                             "policy_override_blocked:hard_restart_trigger"
                         )
                     else:
                         policy_restart_plan = requested_restart
 
+            hard_restart_lock = policy_restart_plan in {
+                "global_restart",
+                "circuit_break",
+            }
+
             effective_action = llm_selected_action
-            if effective_action is None:
-                effective_action = _deterministic_restart_action(
-                    profile_problem=profile.problem,
-                    policy_restart_plan=policy_restart_plan,
-                    partner_available=partner is not None,
-                )
+            deterministic_action = _deterministic_restart_action(
+                profile_problem=profile.problem,
+                policy_restart_plan=policy_restart_plan,
+                partner_available=partner is not None,
+            )
+            if hard_restart_lock:
+                if (
+                    effective_action is not None
+                    and deterministic_action is not None
+                    and effective_action != deterministic_action
+                ):
+                    llm_fallback_reason = "policy_override_blocked:hard_restart_trigger"
+                effective_action = deterministic_action
+            elif effective_action is None:
+                effective_action = deterministic_action
             should_circuit_break = policy_restart_plan == "circuit_break"
 
             route_prefix: str | None = None
@@ -3200,6 +3787,11 @@ def main(argv: list[str] | None = None) -> None:
             decision: dict
             target_constraint_override = (
                 llm_selected_constraint if llm_selected_constraint is not None else None
+            )
+            use_frontier_recipe = (
+                profile.problem == "p3"
+                and phase_after_policy == "frontier_improvement"
+                and bool(focus.is_feasible)
             )
             if should_circuit_break:
                 cmds = []
@@ -3260,6 +3852,8 @@ def main(argv: list[str] | None = None) -> None:
                             proposal_script=proposal_script,
                             problem=profile.problem,
                             db=args.db,
+                            conn=conn,
+                            jump_delta_cap=profile.mutation_budget.jump_delta_cap,
                             experiment_id=exp_id,
                             run_dir=args.run_dir,
                             batch_id=batch_id,
@@ -3298,6 +3892,7 @@ def main(argv: list[str] | None = None) -> None:
                             proposal_script=proposal_script,
                             problem=profile.problem,
                             db=args.db,
+                            conn=conn,
                             experiment_id=exp_id,
                             run_dir=args.run_dir,
                             batch_id=batch_id,
@@ -3310,39 +3905,65 @@ def main(argv: list[str] | None = None) -> None:
                             target_constraint_override=target_constraint_override,
                         )
                     else:
-                        if route_prefix is None:
-                            cmds, decision = _select_static_recipe(
+                        if use_frontier_recipe:
+                            cmds, decision = _select_frontier_recipe(
                                 proposal_script=proposal_script,
                                 problem=profile.problem,
                                 db=args.db,
+                                conn=conn,
                                 experiment_id=exp_id,
                                 run_dir=args.run_dir,
                                 batch_id=batch_id,
                                 seed_base=seed_base,
                                 focus=focus,
                                 partner=partner_for_recipe,
-                                target_constraint_override=target_constraint_override,
+                                profile=profile,
+                                hv_value=hv_value,
+                                record_hv=float(args.record_hv),
+                                route_prefix=str(
+                                    route_prefix
+                                    if route_prefix is not None
+                                    else "governor_frontier_recipe"
+                                ),
                             )
                         else:
-                            cmds, decision = _select_static_recipe(
-                                proposal_script=proposal_script,
-                                problem=profile.problem,
-                                db=args.db,
-                                experiment_id=exp_id,
-                                run_dir=args.run_dir,
-                                batch_id=batch_id,
-                                seed_base=seed_base,
-                                focus=focus,
-                                partner=partner_for_recipe,
-                                route_prefix=route_prefix,
-                                target_constraint_override=target_constraint_override,
-                            )
+                            if route_prefix is None:
+                                cmds, decision = _select_static_recipe(
+                                    proposal_script=proposal_script,
+                                    problem=profile.problem,
+                                    db=args.db,
+                                    conn=conn,
+                                    experiment_id=exp_id,
+                                    run_dir=args.run_dir,
+                                    batch_id=batch_id,
+                                    seed_base=seed_base,
+                                    focus=focus,
+                                    partner=partner_for_recipe,
+                                    target_constraint_override=target_constraint_override,
+                                )
+                            else:
+                                cmds, decision = _select_static_recipe(
+                                    proposal_script=proposal_script,
+                                    problem=profile.problem,
+                                    db=args.db,
+                                    conn=conn,
+                                    experiment_id=exp_id,
+                                    run_dir=args.run_dir,
+                                    batch_id=batch_id,
+                                    seed_base=seed_base,
+                                    focus=focus,
+                                    partner=partner_for_recipe,
+                                    route_prefix=route_prefix,
+                                    target_constraint_override=target_constraint_override,
+                                )
 
             llm_mutation_diagnostics: dict | None = None
+            allow_llm_mutations = effective_action in {"repair", "bridge", "jump"}
             if (
                 llm_validated_decision is not None
                 and llm_validated_decision.decision.mutations
                 and route_prefix is not None
+                and allow_llm_mutations
             ):
                 mutation_payload = [
                     {
@@ -3355,6 +3976,7 @@ def main(argv: list[str] | None = None) -> None:
                     proposal_script=proposal_script,
                     problem=profile.problem,
                     db=args.db,
+                    conn=conn,
                     experiment_id=exp_id,
                     run_dir=args.run_dir,
                     batch_id=batch_id,
@@ -3369,6 +3991,13 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 if remaining_capacity > 0 and mutation_cmds:
                     cmds.extend(mutation_cmds[:remaining_capacity])
+            elif (
+                llm_validated_decision is not None
+                and llm_validated_decision.decision.mutations
+                and not allow_llm_mutations
+                and llm_fallback_reason is None
+            ):
+                llm_fallback_reason = "policy_override:mutations_ignored_for_restart"
 
             cap_applied = False
             max_candidates = int(profile.mutation_budget.max_candidates_per_cycle)
