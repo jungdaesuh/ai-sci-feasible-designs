@@ -18,16 +18,19 @@ from ai_scientist.llm_controller import (
 )
 from ai_scientist.memory import hash_payload
 from ai_scientist.memory.schema import init_db
+from ai_scientist.p3_enqueue import candidate_seed
 from ai_scientist.problem_profiles import get_problem_profile
 from scripts import p3_governor
 from scripts.p3_governor import (
     CandidateRow,
+    _build_blend_cmd,
     _build_jump_recipe_cmds,
     _build_llm_mutation_cmds,
     _build_scale_cmd,
     _choose_partner,
     _consecutive_transient_failures,
     _deterministic_restart_action,
+    _dominant_violation_rate,
     _fetch_candidates,
     _frontier_integrity_ok,
     _is_invalid_llm_override_reason,
@@ -474,22 +477,28 @@ def test_build_llm_mutation_cmds_translates_supported_groups(tmp_path: Path) -> 
         model_route="test",
         params=boundary,
     )
-    cmds, diagnostics = _build_llm_mutation_cmds(
-        proposal_script="scripts/p3_propose.py",
-        problem="p3",
-        db=db,
-        experiment_id=1,
-        run_dir=run_dir,
-        batch_id=1,
-        seed_base=100,
-        focus=focus,
-        llm_mutations=[
-            {"parameter_group": "axisym_z", "normalized_delta": -0.1},
-            {"parameter_group": "m_ge_3", "normalized_delta": 0.2},
-            {"parameter_group": "unsupported", "normalized_delta": 0.1},
-        ],
-        route_prefix="governor_llm/repair",
-    )
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        cmds, diagnostics = _build_llm_mutation_cmds(
+            proposal_script="scripts/p3_propose.py",
+            problem="p3",
+            db=db,
+            conn=conn,
+            experiment_id=1,
+            run_dir=run_dir,
+            batch_id=1,
+            seed_base=100,
+            focus=focus,
+            llm_mutations=[
+                {"parameter_group": "axisym_z", "normalized_delta": -0.1},
+                {"parameter_group": "m_ge_3", "normalized_delta": 0.2},
+                {"parameter_group": "unsupported", "normalized_delta": 0.1},
+            ],
+            route_prefix="governor_llm/repair",
+        )
+    finally:
+        conn.close()
     assert len(cmds) == 2
     assert len(diagnostics["applied"]) == 2
     assert len(diagnostics["rejected"]) == 1
@@ -555,19 +564,27 @@ def test_build_jump_recipe_cmds_emits_non_local_batch(tmp_path: Path) -> None:
         model_route="seed",
         params=boundary,
     )
-    cmds, diagnostics = _build_jump_recipe_cmds(
-        proposal_script="scripts/p3_propose.py",
-        problem="p3",
-        db=db,
-        experiment_id=1,
-        run_dir=run_dir,
-        batch_id=1,
-        seed_base=1000,
-        focus=focus,
-        partner=partner,
-        route_prefix="governor_llm/jump",
-    )
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        cmds, diagnostics = _build_jump_recipe_cmds(
+            proposal_script="scripts/p3_propose.py",
+            problem="p3",
+            db=db,
+            conn=conn,
+            jump_delta_cap=0.01,
+            experiment_id=1,
+            run_dir=run_dir,
+            batch_id=1,
+            seed_base=1000,
+            focus=focus,
+            partner=partner,
+            route_prefix="governor_llm/jump",
+        )
+    finally:
+        conn.close()
     assert len(cmds) >= 7
+    assert "0.997300" in cmds[0].argv
     assert diagnostics["mode"] == "jump_non_local"
 
 
@@ -904,6 +921,253 @@ def test_governor_hard_restart_trigger_blocks_llm_restart_override(
     )
 
 
+def test_governor_hard_restart_trigger_blocks_llm_action_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _make_db(tmp_path)
+    run_dir = tmp_path / "run_hard_restart_action_lock"
+    boundary = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "n_field_periods": 3,
+        "is_stellarator_symmetric": True,
+    }
+    _insert_candidate_with_metric(
+        db,
+        boundary=boundary,
+        feasibility=0.2,
+        is_feasible=0,
+        objective=1.0,
+        aspect=8.0,
+        violations={"log10_qi": 0.2},
+    )
+    decision_file = tmp_path / "decision_action_override.json"
+    decision_file.write_text(
+        json.dumps(
+            {
+                "action": "repair",
+                "target_constraint": "log10_qi",
+                "mutations": [],
+                "expected_effect": "local move",
+            }
+        )
+    )
+    conn = sqlite3.connect(str(db))
+    try:
+        for cycle in range(1, 9):
+            conn.execute(
+                """
+                INSERT INTO scratchpad_events
+                (experiment_id, cycle, step, planner_intent_json, aso_action, intent_agreement,
+                 override_reason, diagnostics_json, outcome_json, created_at)
+                VALUES (1, ?, 1, '{}', 'reflection', 'n/a', NULL, '{}', ?,
+                        '2026-01-01T00:00:00+00:00')
+                """,
+                (
+                    cycle,
+                    json.dumps(
+                        {
+                            "realized_feasibility_delta": 0.0,
+                            "realized_hv_delta": 0.0,
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "p3_governor.py",
+            "--problem",
+            "p3",
+            "--db",
+            str(db),
+            "--experiment-id",
+            "1",
+            "--run-dir",
+            str(run_dir),
+            "--workers",
+            "1",
+            "--queue-multiplier",
+            "1",
+            "--llm-enabled",
+            "--llm-fallback",
+            "--llm-allow-decision-file",
+            "--llm-decision-file",
+            str(decision_file),
+            "--max-stagnation-cycles",
+            "999",
+        ],
+    )
+    p3_governor.main()
+
+    artifacts = sorted((run_dir / "governor").glob("governor_batch_*.json"))
+    assert artifacts
+    payload = json.loads(artifacts[-1].read_text())
+    assert payload["restart_policy"]["selected"] == "global_restart"
+    assert payload["llm"]["selected_action"] == "repair"
+    assert payload["llm"]["effective_action"] == "global_restart"
+    assert (
+        payload["llm"]["fallback_reason"]
+        == "policy_override_blocked:hard_restart_trigger"
+    )
+    assert payload["commands"]
+    assert "--family blend" in payload["commands"][0]
+
+
+def test_governor_llm_restart_override_does_not_append_mutation_cmds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _make_db(tmp_path)
+    run_dir = tmp_path / "run_restart_mutation_guard"
+    boundary = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "n_field_periods": 3,
+        "is_stellarator_symmetric": True,
+    }
+    _insert_candidate_with_metric(
+        db,
+        boundary=boundary,
+        feasibility=0.2,
+        is_feasible=0,
+        objective=1.0,
+        aspect=8.0,
+        violations={"log10_qi": 0.2},
+    )
+    decision_file = tmp_path / "decision_restart_with_mutations.json"
+    decision_file.write_text(
+        json.dumps(
+            {
+                "action": "repair",
+                "target_constraint": "log10_qi",
+                "mutations": [{"parameter_group": "axisym_z", "normalized_delta": 0.1}],
+                "expected_effect": "attempt repair",
+                "restart_plan": "global_restart",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "p3_governor.py",
+            "--problem",
+            "p3",
+            "--db",
+            str(db),
+            "--experiment-id",
+            "1",
+            "--run-dir",
+            str(run_dir),
+            "--workers",
+            "1",
+            "--queue-multiplier",
+            "1",
+            "--llm-enabled",
+            "--llm-fallback",
+            "--llm-allow-decision-file",
+            "--llm-decision-file",
+            str(decision_file),
+        ],
+    )
+    p3_governor.main()
+
+    artifacts = sorted((run_dir / "governor").glob("governor_batch_*.json"))
+    assert artifacts
+    payload = json.loads(artifacts[-1].read_text())
+    assert payload["restart_policy"]["selected"] == "global_restart"
+    assert payload["llm"]["selected_action"] == "repair"
+    assert payload["llm"]["effective_action"] == "global_restart"
+    assert (
+        payload["llm"]["fallback_reason"]
+        == "policy_override_blocked:hard_restart_trigger"
+    )
+    assert payload["recipe_mode"] == "llm_global_restart"
+    assert len(payload["commands"]) == 1
+    assert "--family blend" in payload["commands"][0]
+    assert "mutation_diagnostics" not in payload["llm"]
+
+
+def test_governor_default_stagnation_threshold_allows_global_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _make_db(tmp_path)
+    run_dir = tmp_path / "run_default_stagnation_restart"
+    boundary = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "n_field_periods": 3,
+        "is_stellarator_symmetric": True,
+    }
+    _insert_candidate_with_metric(
+        db,
+        boundary=boundary,
+        feasibility=0.2,
+        is_feasible=0,
+        objective=1.0,
+        aspect=8.0,
+        violations={"log10_qi": 0.2},
+    )
+    conn = sqlite3.connect(str(db))
+    try:
+        for cycle in range(1, 9):
+            conn.execute(
+                """
+                INSERT INTO scratchpad_events
+                (experiment_id, cycle, step, planner_intent_json, aso_action, intent_agreement,
+                 override_reason, diagnostics_json, outcome_json, created_at)
+                VALUES (1, ?, 1, '{}', 'reflection', 'n/a', NULL, '{}', ?,
+                        '2026-01-01T00:00:00+00:00')
+                """,
+                (
+                    cycle,
+                    json.dumps(
+                        {
+                            "realized_feasibility_delta": 0.0,
+                            "realized_hv_delta": 0.0,
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "p3_governor.py",
+            "--problem",
+            "p3",
+            "--db",
+            str(db),
+            "--experiment-id",
+            "1",
+            "--run-dir",
+            str(run_dir),
+            "--workers",
+            "1",
+            "--queue-multiplier",
+            "1",
+        ],
+    )
+    p3_governor.main()
+
+    artifacts = sorted((run_dir / "governor").glob("governor_batch_*.json"))
+    assert artifacts
+    payload = json.loads(artifacts[-1].read_text())
+    assert payload["restart_policy"]["selected"] == "global_restart"
+    assert payload["commands"]
+    assert "--family blend" in payload["commands"][0]
+
+
 def test_governor_applies_llm_target_constraint_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1016,6 +1280,53 @@ def test_llm_transport_rejects_non_codex_command(
             "--llm-fallback",
             "--llm-codex-command",
             "python fake_llm.py",
+        ],
+    )
+    with pytest.raises(ValueError, match="codex-only transport"):
+        p3_governor.main()
+
+
+def test_llm_transport_rejects_codex_prefixed_non_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _make_db(tmp_path)
+    run_dir = tmp_path / "run"
+    boundary = {
+        "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "n_field_periods": 3,
+        "is_stellarator_symmetric": True,
+    }
+    _insert_candidate_with_metric(
+        db,
+        boundary=boundary,
+        feasibility=0.2,
+        is_feasible=0,
+        objective=1.0,
+        aspect=8.0,
+        violations={"log10_qi": 0.2},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "p3_governor.py",
+            "--problem",
+            "p3",
+            "--db",
+            str(db),
+            "--experiment-id",
+            "1",
+            "--run-dir",
+            str(run_dir),
+            "--workers",
+            "1",
+            "--queue-multiplier",
+            "1",
+            "--llm-enabled",
+            "--llm-fallback",
+            "--llm-codex-command",
+            "codex_malicious_wrapper run --json",
         ],
     )
     with pytest.raises(ValueError, match="codex-only transport"):
@@ -1216,6 +1527,161 @@ def test_replay_manifest_identity_check_is_deterministic(tmp_path: Path) -> None
         )
 
 
+def test_resume_replay_seed_identity_continuity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _make_db(tmp_path)
+    run_dir = tmp_path / "run_resume_replay"
+    governor_dir = run_dir / "governor"
+    candidates_dir = run_dir / "candidates"
+    governor_dir.mkdir(parents=True, exist_ok=True)
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+
+    parent_a = candidates_dir / "parent_a.json"
+    parent_b = candidates_dir / "parent_b.json"
+    parent_a.write_text(
+        json.dumps(
+            {
+                "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            }
+        )
+    )
+    parent_b.write_text(
+        json.dumps(
+            {
+                "r_cos": [[1.0, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 0.0, 0.0]],
+                "z_sin": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            }
+        )
+    )
+
+    manifest_path = governor_dir / "resume_manifest.json"
+    manifest = {
+        "version": 1,
+        "experiment_id": 1,
+        "problem": "p3",
+        "proposal_script": "scripts/p3_propose.py",
+        "run_seed": 1000,
+        "phase": "feasibility_recovery",
+        "last_cycle": 0,
+        "cycles": {},
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    batch_id = 5
+    seed_base = 17000
+    manifest_cmd = _build_blend_cmd(
+        proposal_script="scripts/p3_propose.py",
+        problem="p3",
+        db=db,
+        experiment_id=1,
+        run_dir=run_dir,
+        batch_id=batch_id,
+        seed_base=seed_base,
+        parent_a=parent_a,
+        parent_b=parent_b,
+        t_min=0.2,
+        t_max=0.4,
+        t_step=0.2,
+        model_route="resume/replay",
+    )
+    _record_cycle_manifest(
+        manifest=manifest,
+        path=manifest_path,
+        batch_id=batch_id,
+        seed_base=seed_base,
+        cmds=[manifest_cmd],
+        model_route="resume/replay",
+    )
+
+    existing_seed = candidate_seed(seed_base=seed_base, batch_id=batch_id, index=0)
+    existing_hash = "resume_existing_seed_idx0"
+    (candidates_dir / f"{existing_hash}_meta.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": 1,
+                "batch_id": batch_id,
+                "seed": existing_seed,
+                "move_family": "blend",
+                "parents": [],
+                "knobs": {"t": 0.2},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+    )
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            """
+            INSERT INTO candidates
+            (experiment_id, problem, params_json, seed, status, design_hash, operator_family, model_route)
+            VALUES (1, 'p3', '{}', ?, 'done', ?, 'blend', 'resume')
+            """,
+            (existing_seed, existing_hash),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "p3_governor.py",
+            "--problem",
+            "p3",
+            "--db",
+            str(db),
+            "--experiment-id",
+            "1",
+            "--run-dir",
+            str(run_dir),
+            "--workers",
+            "1",
+            "--queue-multiplier",
+            "1",
+            "--execute",
+        ],
+    )
+    p3_governor.main()
+
+    expected_replay_seed = candidate_seed(
+        seed_base=seed_base + 1,
+        batch_id=batch_id,
+        index=0,
+    )
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute(
+            "SELECT seed FROM candidates WHERE experiment_id = 1 ORDER BY seed ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    observed = [int(row[0]) for row in rows]
+    assert observed == [existing_seed, expected_replay_seed]
+
+    p3_governor.main()
+    conn = sqlite3.connect(str(db))
+    try:
+        rerun_rows = conn.execute(
+            "SELECT seed FROM candidates WHERE experiment_id = 1 ORDER BY seed ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    rerun_observed = [int(row[0]) for row in rerun_rows]
+    assert rerun_observed == observed
+
+    persisted_manifest = json.loads(manifest_path.read_text())
+    cycle_entry = persisted_manifest["cycles"][str(batch_id)]
+    assert "--t-min" in cycle_entry["command_argvs"][0]
+    assert "--t-step" in cycle_entry["command_argvs"][0]
+
+
 def test_startup_replay_commands_only_for_missing_batches(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     (run_dir / "governor").mkdir(parents=True, exist_ok=True)
@@ -1255,7 +1721,7 @@ def test_startup_replay_commands_only_for_missing_batches(tmp_path: Path) -> Non
     assert diagnostics["replay_batches"] == [2]
 
 
-def test_startup_replay_commands_skips_partial_batch_when_candidate_count_missing(
+def test_startup_replay_commands_replays_partial_batch_remainder_when_candidate_count_missing(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "run"
@@ -1302,13 +1768,17 @@ def test_startup_replay_commands_skips_partial_batch_when_candidate_count_missin
 
     cmds, diagnostics = _startup_replay_commands(manifest=manifest, run_dir=run_dir)
 
-    assert cmds == []
+    assert len(cmds) == 1
+    assert "--seed-base" in cmds[0].argv
+    assert "17001" in cmds[0].argv
+    assert "--t" in cmds[0].argv
+    assert "0.400000" in cmds[0].argv
     assert diagnostics["replay_batches"] == []
-    assert diagnostics["partial_replay_batches"] == []
-    assert diagnostics["partial_skipped_batches"] == [7]
+    assert diagnostics["partial_replay_batches"] == [7]
+    assert diagnostics["partial_skipped_batches"] == []
 
 
-def test_startup_replay_commands_legacy_manifest_blend_skips_partial_batch(
+def test_startup_replay_commands_legacy_manifest_blend_replays_partial_batch_remainder(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "run"
@@ -1354,10 +1824,14 @@ def test_startup_replay_commands_legacy_manifest_blend_skips_partial_batch(
 
     cmds, diagnostics = _startup_replay_commands(manifest=manifest, run_dir=run_dir)
 
-    assert cmds == []
+    assert len(cmds) == 1
+    assert "--seed-base" in cmds[0].argv
+    assert "18001" in cmds[0].argv
+    assert "--t" in cmds[0].argv
+    assert "0.400000" in cmds[0].argv
     assert diagnostics["replay_batches"] == []
-    assert diagnostics["partial_replay_batches"] == []
-    assert diagnostics["partial_skipped_batches"] == [8]
+    assert diagnostics["partial_replay_batches"] == [8]
+    assert diagnostics["partial_skipped_batches"] == []
 
 
 def test_startup_replay_commands_skips_batches_with_pending_candidates(
@@ -1430,6 +1904,92 @@ def test_startup_replay_commands_skips_batches_with_pending_candidates(
 
     assert cmds == []
     assert diagnostics["pending_skipped_batches"] == [9]
+
+
+def test_dominant_violation_rate_uses_dominant_constraint_frequency() -> None:
+    rows = [
+        CandidateRow(
+            candidate_id=1,
+            design_hash="a",
+            seed=1,
+            feasibility=0.5,
+            is_feasible=False,
+            lgradb=None,
+            aspect=None,
+            violations={"mirror": 0.10},
+            metrics={},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="seed",
+            model_route="test",
+        ),
+        CandidateRow(
+            candidate_id=2,
+            design_hash="b",
+            seed=2,
+            feasibility=0.5,
+            is_feasible=False,
+            lgradb=None,
+            aspect=None,
+            violations={"mirror": 0.20},
+            metrics={},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="seed",
+            model_route="test",
+        ),
+        CandidateRow(
+            candidate_id=3,
+            design_hash="c",
+            seed=3,
+            feasibility=0.5,
+            is_feasible=False,
+            lgradb=None,
+            aspect=None,
+            violations={"mirror": 0.30, "log10_qi": 0.05},
+            metrics={},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="seed",
+            model_route="test",
+        ),
+        CandidateRow(
+            candidate_id=4,
+            design_hash="d",
+            seed=4,
+            feasibility=0.5,
+            is_feasible=False,
+            lgradb=None,
+            aspect=None,
+            violations={"log10_qi": 0.20},
+            metrics={},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="seed",
+            model_route="test",
+        ),
+        CandidateRow(
+            candidate_id=5,
+            design_hash="e",
+            seed=5,
+            feasibility=0.5,
+            is_feasible=False,
+            lgradb=None,
+            aspect=None,
+            violations={},
+            metrics={},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=None,
+            operator_family="seed",
+            model_route="test",
+        ),
+    ]
+    assert _dominant_violation_rate(rows, limit=5) == pytest.approx(0.6)
 
 
 def test_governor_enforces_global_command_cap(
