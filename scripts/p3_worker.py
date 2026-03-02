@@ -25,16 +25,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_BOOTSTRAP_PATHS = (
+    _REPO_ROOT / "constellaration" / "src",
+    _REPO_ROOT,
+)
+for _path in reversed(_BOOTSTRAP_PATHS):
+    path_str = str(_path)
+    if _path.exists() and path_str not in sys.path:
+        sys.path.insert(0, path_str)
 
 from ai_scientist.memory.schema import init_db
+from ai_scientist.problem_profiles import get_problem_profile
 
 from constellaration import forward_model, problems
 from constellaration.geometry import surface_rz_fourier
-
-
-_P3_CONSTRAINT_NAMES = ["iota", "log10_qi", "mirror", "flux", "vacuum"]
 
 
 def _utc_now_iso() -> str:
@@ -57,14 +61,16 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _claim_next(
-    conn: sqlite3.Connection, *, experiment_id: int, worker_id: int
+    conn: sqlite3.Connection, *, experiment_id: int, problem: str, worker_id: int
 ) -> sqlite3.Row | None:
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = conn.execute(
-            "SELECT id, params_json, seed, design_hash FROM candidates WHERE experiment_id = ? AND status = 'pending' ORDER BY id LIMIT 1",
-            (experiment_id,),
+            "SELECT id, params_json, seed, design_hash FROM candidates "
+            "WHERE experiment_id = ? AND problem = ? AND status = 'pending' "
+            "ORDER BY id LIMIT 1",
+            (experiment_id, str(problem)),
         ).fetchone()
         if row is None:
             conn.execute("COMMIT")
@@ -177,18 +183,43 @@ class EvalSummary:
     aspect: float
 
 
-def _evaluate_p3(boundary: dict) -> tuple[dict, EvalSummary]:
+def _problem_instance(problem: str) -> object:
+    if problem == "p1":
+        return problems.GeometricalProblem()
+    if problem == "p2":
+        return problems.SimpleToBuildQIStellarator()
+    if problem == "p3":
+        return problems.MHDStableQIStellarator()
+    raise ValueError(f"Unsupported problem: {problem!r}")
+
+
+def _objective_for_problem(
+    *, problem: str, metrics: forward_model.ConstellarationMetrics
+) -> float:
+    if problem == "p1":
+        return float(metrics.max_elongation)
+    return float(metrics.minimum_normalized_magnetic_gradient_scale_length)
+
+
+def _evaluate_boundary(*, problem: str, boundary: dict) -> tuple[dict, EvalSummary]:
     surface = surface_rz_fourier.SurfaceRZFourier.model_validate(boundary)
     settings = forward_model.ConstellarationSettings.default_high_fidelity()
     metrics, _equilibrium = forward_model.forward_model(surface, settings=settings)
 
-    problem = problems.MHDStableQIStellarator()
-    feasibility = problem.compute_feasibility(metrics)
-    is_feasible = problem.is_feasible(metrics)
-    violations_vec = problem._normalized_constraint_violations(metrics)
+    problem_profile = get_problem_profile(problem)
+    problem_instance = _problem_instance(problem)
+    feasibility = problem_instance.compute_feasibility(metrics)
+    is_feasible = problem_instance.is_feasible(metrics)
+    violations_vec = problem_instance._normalized_constraint_violations(metrics)
+    violation_values = list(violations_vec.tolist())
+    constraint_names = list(problem_profile.allowed_constraint_names())
+    if len(violation_values) != len(constraint_names):
+        raise ValueError(
+            "Constraint count mismatch between profile and evaluator: "
+            f"{len(constraint_names)} != {len(violation_values)}"
+        )
     violations = {
-        name: float(val)
-        for name, val in zip(_P3_CONSTRAINT_NAMES, violations_vec.tolist())
+        name: float(val) for name, val in zip(constraint_names, violation_values)
     }
 
     qi = metrics.qi
@@ -216,17 +247,24 @@ def _evaluate_p3(boundary: dict) -> tuple[dict, EvalSummary]:
         "is_feasible": bool(is_feasible),
     }
 
+    objective = _objective_for_problem(problem=problem, metrics=metrics)
     summary = EvalSummary(
         feasibility=float(feasibility),
         is_feasible=bool(is_feasible),
-        objective=float(metrics.minimum_normalized_magnetic_gradient_scale_length),
+        objective=float(objective),
         aspect=float(metrics.aspect_ratio),
     )
     return metrics_payload, summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="P3 high-fidelity worker.")
+    parser = argparse.ArgumentParser(description="High-fidelity worker.")
+    parser.add_argument(
+        "--problem",
+        choices=["p1", "p2", "p3"],
+        default="p3",
+        help="Problem profile used for deterministic evaluation.",
+    )
     parser.add_argument(
         "--db",
         type=Path,
@@ -251,6 +289,8 @@ def main() -> None:
     args = parser.parse_args()
 
     _set_thread_env_defaults()
+    eval_dir = args.run_dir / "eval"
+    eval_dir.mkdir(parents=True, exist_ok=True)
 
     conn = _connect(args.db)
     exp = conn.execute(
@@ -281,6 +321,7 @@ def main() -> None:
             row = _claim_next(
                 conn,
                 experiment_id=int(args.experiment_id),
+                problem=str(args.problem),
                 worker_id=int(args.worker_id),
             )
             if row is None:
@@ -289,17 +330,20 @@ def main() -> None:
 
             candidate_id = int(row["id"])
             design_hash = str(row["design_hash"])
-            boundary = json.loads(str(row["params_json"]))
-            meta = _load_meta(args.run_dir, design_hash) or {}
-
             started_at = _utc_now_iso()
             t0 = time.monotonic()
             error: str | None = None
             eval_payload: dict
             summary: EvalSummary | None = None
+            meta: dict = {}
 
             try:
-                eval_payload, summary = _evaluate_p3(boundary)
+                boundary = json.loads(str(row["params_json"]))
+                meta = _load_meta(args.run_dir, design_hash) or {}
+                eval_payload, summary = _evaluate_boundary(
+                    problem=str(args.problem),
+                    boundary=boundary,
+                )
             except Exception as exc:
                 eval_payload = {}
                 error = str(exc)
@@ -311,6 +355,7 @@ def main() -> None:
                 "design_hash": design_hash,
                 "candidate_id": candidate_id,
                 "experiment_id": int(args.experiment_id),
+                "problem": str(args.problem),
                 "worker_id": int(args.worker_id),
                 "started_at": started_at,
                 "finished_at": finished_at,
@@ -320,7 +365,7 @@ def main() -> None:
                 **eval_payload,
             }
 
-            eval_path = args.run_dir / "eval" / f"{design_hash}.json"
+            eval_path = eval_dir / f"{design_hash}.json"
             eval_path.write_text(json.dumps(record, indent=2))
 
             with conn:

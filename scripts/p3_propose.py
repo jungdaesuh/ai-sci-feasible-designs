@@ -183,6 +183,12 @@ def _derive_novelty_score(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Enqueue P3 candidates.")
     parser.add_argument(
+        "--problem",
+        choices=["p1", "p2", "p3"],
+        default="p3",
+        help="Problem label recorded on candidate rows.",
+    )
+    parser.add_argument(
         "--db",
         type=Path,
         default=Path("reports/p3_world_model.sqlite"),
@@ -300,6 +306,7 @@ def main() -> None:
                 record = enqueue_candidate(
                     conn,
                     experiment_id=int(args.experiment_id),
+                    problem=str(args.problem),
                     run_dir=args.run_dir,
                     batch_id=int(args.batch_id),
                     boundary=boundary,
@@ -321,7 +328,15 @@ def main() -> None:
         conn.close()
 
     print(
-        f"batch_id={int(args.batch_id)} family={args.family} inserted={inserted} skipped={skipped}"
+        " ".join(
+            [
+                f"problem={str(args.problem)}",
+                f"batch_id={int(args.batch_id)}",
+                f"family={args.family}",
+                f"inserted={inserted}",
+                f"skipped={skipped}",
+            ]
+        )
     )
 
 

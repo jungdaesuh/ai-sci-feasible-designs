@@ -56,6 +56,7 @@ def enqueue_candidate(
     conn: sqlite3.Connection,
     *,
     experiment_id: int,
+    problem: str,
     run_dir: Path,
     batch_id: int,
     boundary: Mapping[str, object],
@@ -105,7 +106,7 @@ def enqueue_candidate(
         """,
         (
             int(experiment_id),
-            "p3",
+            str(problem),
             json.dumps(boundary, separators=(",", ":")),
             int(seed),
             "pending",
