@@ -359,6 +359,14 @@ def build_repair_candidates(
                 _scale_abs_n(params, abs_n=1, factor=1.04),
             ]
         )
+    elif "triangularity" in key:
+        candidates.extend(
+            [
+                _scale_abs_n(params, abs_n=1, factor=1.30),
+                _scale_abs_n(params, abs_n=1, factor=0.70),
+                _scale_m_ge(params, m_min=2, factor=0.80),
+            ]
+        )
     elif "aspect" in key or "elong" in key:
         candidates.extend(
             [
