@@ -301,6 +301,69 @@ def _repair_observation(
     return out
 
 
+def _stagnation_cycles(observation: Mapping[str, object]) -> int:
+    state_raw = observation.get("state")
+    if not isinstance(state_raw, Mapping):
+        return 0
+    context_raw = state_raw.get("context")
+    if not isinstance(context_raw, Mapping):
+        return 0
+    value = context_raw.get("stagnation_cycles")
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, int(value))
+    if isinstance(value, float):
+        if not math.isfinite(float(value)):
+            return 0
+        return max(0, int(value))
+    return 0
+
+
+def _policy_restart_plan(observation: Mapping[str, object]) -> str:
+    state_raw = observation.get("state")
+    if not isinstance(state_raw, Mapping):
+        return ""
+    context_raw = state_raw.get("context")
+    if not isinstance(context_raw, Mapping):
+        return ""
+    value = context_raw.get("policy_restart_plan")
+    if not isinstance(value, str):
+        return ""
+    return str(value).strip().lower()
+
+
+def _enforce_novelty_contract(
+    *,
+    profile: ProblemProfile,
+    decision: Decision,
+    observation: Mapping[str, object],
+) -> None:
+    action = decision.action.strip().lower()
+    if action not in {"repair", "bridge", "jump"}:
+        return
+    if _policy_restart_plan(observation) in {"global_restart", "circuit_break"}:
+        return
+    stagnation_cycles = _stagnation_cycles(observation)
+    min_stagnation = max(1, int(profile.autonomy_policy.anti_repeat_no_progress_cycles))
+    if stagnation_cycles < min_stagnation:
+        return
+    if not decision.mutations:
+        raise ValueError(
+            f"stagnation novelty contract: action {action} requires non-empty mutations"
+        )
+    min_delta = float(profile.autonomy_policy.stagnation_min_mutation_delta)
+    has_nonzero = any(
+        abs(float(mutation.normalized_delta)) >= min_delta
+        for mutation in decision.mutations
+    )
+    if not has_nonzero:
+        raise ValueError(
+            "stagnation novelty contract: all mutation deltas are below "
+            f"minimum {min_delta:.6f}"
+        )
+
+
 def decide(
     *,
     profile: ProblemProfile,
@@ -340,6 +403,11 @@ def decide(
             validated_decision = validate_decision(
                 profile=profile,
                 decision=decision,
+            )
+            _enforce_novelty_contract(
+                profile=profile,
+                decision=decision,
+                observation=attempt_observation,
             )
             if attempt > 0 and last_error is not None:
                 validated_decision = ValidatedDecision(
