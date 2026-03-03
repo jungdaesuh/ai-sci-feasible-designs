@@ -1,0 +1,13 @@
+{
+  "experiment_id": 1,
+  "batch_id": 1,
+  "seed": 11304015,
+  "move_family": "scale_groups",
+  "parents": [
+    "c92114b77230856b9c988b177b8ce7f3603a6479c673aace821f5c95d8beb13c"
+  ],
+  "knobs": {
+    "m_ge_3": 0.95
+  },
+  "created_at": "2026-03-03T07:21:07.269786+00:00"
+}

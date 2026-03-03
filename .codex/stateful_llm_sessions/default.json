@@ -1,0 +1,279 @@
+{
+  "history": [
+    {
+      "timestamp": "2026-03-03T17:11:59.146110+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603847039576,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660592329395
+      }
+    },
+    {
+      "timestamp": "2026-03-03T17:48:03.300588+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603847039576,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660592329395
+      }
+    },
+    {
+      "timestamp": "2026-03-03T17:49:53.129205+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603847312443,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660589600726
+      }
+    },
+    {
+      "timestamp": "2026-03-03T17:52:18.263342+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603859710544,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660465619716
+      }
+    },
+    {
+      "timestamp": "2026-03-03T17:57:30.861679+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    },
+    {
+      "timestamp": "2026-03-03T17:58:37.565998+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    },
+    {
+      "timestamp": "2026-03-03T18:00:27.853533+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    },
+    {
+      "timestamp": "2026-03-03T18:03:06.120876+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    },
+    {
+      "timestamp": "2026-03-03T18:05:50.932293+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    },
+    {
+      "timestamp": "2026-03-03T18:07:57.061289+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    },
+    {
+      "timestamp": "2026-03-03T18:10:39.937582+00:00",
+      "decision": {
+        "action": "repair",
+        "target_constraint": "log10_qi",
+        "mutations": [
+          {
+            "parameter_group": "axisym_z",
+            "normalized_delta": 0.02
+          }
+        ],
+        "expected_effect": "fallback_transport_decision",
+        "restart_plan": null
+      },
+      "phase": {
+        "name": "feasibility_recovery",
+        "target": "feasibility_recovery",
+        "dominant_violation": "log10_qi"
+      },
+      "frontier": {
+        "hv_at_decision": 77.68603869974935,
+        "record_hv": 135.15669906272515,
+        "gap_to_record": 57.470660362975806
+      }
+    }
+  ]
+}

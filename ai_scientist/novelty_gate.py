@@ -15,6 +15,13 @@ class NoveltyCandidate:
     novelty_score: float | None = None
 
 
+def _as_nonnegative_finite_distance(value: float, *, field_name: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError(f"{field_name} must be a finite number >= 0.")
+    return parsed
+
+
 NoveltyJudge = Callable[[NoveltyCandidate], bool]
 
 
@@ -60,11 +67,15 @@ def apply_two_stage_novelty_gate(
       invoke `judge` when provided.
     - If no judge is provided, near-duplicates are rejected in strict mode.
     """
-    min_distance = float(embedding_prefilter_min_distance)
-    near_distance = float(near_duplicate_distance)
+    min_distance = _as_nonnegative_finite_distance(
+        embedding_prefilter_min_distance,
+        field_name="embedding_prefilter_min_distance",
+    )
+    near_distance = _as_nonnegative_finite_distance(
+        near_duplicate_distance,
+        field_name="near_duplicate_distance",
+    )
     cap = float(feasibility_max)
-    if min_distance < 0.0:
-        raise ValueError("embedding_prefilter_min_distance must be >= 0.")
     if near_distance < min_distance:
         raise ValueError(
             "near_duplicate_distance must be >= embedding_prefilter_min_distance."
@@ -76,10 +87,15 @@ def apply_two_stage_novelty_gate(
     judge_calls = 0
     judge_accepts = 0
     near_duplicate_count = 0
+    rejected_by_distance = 0
+    rejected_by_feasibility = 0
+    rejected_near_duplicates_without_judge = 0
+    rejected_by_judge = 0
 
     for candidate in source:
         distance = _safe_optional_float(candidate.embedding_distance)
         feasibility = _safe_optional_float(candidate.feasibility)
+        rejection_reason: str | None = None
         pass_distance = _passes_embedding_prefilter(
             distance=distance,
             min_distance=min_distance,
@@ -98,11 +114,20 @@ def apply_two_stage_novelty_gate(
         judge_called = False
         judge_accept: bool | None = None
         if not stage1_accept:
+            if not pass_distance:
+                rejected_by_distance += 1
+                rejection_reason = "distance_filter"
+            else:
+                rejected_by_feasibility += 1
+                rejection_reason = "feasibility_filter"
             accepted = False
         elif not near_duplicate:
             accepted = True
+            rejection_reason = "accepted"
         elif judge is None:
             judge_accept = False
+            rejected_near_duplicates_without_judge += 1
+            rejection_reason = "near_duplicate_without_judge"
             accepted = False
         else:
             judge_called = True
@@ -111,6 +136,10 @@ def apply_two_stage_novelty_gate(
             accepted = bool(judge_accept)
             if accepted:
                 judge_accepts += 1
+                rejection_reason = "judge_accept"
+            else:
+                rejected_by_judge += 1
+                rejection_reason = "judge_reject"
 
         if accepted:
             kept.append(candidate)
@@ -130,6 +159,7 @@ def apply_two_stage_novelty_gate(
                 "judge_label": str(judge_label),
                 "judge_accept": judge_accept,
                 "accepted": accepted,
+                "rejection_reason": rejection_reason,
             }
         )
 
@@ -152,7 +182,15 @@ def apply_two_stage_novelty_gate(
         "judge_label": str(judge_label),
         "judge_call_count": judge_calls,
         "judge_accept_count": judge_accepts,
+        "rejection_reasons": {
+            "distance_filter": rejected_by_distance,
+            "feasibility_filter": rejected_by_feasibility,
+            "near_duplicate_without_judge": rejected_near_duplicates_without_judge,
+            "judge_reject": rejected_by_judge,
+        },
         "fallback_to_ungated": fallback,
+        "pre_fallback_kept_count": len(kept),
+        "selected_count": len(selected),
         "rows": rows,
     }
     return selected, diagnostics

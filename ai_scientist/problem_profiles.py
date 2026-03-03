@@ -75,6 +75,42 @@ class FrontierRecipeConfig:
 
 
 @dataclass(frozen=True)
+class RunSurgeryPolicy:
+    eval_window: int
+    objective_stall_windows: int
+    feasibility_stall_windows: int
+    min_objective_delta: float
+    min_feasibility_delta: float
+    max_same_action_windows: int
+    backlog_prune_min_pending: int
+    backlog_prune_fraction: float
+    rebootstrap_top_feasible_k: int
+    rebootstrap_top_nearfeasible_k: int
+    nearfeasible_min: float
+    nearfeasible_max: float
+    operator_shift_lock_cycles: int
+    invalid_basin_failure_limit: int
+    autoscale_enabled: bool
+    autoscale_min_workers: int
+    autoscale_max_workers: int
+    autoscale_step: int
+    autoscale_up_pending_ratio: float
+    autoscale_down_pending_ratio: float
+    autoscale_cooldown_cycles: int
+
+
+@dataclass(frozen=True)
+class AutonomyPolicy:
+    diversity_floor_min_candidates: int
+    anti_repeat_no_progress_cycles: int
+    invalid_basin_max_consecutive_parent_failures: int
+    stagnation_min_mutation_delta: float
+    autonomous_feasibility_stall_eval_window: int
+    autonomous_objective_stall_eval_window: int
+    run_surgery: RunSurgeryPolicy
+
+
+@dataclass(frozen=True)
 class ProblemProfile:
     problem: ProblemId
     objective: ObjectiveSpec
@@ -84,6 +120,7 @@ class ProblemProfile:
     restart_thresholds: RestartThresholds
     phase_switch_thresholds: PhaseSwitchThresholds
     frontier_recipe: FrontierRecipeConfig
+    autonomy_policy: AutonomyPolicy
 
     def allows_action(self, action: str) -> bool:
         return action in self.allowed_actions
@@ -113,6 +150,86 @@ _DEFAULT_PHASE_THRESHOLDS = PhaseSwitchThresholds(
     improve_min_accepted_feasible_last20=3,
     improve_max_dominant_violation_rate_last20=0.20,
     revert_if_accepted_feasible_last10_eq=0,
+)
+
+_DEFAULT_AUTONOMY_POLICY = AutonomyPolicy(
+    diversity_floor_min_candidates=3,
+    anti_repeat_no_progress_cycles=2,
+    invalid_basin_max_consecutive_parent_failures=3,
+    stagnation_min_mutation_delta=0.01,
+    autonomous_feasibility_stall_eval_window=24,
+    autonomous_objective_stall_eval_window=36,
+    run_surgery=RunSurgeryPolicy(
+        eval_window=24,
+        objective_stall_windows=2,
+        feasibility_stall_windows=2,
+        min_objective_delta=0.002,
+        min_feasibility_delta=0.0001,
+        max_same_action_windows=2,
+        backlog_prune_min_pending=24,
+        backlog_prune_fraction=0.5,
+        rebootstrap_top_feasible_k=40,
+        rebootstrap_top_nearfeasible_k=80,
+        nearfeasible_min=0.0100,
+        nearfeasible_max=0.0500,
+        operator_shift_lock_cycles=3,
+        invalid_basin_failure_limit=3,
+        autoscale_enabled=True,
+        autoscale_min_workers=6,
+        autoscale_max_workers=12,
+        autoscale_step=2,
+        autoscale_up_pending_ratio=1.5,
+        autoscale_down_pending_ratio=0.5,
+        autoscale_cooldown_cycles=2,
+    ),
+)
+
+_P1_RUN_SURGERY_POLICY = RunSurgeryPolicy(
+    eval_window=30,
+    objective_stall_windows=2,
+    feasibility_stall_windows=2,
+    min_objective_delta=0.001,
+    min_feasibility_delta=0.0001,
+    max_same_action_windows=2,
+    backlog_prune_min_pending=20,
+    backlog_prune_fraction=0.4,
+    rebootstrap_top_feasible_k=24,
+    rebootstrap_top_nearfeasible_k=48,
+    nearfeasible_min=0.0100,
+    nearfeasible_max=0.0600,
+    operator_shift_lock_cycles=2,
+    invalid_basin_failure_limit=3,
+    autoscale_enabled=True,
+    autoscale_min_workers=4,
+    autoscale_max_workers=10,
+    autoscale_step=2,
+    autoscale_up_pending_ratio=1.6,
+    autoscale_down_pending_ratio=0.6,
+    autoscale_cooldown_cycles=2,
+)
+
+_P2_RUN_SURGERY_POLICY = RunSurgeryPolicy(
+    eval_window=28,
+    objective_stall_windows=2,
+    feasibility_stall_windows=2,
+    min_objective_delta=0.0015,
+    min_feasibility_delta=0.0001,
+    max_same_action_windows=2,
+    backlog_prune_min_pending=22,
+    backlog_prune_fraction=0.45,
+    rebootstrap_top_feasible_k=32,
+    rebootstrap_top_nearfeasible_k=64,
+    nearfeasible_min=0.0100,
+    nearfeasible_max=0.0550,
+    operator_shift_lock_cycles=3,
+    invalid_basin_failure_limit=3,
+    autoscale_enabled=True,
+    autoscale_min_workers=5,
+    autoscale_max_workers=10,
+    autoscale_step=2,
+    autoscale_up_pending_ratio=1.55,
+    autoscale_down_pending_ratio=0.55,
+    autoscale_cooldown_cycles=2,
 )
 
 _P3_FRONTIER_RECIPE = FrontierRecipeConfig(
@@ -167,6 +284,7 @@ P3_PROFILE = ProblemProfile(
     restart_thresholds=_DEFAULT_RESTART_THRESHOLDS,
     phase_switch_thresholds=_DEFAULT_PHASE_THRESHOLDS,
     frontier_recipe=_P3_FRONTIER_RECIPE,
+    autonomy_policy=_DEFAULT_AUTONOMY_POLICY,
 )
 
 # P1/P2 profiles are included for shared decision/prompt contracts.
@@ -186,6 +304,15 @@ P1_PROFILE = ProblemProfile(
     restart_thresholds=_DEFAULT_RESTART_THRESHOLDS,
     phase_switch_thresholds=_DEFAULT_PHASE_THRESHOLDS,
     frontier_recipe=_P1_FRONTIER_RECIPE,
+    autonomy_policy=AutonomyPolicy(
+        diversity_floor_min_candidates=_DEFAULT_AUTONOMY_POLICY.diversity_floor_min_candidates,
+        anti_repeat_no_progress_cycles=_DEFAULT_AUTONOMY_POLICY.anti_repeat_no_progress_cycles,
+        invalid_basin_max_consecutive_parent_failures=_DEFAULT_AUTONOMY_POLICY.invalid_basin_max_consecutive_parent_failures,
+        stagnation_min_mutation_delta=_DEFAULT_AUTONOMY_POLICY.stagnation_min_mutation_delta,
+        autonomous_feasibility_stall_eval_window=_DEFAULT_AUTONOMY_POLICY.autonomous_feasibility_stall_eval_window,
+        autonomous_objective_stall_eval_window=_DEFAULT_AUTONOMY_POLICY.autonomous_objective_stall_eval_window,
+        run_surgery=_P1_RUN_SURGERY_POLICY,
+    ),
 )
 
 P2_PROFILE = ProblemProfile(
@@ -206,6 +333,15 @@ P2_PROFILE = ProblemProfile(
     restart_thresholds=_DEFAULT_RESTART_THRESHOLDS,
     phase_switch_thresholds=_DEFAULT_PHASE_THRESHOLDS,
     frontier_recipe=_P2_FRONTIER_RECIPE,
+    autonomy_policy=AutonomyPolicy(
+        diversity_floor_min_candidates=_DEFAULT_AUTONOMY_POLICY.diversity_floor_min_candidates,
+        anti_repeat_no_progress_cycles=_DEFAULT_AUTONOMY_POLICY.anti_repeat_no_progress_cycles,
+        invalid_basin_max_consecutive_parent_failures=_DEFAULT_AUTONOMY_POLICY.invalid_basin_max_consecutive_parent_failures,
+        stagnation_min_mutation_delta=_DEFAULT_AUTONOMY_POLICY.stagnation_min_mutation_delta,
+        autonomous_feasibility_stall_eval_window=_DEFAULT_AUTONOMY_POLICY.autonomous_feasibility_stall_eval_window,
+        autonomous_objective_stall_eval_window=_DEFAULT_AUTONOMY_POLICY.autonomous_objective_stall_eval_window,
+        run_surgery=_P2_RUN_SURGERY_POLICY,
+    ),
 )
 
 PROBLEM_PROFILES: dict[ProblemId, ProblemProfile] = {
@@ -257,5 +393,36 @@ def profile_prompt_block(profile: ProblemProfile) -> dict:
             "frontier_move_families": list(
                 profile.frontier_recipe.frontier_move_families
             ),
+        },
+        "autonomy_policy": {
+            "diversity_floor_min_candidates": profile.autonomy_policy.diversity_floor_min_candidates,
+            "anti_repeat_no_progress_cycles": profile.autonomy_policy.anti_repeat_no_progress_cycles,
+            "invalid_basin_max_consecutive_parent_failures": profile.autonomy_policy.invalid_basin_max_consecutive_parent_failures,
+            "stagnation_min_mutation_delta": profile.autonomy_policy.stagnation_min_mutation_delta,
+            "autonomous_feasibility_stall_eval_window": profile.autonomy_policy.autonomous_feasibility_stall_eval_window,
+            "autonomous_objective_stall_eval_window": profile.autonomy_policy.autonomous_objective_stall_eval_window,
+            "run_surgery": {
+                "eval_window": profile.autonomy_policy.run_surgery.eval_window,
+                "objective_stall_windows": profile.autonomy_policy.run_surgery.objective_stall_windows,
+                "feasibility_stall_windows": profile.autonomy_policy.run_surgery.feasibility_stall_windows,
+                "min_objective_delta": profile.autonomy_policy.run_surgery.min_objective_delta,
+                "min_feasibility_delta": profile.autonomy_policy.run_surgery.min_feasibility_delta,
+                "max_same_action_windows": profile.autonomy_policy.run_surgery.max_same_action_windows,
+                "backlog_prune_min_pending": profile.autonomy_policy.run_surgery.backlog_prune_min_pending,
+                "backlog_prune_fraction": profile.autonomy_policy.run_surgery.backlog_prune_fraction,
+                "rebootstrap_top_feasible_k": profile.autonomy_policy.run_surgery.rebootstrap_top_feasible_k,
+                "rebootstrap_top_nearfeasible_k": profile.autonomy_policy.run_surgery.rebootstrap_top_nearfeasible_k,
+                "nearfeasible_min": profile.autonomy_policy.run_surgery.nearfeasible_min,
+                "nearfeasible_max": profile.autonomy_policy.run_surgery.nearfeasible_max,
+                "operator_shift_lock_cycles": profile.autonomy_policy.run_surgery.operator_shift_lock_cycles,
+                "invalid_basin_failure_limit": profile.autonomy_policy.run_surgery.invalid_basin_failure_limit,
+                "autoscale_enabled": profile.autonomy_policy.run_surgery.autoscale_enabled,
+                "autoscale_min_workers": profile.autonomy_policy.run_surgery.autoscale_min_workers,
+                "autoscale_max_workers": profile.autonomy_policy.run_surgery.autoscale_max_workers,
+                "autoscale_step": profile.autonomy_policy.run_surgery.autoscale_step,
+                "autoscale_up_pending_ratio": profile.autonomy_policy.run_surgery.autoscale_up_pending_ratio,
+                "autoscale_down_pending_ratio": profile.autonomy_policy.run_surgery.autoscale_down_pending_ratio,
+                "autoscale_cooldown_cycles": profile.autonomy_policy.run_surgery.autoscale_cooldown_cycles,
+            },
         },
     }

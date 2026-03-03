@@ -409,3 +409,147 @@ def test_decide_raises_after_repair_exhaustion(
             decision_command="codex run --json",
             repair_attempts=1,
         )
+
+
+def test_decide_rejects_empty_mutations_under_stagnation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = get_problem_profile("p3")
+
+    def _none_file(path):
+        return None
+
+    def _payload_command(*, command, observation, model, session_id):
+        return {
+            "action": "repair",
+            "target_constraint": "log10_qi",
+            "mutations": [],
+            "expected_effect": "noop",
+            "restart_plan": None,
+        }
+
+    monkeypatch.setattr(
+        "ai_scientist.llm_controller.load_optional_decision_file", _none_file
+    )
+    monkeypatch.setattr(
+        "ai_scientist.llm_controller.load_optional_decision_command",
+        _payload_command,
+    )
+    observation = build_observation(
+        profile=profile,
+        rows=[],
+        context={
+            "phase": "feasibility_recovery",
+            "dominant_violation": "log10_qi",
+            "hv_at_decision": 0.0,
+            "record_hv": 1.0,
+            "stagnation_cycles": 2,
+        },
+    )
+    with pytest.raises(ValueError, match="novelty contract"):
+        decide(
+            profile=profile,
+            observation=observation,
+            model="codex",
+            session_id="sess-4",
+            decision_file=None,
+            decision_command="codex run --json",
+            repair_attempts=0,
+        )
+
+
+def test_decide_rejects_small_delta_mutations_under_stagnation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = get_problem_profile("p3")
+
+    def _none_file(path):
+        return None
+
+    def _payload_command(*, command, observation, model, session_id):
+        return {
+            "action": "repair",
+            "target_constraint": "log10_qi",
+            "mutations": [
+                {"parameter_group": "axisym_z", "normalized_delta": 0.001},
+                {"parameter_group": "m_ge_3", "normalized_delta": -0.005},
+            ],
+            "expected_effect": "tiny",
+            "restart_plan": None,
+        }
+
+    monkeypatch.setattr(
+        "ai_scientist.llm_controller.load_optional_decision_file", _none_file
+    )
+    monkeypatch.setattr(
+        "ai_scientist.llm_controller.load_optional_decision_command",
+        _payload_command,
+    )
+    observation = build_observation(
+        profile=profile,
+        rows=[],
+        context={
+            "phase": "feasibility_recovery",
+            "dominant_violation": "log10_qi",
+            "hv_at_decision": 0.0,
+            "record_hv": 1.0,
+            "stagnation_cycles": 3,
+        },
+    )
+    with pytest.raises(ValueError, match="minimum"):
+        decide(
+            profile=profile,
+            observation=observation,
+            model="codex",
+            session_id="sess-5",
+            decision_file=None,
+            decision_command="codex run --json",
+            repair_attempts=0,
+        )
+
+
+def test_decide_accepts_nonzero_mutation_under_stagnation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = get_problem_profile("p3")
+
+    def _none_file(path):
+        return None
+
+    def _payload_command(*, command, observation, model, session_id):
+        return {
+            "action": "repair",
+            "target_constraint": "log10_qi",
+            "mutations": [{"parameter_group": "axisym_z", "normalized_delta": 0.02}],
+            "expected_effect": "repair",
+            "restart_plan": None,
+        }
+
+    monkeypatch.setattr(
+        "ai_scientist.llm_controller.load_optional_decision_file", _none_file
+    )
+    monkeypatch.setattr(
+        "ai_scientist.llm_controller.load_optional_decision_command",
+        _payload_command,
+    )
+    observation = build_observation(
+        profile=profile,
+        rows=[],
+        context={
+            "phase": "feasibility_recovery",
+            "dominant_violation": "log10_qi",
+            "hv_at_decision": 0.0,
+            "record_hv": 1.0,
+            "stagnation_cycles": 2,
+        },
+    )
+    result = decide(
+        profile=profile,
+        observation=observation,
+        model="codex",
+        session_id="sess-6",
+        decision_file=None,
+        decision_command="codex run --json",
+        repair_attempts=0,
+    )
+    assert result.validated_decision.selected_action == "repair"

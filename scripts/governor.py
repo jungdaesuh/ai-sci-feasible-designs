@@ -25,7 +25,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, TextIO
 
 import numpy as np
 
@@ -46,6 +46,7 @@ from ai_scientist.p3_enqueue import candidate_seed, sanitize_candidate_boundary
 from ai_scientist.problem_profiles import (
     FrontierRecipeConfig,
     ProblemProfile,
+    RunSurgeryPolicy,
     get_problem_profile,
 )
 from ai_scientist.staged_governor import (
@@ -66,6 +67,37 @@ _ROUTER_REWARD_WINDOW = 20
 _ROUTER_REWARD_FEASIBLE_WEIGHT = 0.5
 _ROUTER_REWARD_HV_WEIGHT = 0.5
 _RESUME_MANIFEST_VERSION = 1
+
+
+@dataclass
+class WorkerRuntime:
+    worker_id: int
+    process: subprocess.Popen[str]
+    log_handle: TextIO
+    cmd: list[str]
+    log_path: Path
+
+
+@dataclass(frozen=True)
+class AutonomyProgress:
+    last_metric_count: int
+    best_feasibility_seen: float | None
+    best_objective_feasible_seen: float | None
+    evals_since_feasibility_improve: int
+    evals_since_objective_improve: int
+
+
+@dataclass
+class RunSurgeryState:
+    no_objective_progress_windows: int = 0
+    no_feasibility_progress_windows: int = 0
+    previous_action_signature: str | None = None
+    last_action_signature: str | None = None
+    same_action_windows: int = 0
+    operator_shift_lock_remaining: int = 0
+    operator_shift_index: int = 0
+    autoscale_cooldown_remaining: int = 0
+    last_rebootstrap_pair_hash: str | None = None
 
 
 def _default_proposal_script(problem: str) -> str:
@@ -173,7 +205,10 @@ def _command_seed_base(cmd: ProposalCommand) -> int:
     value = _cmd_flag_value(cmd, "--seed-base")
     if value is None:
         raise ValueError("Proposal command missing --seed-base.")
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError("Proposal command has invalid --seed-base.") from exc
 
 
 def _expected_candidates_for_command(cmd: ProposalCommand) -> int:
@@ -190,9 +225,12 @@ def _expected_candidates_for_command(cmd: ProposalCommand) -> int:
     t_step = _cmd_flag_value(cmd, "--t-step")
     if t_min is None or t_max is None or t_step is None:
         return 1
-    t_min_f = float(t_min)
-    t_max_f = float(t_max)
-    t_step_f = float(t_step)
+    try:
+        t_min_f = float(t_min)
+        t_max_f = float(t_max)
+        t_step_f = float(t_step)
+    except ValueError:
+        return 1
     if t_step_f <= 0:
         return 1
     if t_min_f > t_max_f + 1e-12:
@@ -438,15 +476,24 @@ def _cmd_flag_values(cmd: ProposalCommand, flag: str) -> list[str]:
 def _blend_t_values_for_command(cmd: ProposalCommand) -> list[float]:
     explicit_values = _cmd_flag_values(cmd, "--t")
     if explicit_values:
-        return [float(value) for value in explicit_values]
+        out: list[float] = []
+        for value in explicit_values:
+            try:
+                out.append(float(value))
+            except ValueError:
+                return []
+        return out
     t_min = _cmd_flag_value(cmd, "--t-min")
     t_max = _cmd_flag_value(cmd, "--t-max")
     t_step = _cmd_flag_value(cmd, "--t-step")
     if t_min is None or t_max is None or t_step is None:
         return []
-    t_min_f = float(t_min)
-    t_max_f = float(t_max)
-    t_step_f = float(t_step)
+    try:
+        t_min_f = float(t_min)
+        t_max_f = float(t_max)
+        t_step_f = float(t_step)
+    except ValueError:
+        return []
     if t_step_f <= 0.0:
         return []
     out: list[float] = []
@@ -470,7 +517,10 @@ def _candidate_replay_specs_for_command(
     cmd: ProposalCommand,
     batch_id: int,
 ) -> list[_ReplayCandidateSpec]:
-    seed_base = _command_seed_base(cmd)
+    try:
+        seed_base = _command_seed_base(cmd)
+    except ValueError:
+        return []
     expected = _expected_candidates_for_command(cmd)
     if expected <= 0:
         return []
@@ -497,6 +547,30 @@ def _candidate_replay_specs_for_command(
             )
         )
     return out
+
+
+def _is_replay_command_valid(cmd: ProposalCommand) -> bool:
+    seed_base = _cmd_flag_value(cmd, "--seed-base")
+    if seed_base is not None:
+        try:
+            int(seed_base)
+        except ValueError:
+            return False
+    expected = _expected_candidates_for_command(cmd)
+    if expected <= 0:
+        return False
+    if _command_family(cmd) != "blend":
+        return True
+    has_explicit_t = bool(_cmd_flag_values(cmd, "--t"))
+    has_t_range = (
+        _cmd_flag_value(cmd, "--t-min") is not None
+        or _cmd_flag_value(cmd, "--t-max") is not None
+        or _cmd_flag_value(cmd, "--t-step") is not None
+    )
+    if not has_explicit_t and not has_t_range:
+        return True
+    t_values = _blend_t_values_for_command(cmd)
+    return len(t_values) == int(expected)
 
 
 def _build_replay_command_for_spec(spec: _ReplayCandidateSpec) -> ProposalCommand:
@@ -676,6 +750,9 @@ def _startup_replay_commands(
                 replay_cmds.append(_build_replay_command_for_spec(spec))
             partial_replay_batches.append(batch_id)
             continue
+        if any(not _is_replay_command_valid(cmd) for cmd in cycle_cmds):
+            partial_skipped_batches.append(batch_id)
+            continue
         replay_cmds.extend(cycle_cmds)
         replay_batches.append(batch_id)
     diagnostics = {
@@ -812,6 +889,132 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _resolve_worker_script_path(worker_script: str) -> Path:
+    script_path = Path(worker_script)
+    if not script_path.is_absolute():
+        script_path = _REPO_ROOT / script_path
+    return script_path.resolve()
+
+
+def _spawn_worker_runtime(
+    *,
+    worker_id: int,
+    problem: str,
+    db: Path,
+    experiment_id: int,
+    run_dir: Path,
+    worker_script_path: Path,
+    worker_limit: int,
+    worker_sleep_sec: float,
+) -> WorkerRuntime:
+    worker_log_dir = run_dir / "governor" / "workers"
+    worker_log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = worker_log_dir / f"worker_{int(worker_id):03}.log"
+    log_handle = log_path.open("a", encoding="utf-8")
+    cmd = [
+        sys.executable,
+        str(worker_script_path),
+        "--problem",
+        str(problem),
+        "--db",
+        str(db),
+        "--experiment-id",
+        str(int(experiment_id)),
+        "--run-dir",
+        str(run_dir),
+        "--worker-id",
+        str(int(worker_id)),
+        "--sleep-sec",
+        str(float(worker_sleep_sec)),
+        "--limit",
+        str(int(worker_limit)),
+    ]
+    process = subprocess.Popen(
+        cmd,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return WorkerRuntime(
+        worker_id=int(worker_id),
+        process=process,
+        log_handle=log_handle,
+        cmd=cmd,
+        log_path=log_path,
+    )
+
+
+def _start_worker_pool(
+    *,
+    workers: int,
+    problem: str,
+    db: Path,
+    experiment_id: int,
+    run_dir: Path,
+    worker_script_path: Path,
+    worker_limit: int,
+    worker_sleep_sec: float,
+) -> dict[int, WorkerRuntime]:
+    pool: dict[int, WorkerRuntime] = {}
+    for worker_id in range(1, int(workers) + 1):
+        pool[worker_id] = _spawn_worker_runtime(
+            worker_id=worker_id,
+            problem=problem,
+            db=db,
+            experiment_id=experiment_id,
+            run_dir=run_dir,
+            worker_script_path=worker_script_path,
+            worker_limit=worker_limit,
+            worker_sleep_sec=worker_sleep_sec,
+        )
+    return pool
+
+
+def _supervise_worker_pool(
+    *,
+    pool: dict[int, WorkerRuntime],
+    problem: str,
+    db: Path,
+    experiment_id: int,
+    run_dir: Path,
+    worker_script_path: Path,
+    worker_limit: int,
+    worker_sleep_sec: float,
+) -> None:
+    for worker_id, runtime in list(pool.items()):
+        return_code = runtime.process.poll()
+        if return_code is None:
+            continue
+        runtime.log_handle.write(
+            f"[{_utc_now_iso()}] worker={int(worker_id)} exited rc={int(return_code)}; restarting.\n"
+        )
+        runtime.log_handle.flush()
+        runtime.log_handle.close()
+        pool[worker_id] = _spawn_worker_runtime(
+            worker_id=worker_id,
+            problem=problem,
+            db=db,
+            experiment_id=experiment_id,
+            run_dir=run_dir,
+            worker_script_path=worker_script_path,
+            worker_limit=worker_limit,
+            worker_sleep_sec=worker_sleep_sec,
+        )
+
+
+def _stop_worker_pool(*, pool: dict[int, WorkerRuntime]) -> None:
+    for runtime in pool.values():
+        if runtime.process.poll() is None:
+            runtime.process.terminate()
+            try:
+                runtime.process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                runtime.process.kill()
+                runtime.process.wait(timeout=5.0)
+        runtime.log_handle.flush()
+        runtime.log_handle.close()
 
 
 def _status_bucket(status: str) -> str:
@@ -1517,6 +1720,802 @@ def _choose_frontier_partner(
     return best_candidate
 
 
+def _update_autonomy_progress(
+    *,
+    snapshot: Mapping[str, object],
+    progress: AutonomyProgress,
+) -> AutonomyProgress:
+    metric_count_raw = snapshot.get("metric_count")
+    metric_count = (
+        int(metric_count_raw)
+        if isinstance(metric_count_raw, int) and not isinstance(metric_count_raw, bool)
+        else int(progress.last_metric_count)
+    )
+    delta_evals = max(int(metric_count) - int(progress.last_metric_count), 0)
+
+    best_feasibility = _as_finite_float(snapshot.get("best_feasibility"))
+    best_objective_feasible = _as_finite_float(snapshot.get("best_objective_feasible"))
+    best_feasibility_seen = progress.best_feasibility_seen
+    best_objective_feasible_seen = progress.best_objective_feasible_seen
+
+    evals_since_feasibility_improve = int(progress.evals_since_feasibility_improve)
+    if best_feasibility is not None:
+        if (
+            best_feasibility_seen is None
+            or float(best_feasibility) < float(best_feasibility_seen) - 1e-12
+        ):
+            best_feasibility_seen = float(best_feasibility)
+            evals_since_feasibility_improve = 0
+        else:
+            evals_since_feasibility_improve += int(delta_evals)
+    else:
+        evals_since_feasibility_improve += int(delta_evals)
+
+    evals_since_objective_improve = int(progress.evals_since_objective_improve)
+    if best_objective_feasible is not None:
+        if (
+            best_objective_feasible_seen is None
+            or float(best_objective_feasible)
+            > float(best_objective_feasible_seen) + 1e-12
+        ):
+            best_objective_feasible_seen = float(best_objective_feasible)
+            evals_since_objective_improve = 0
+        else:
+            evals_since_objective_improve += int(delta_evals)
+    else:
+        evals_since_objective_improve += int(delta_evals)
+
+    return AutonomyProgress(
+        last_metric_count=int(metric_count),
+        best_feasibility_seen=best_feasibility_seen,
+        best_objective_feasible_seen=best_objective_feasible_seen,
+        evals_since_feasibility_improve=int(evals_since_feasibility_improve),
+        evals_since_objective_improve=int(evals_since_objective_improve),
+    )
+
+
+def _empty_run_surgery_event() -> dict[str, object]:
+    return {
+        "action": "none",
+        "reason": None,
+        "parent_pair": None,
+        "backlog_pruned_count": 0,
+        "operator_shift_lock_cycles": 0,
+        "forced_action": None,
+        "autoscale": None,
+    }
+
+
+def _compute_frontier_progress(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    eval_window: int,
+) -> dict[str, float | int | bool | None]:
+    window = max(int(eval_window), 1)
+    metric_id_rows = conn.execute(
+        """
+        SELECT m.id AS metric_id
+        FROM metrics m
+        JOIN candidates c ON c.id = m.candidate_id
+        WHERE c.experiment_id = ?
+        ORDER BY m.id DESC
+        LIMIT ?
+        """,
+        (int(experiment_id), int(window) + 1),
+    ).fetchall()
+    if not metric_id_rows:
+        return {
+            "metric_delta": 0,
+            "objective_delta": 0.0,
+            "feasibility_delta": 0.0,
+            "window_ready": False,
+            "anchor_metric_id": None,
+        }
+    anchor_metric_id: int | None = None
+    if len(metric_id_rows) > int(window):
+        anchor_metric_id = int(metric_id_rows[-1]["metric_id"])
+
+    current = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS metric_count,
+            MIN(m.feasibility) AS best_feasibility,
+            MAX(CASE WHEN m.feasibility <= 0.01 THEN m.objective END) AS best_objective_feasible
+        FROM metrics m
+        JOIN candidates c ON c.id = m.candidate_id
+        WHERE c.experiment_id = ?
+        """,
+        (int(experiment_id),),
+    ).fetchone()
+    current_count = int(current["metric_count"]) if current is not None else 0
+    current_best_feasibility = (
+        _as_finite_float(current["best_feasibility"]) if current is not None else None
+    )
+    current_best_objective = (
+        _as_finite_float(current["best_objective_feasible"])
+        if current is not None
+        else None
+    )
+
+    previous_count = 0
+    previous_best_feasibility: float | None = None
+    previous_best_objective: float | None = None
+    if anchor_metric_id is not None and anchor_metric_id > 0:
+        previous = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS metric_count,
+                MIN(m.feasibility) AS best_feasibility,
+                MAX(CASE WHEN m.feasibility <= 0.01 THEN m.objective END) AS best_objective_feasible
+            FROM metrics m
+            JOIN candidates c ON c.id = m.candidate_id
+            WHERE c.experiment_id = ? AND m.id <= ?
+            """,
+            (int(experiment_id), int(anchor_metric_id)),
+        ).fetchone()
+        if previous is not None:
+            previous_count = int(previous["metric_count"])
+            previous_best_feasibility = _as_finite_float(previous["best_feasibility"])
+            previous_best_objective = _as_finite_float(
+                previous["best_objective_feasible"]
+            )
+
+    feasibility_delta = 0.0
+    if previous_best_feasibility is not None and current_best_feasibility is not None:
+        feasibility_delta = float(previous_best_feasibility) - float(
+            current_best_feasibility
+        )
+    objective_delta = 0.0
+    if previous_best_objective is not None and current_best_objective is not None:
+        objective_delta = float(current_best_objective) - float(previous_best_objective)
+    metric_delta = max(int(current_count) - int(previous_count), 0)
+    return {
+        "metric_delta": int(metric_delta),
+        "objective_delta": float(objective_delta),
+        "feasibility_delta": float(feasibility_delta),
+        "window_ready": bool(anchor_metric_id is not None),
+        "anchor_metric_id": anchor_metric_id,
+    }
+
+
+def _detect_stall(
+    progress: Mapping[str, object],
+    *,
+    policy: RunSurgeryPolicy,
+) -> bool:
+    metric_delta = int(progress.get("metric_delta", 0))
+    objective_delta = float(progress.get("objective_delta", 0.0))
+    feasibility_delta = float(progress.get("feasibility_delta", 0.0))
+    if metric_delta < int(policy.eval_window):
+        return False
+    return objective_delta < float(
+        policy.min_objective_delta
+    ) and feasibility_delta < float(policy.min_feasibility_delta)
+
+
+def _rebootstrap_rows(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    where_clause: str,
+    args: tuple[object, ...],
+    limit: int,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        f"""
+        SELECT
+            c.id AS candidate_id,
+            c.design_hash AS design_hash,
+            c.params_json AS params_json,
+            m.feasibility AS feasibility,
+            m.objective AS objective,
+            m.is_feasible AS is_feasible
+        FROM metrics m
+        JOIN candidates c ON c.id = m.candidate_id
+        WHERE c.experiment_id = ? AND {where_clause}
+        ORDER BY m.objective DESC, m.feasibility ASC, c.id ASC
+        LIMIT ?
+        """,
+        (int(experiment_id), *args, int(limit)),
+    ).fetchall()
+
+
+def _decode_boundary_json(params_json: object) -> dict | None:
+    if not isinstance(params_json, str) or not params_json:
+        return None
+    try:
+        payload = json.loads(params_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return sanitize_candidate_boundary(payload)
+    except ValueError:
+        return None
+
+
+def _select_rebootstrap_pair(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    policy: RunSurgeryPolicy,
+    run_dir: Path,
+) -> tuple[Path, Path, str, str]:
+    feasible_rows = _rebootstrap_rows(
+        conn,
+        experiment_id=experiment_id,
+        where_clause="m.is_feasible = 1 AND m.objective IS NOT NULL",
+        args=(),
+        limit=int(policy.rebootstrap_top_feasible_k),
+    )
+    near_rows = _rebootstrap_rows(
+        conn,
+        experiment_id=experiment_id,
+        where_clause="m.feasibility >= ? AND m.feasibility <= ? AND m.objective IS NOT NULL",
+        args=(float(policy.nearfeasible_min), float(policy.nearfeasible_max)),
+        limit=int(policy.rebootstrap_top_nearfeasible_k),
+    )
+
+    def _first_valid(
+        rows: Sequence[sqlite3.Row], excluded_hashes: set[str]
+    ) -> dict | None:
+        for row in rows:
+            design_hash = str(row["design_hash"] or "")
+            if not design_hash or design_hash in excluded_hashes:
+                continue
+            boundary = _decode_boundary_json(row["params_json"])
+            if boundary is None:
+                continue
+            return {
+                "design_hash": design_hash,
+                "boundary": boundary,
+                "candidate_id": int(row["candidate_id"]),
+            }
+        return None
+
+    parent_a = _first_valid(near_rows, excluded_hashes=set())
+    source = "nearfeasible+feasible"
+    if parent_a is None:
+        parent_a = _first_valid(feasible_rows, excluded_hashes=set())
+        source = "feasible+feasible"
+    if parent_a is None:
+        raise ValueError("run_surgery_rebootstrap_unavailable:missing_parent_a")
+
+    parent_b = _first_valid(
+        feasible_rows,
+        excluded_hashes={str(parent_a["design_hash"])},
+    )
+    if parent_b is None:
+        parent_b = _first_valid(
+            near_rows,
+            excluded_hashes={str(parent_a["design_hash"])},
+        )
+        if parent_b is not None and source == "nearfeasible+feasible":
+            source = "nearfeasible+nearfeasible"
+    if parent_b is None:
+        raise ValueError("run_surgery_rebootstrap_unavailable:missing_parent_b")
+
+    parent_a_path = _ensure_parent_file(
+        run_dir,
+        design_hash=str(parent_a["design_hash"]),
+        boundary=parent_a["boundary"],
+    )
+    parent_b_path = _ensure_parent_file(
+        run_dir,
+        design_hash=str(parent_b["design_hash"]),
+        boundary=parent_b["boundary"],
+    )
+    pair_hash_payload = "|".join(
+        sorted(
+            [
+                str(parent_a["design_hash"]),
+                str(parent_b["design_hash"]),
+            ]
+        )
+    )
+    pair_hash = hashlib.sha256(pair_hash_payload.encode("utf-8")).hexdigest()
+    return parent_a_path, parent_b_path, source, pair_hash
+
+
+def _prune_backlog(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    policy: RunSurgeryPolicy,
+    reason: str,
+) -> int:
+    dominant = conn.execute(
+        """
+        SELECT model_route, operator_family, COUNT(*) AS n
+        FROM candidates
+        WHERE experiment_id = ? AND status = 'pending'
+        GROUP BY model_route, operator_family
+        ORDER BY n DESC, model_route ASC, operator_family ASC
+        LIMIT 1
+        """,
+        (int(experiment_id),),
+    ).fetchone()
+    if dominant is None:
+        return 0
+    dominant_count = int(dominant["n"])
+    if dominant_count < int(policy.backlog_prune_min_pending):
+        return 0
+    prune_count = int(math.floor(dominant_count * float(policy.backlog_prune_fraction)))
+    prune_count = max(prune_count, 1)
+    ids = conn.execute(
+        """
+        SELECT id
+        FROM candidates
+        WHERE experiment_id = ?
+          AND status = 'pending'
+          AND model_route = ?
+          AND operator_family = ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (
+            int(experiment_id),
+            str(dominant["model_route"] or ""),
+            str(dominant["operator_family"] or ""),
+            int(prune_count),
+        ),
+    ).fetchall()
+    if not ids:
+        return 0
+    deferred_status = f"deferred:auto_prune:{_utc_stamp()}:{reason}"
+    for row in ids:
+        conn.execute(
+            "UPDATE candidates SET status = ? WHERE id = ?",
+            (deferred_status, int(row["id"])),
+        )
+    return int(len(ids))
+
+
+def _apply_operator_shift_lock(
+    *,
+    state: RunSurgeryState,
+    profile: ProblemProfile,
+    partner_available: bool,
+) -> str | None:
+    if int(state.operator_shift_lock_remaining) <= 0:
+        return None
+    allowed: list[str] = []
+    if profile.allows_action("repair"):
+        allowed.append("repair")
+    if partner_available and profile.allows_action("bridge"):
+        allowed.append("bridge")
+    if profile.allows_action("jump"):
+        allowed.append("jump")
+    if not allowed:
+        state.operator_shift_lock_remaining = max(
+            int(state.operator_shift_lock_remaining) - 1,
+            0,
+        )
+        return "global_restart"
+    index = int(state.operator_shift_index) % len(allowed)
+    selected = allowed[index]
+    state.operator_shift_index = int(state.operator_shift_index) + 1
+    state.operator_shift_lock_remaining = max(
+        int(state.operator_shift_lock_remaining) - 1,
+        0,
+    )
+    return selected
+
+
+def _preferred_post_rebootstrap_action(
+    *,
+    profile: ProblemProfile,
+    partner_available: bool,
+) -> str:
+    if partner_available and profile.allows_action("bridge"):
+        return "bridge"
+    if profile.allows_action("jump"):
+        return "jump"
+    if profile.allows_action("repair"):
+        return "repair"
+    return "global_restart"
+
+
+def _terminate_worker_runtime(runtime: WorkerRuntime) -> None:
+    if runtime.process.poll() is None:
+        runtime.process.terminate()
+        try:
+            runtime.process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            runtime.process.kill()
+            runtime.process.wait(timeout=5.0)
+    runtime.log_handle.flush()
+    runtime.log_handle.close()
+
+
+def _resize_worker_pool(
+    *,
+    pool: dict[int, WorkerRuntime],
+    desired_workers: int,
+    problem: str,
+    db: Path,
+    experiment_id: int,
+    run_dir: Path,
+    worker_script_path: Path,
+    worker_limit: int,
+    worker_sleep_sec: float,
+) -> None:
+    desired = max(int(desired_workers), 0)
+    current = len(pool)
+    if desired == current:
+        return
+    if desired > current:
+        next_worker_id = max(pool.keys(), default=0) + 1
+        for worker_id in range(next_worker_id, next_worker_id + (desired - current)):
+            pool[int(worker_id)] = _spawn_worker_runtime(
+                worker_id=int(worker_id),
+                problem=problem,
+                db=db,
+                experiment_id=experiment_id,
+                run_dir=run_dir,
+                worker_script_path=worker_script_path,
+                worker_limit=worker_limit,
+                worker_sleep_sec=worker_sleep_sec,
+            )
+        return
+    removable = sorted(pool.keys(), reverse=True)[: current - desired]
+    for worker_id in removable:
+        runtime = pool.pop(int(worker_id))
+        _terminate_worker_runtime(runtime)
+
+
+def _maybe_run_surgery(
+    *,
+    conn: sqlite3.Connection,
+    experiment_id: int,
+    profile: ProblemProfile,
+    run_dir: Path,
+    state: RunSurgeryState,
+    progress: Mapping[str, object],
+    pending_n: int,
+    target_queue: int,
+    current_workers: int,
+    invalid_parent_failure_streak: int,
+    partner_available: bool,
+    disable_run_surgery: bool,
+    disable_autoscale: bool,
+) -> dict | None:
+    policy = profile.autonomy_policy.run_surgery
+    metric_delta = int(progress.get("metric_delta", 0))
+    objective_delta = float(progress.get("objective_delta", 0.0))
+    feasibility_delta = float(progress.get("feasibility_delta", 0.0))
+    window_ready = bool(progress.get("window_ready", False))
+    if window_ready and metric_delta >= int(policy.eval_window):
+        if objective_delta < float(policy.min_objective_delta):
+            state.no_objective_progress_windows += 1
+        else:
+            state.no_objective_progress_windows = 0
+        if feasibility_delta < float(policy.min_feasibility_delta):
+            state.no_feasibility_progress_windows += 1
+        else:
+            state.no_feasibility_progress_windows = 0
+        if objective_delta < float(
+            policy.min_objective_delta
+        ) and feasibility_delta < float(policy.min_feasibility_delta):
+            if (
+                state.previous_action_signature is not None
+                and state.previous_action_signature == state.last_action_signature
+            ):
+                state.same_action_windows += 1
+            else:
+                state.same_action_windows = 1
+        else:
+            state.same_action_windows = 0
+    if state.autoscale_cooldown_remaining > 0:
+        state.autoscale_cooldown_remaining -= 1
+
+    if not disable_run_surgery:
+        if int(invalid_parent_failure_streak) >= int(
+            policy.invalid_basin_failure_limit
+        ):
+            try:
+                parent_a, parent_b, pair_source, pair_hash = _select_rebootstrap_pair(
+                    conn,
+                    experiment_id=int(experiment_id),
+                    policy=policy,
+                    run_dir=run_dir,
+                )
+                state.operator_shift_lock_remaining = int(
+                    policy.operator_shift_lock_cycles
+                )
+                state.operator_shift_index = 0
+                state.last_rebootstrap_pair_hash = str(pair_hash)
+                return {
+                    "action": "rebootstrap_pair",
+                    "reason": "invalid_basin_escape",
+                    "parent_a": parent_a,
+                    "parent_b": parent_b,
+                    "parent_pair": {
+                        "hash": str(pair_hash),
+                        "source": str(pair_source),
+                        "parent_a": str(parent_a),
+                        "parent_b": str(parent_b),
+                    },
+                    "backlog_pruned_count": 0,
+                    "operator_shift_lock_cycles": int(
+                        state.operator_shift_lock_remaining
+                    ),
+                    "forced_action": "global_restart",
+                    "post_restart_forced_action": _preferred_post_rebootstrap_action(
+                        profile=profile,
+                        partner_available=partner_available,
+                    ),
+                }
+            except ValueError:
+                state.operator_shift_lock_remaining = max(
+                    int(state.operator_shift_lock_remaining),
+                    int(policy.operator_shift_lock_cycles),
+                )
+                state.operator_shift_index = 0
+                return {
+                    "action": "invalid_basin_escape",
+                    "reason": "invalid_basin_escape_no_rebootstrap_pair",
+                    "parent_pair": None,
+                    "backlog_pruned_count": 0,
+                    "operator_shift_lock_cycles": int(
+                        state.operator_shift_lock_remaining
+                    ),
+                    "forced_action": "global_restart",
+                    "post_restart_forced_action": _preferred_post_rebootstrap_action(
+                        profile=profile,
+                        partner_available=partner_available,
+                    ),
+                }
+
+        stalled = _detect_stall(progress, policy=policy)
+        if stalled and (
+            state.no_objective_progress_windows >= int(policy.objective_stall_windows)
+            or state.no_feasibility_progress_windows
+            >= int(policy.feasibility_stall_windows)
+        ):
+            try:
+                parent_a, parent_b, pair_source, pair_hash = _select_rebootstrap_pair(
+                    conn,
+                    experiment_id=int(experiment_id),
+                    policy=policy,
+                    run_dir=run_dir,
+                )
+                state.operator_shift_lock_remaining = int(
+                    policy.operator_shift_lock_cycles
+                )
+                state.operator_shift_index = 0
+                state.last_rebootstrap_pair_hash = str(pair_hash)
+                return {
+                    "action": "rebootstrap_pair",
+                    "reason": "stall_no_frontier_progress",
+                    "parent_a": parent_a,
+                    "parent_b": parent_b,
+                    "parent_pair": {
+                        "hash": str(pair_hash),
+                        "source": str(pair_source),
+                        "parent_a": str(parent_a),
+                        "parent_b": str(parent_b),
+                    },
+                    "backlog_pruned_count": 0,
+                    "operator_shift_lock_cycles": int(
+                        state.operator_shift_lock_remaining
+                    ),
+                    "forced_action": "global_restart",
+                    "post_restart_forced_action": _preferred_post_rebootstrap_action(
+                        profile=profile,
+                        partner_available=partner_available,
+                    ),
+                }
+            except ValueError:
+                pass
+            if int(pending_n) >= int(policy.backlog_prune_min_pending):
+                pruned_count = _prune_backlog(
+                    conn,
+                    experiment_id=int(experiment_id),
+                    policy=policy,
+                    reason="stall",
+                )
+                if pruned_count > 0:
+                    return {
+                        "action": "backlog_prune",
+                        "reason": "stall_backlog_prune",
+                        "parent_pair": None,
+                        "backlog_pruned_count": int(pruned_count),
+                        "operator_shift_lock_cycles": int(
+                            state.operator_shift_lock_remaining
+                        ),
+                        "forced_action": None,
+                    }
+            if int(state.same_action_windows) >= int(policy.max_same_action_windows):
+                state.operator_shift_lock_remaining = max(
+                    int(state.operator_shift_lock_remaining),
+                    int(policy.operator_shift_lock_cycles),
+                )
+                state.operator_shift_index = 0
+                forced_action = _apply_operator_shift_lock(
+                    state=state,
+                    profile=profile,
+                    partner_available=partner_available,
+                )
+                return {
+                    "action": "operator_shift_lock",
+                    "reason": "stall_same_action_repeat",
+                    "parent_pair": None,
+                    "backlog_pruned_count": 0,
+                    "operator_shift_lock_cycles": int(
+                        state.operator_shift_lock_remaining
+                    ),
+                    "forced_action": forced_action,
+                }
+
+        if int(state.operator_shift_lock_remaining) > 0:
+            forced_action = _apply_operator_shift_lock(
+                state=state,
+                profile=profile,
+                partner_available=partner_available,
+            )
+            return {
+                "action": "operator_shift_lock",
+                "reason": "lock_active",
+                "parent_pair": None,
+                "backlog_pruned_count": 0,
+                "operator_shift_lock_cycles": int(state.operator_shift_lock_remaining),
+                "forced_action": forced_action,
+            }
+
+    if (
+        not disable_autoscale
+        and bool(policy.autoscale_enabled)
+        and int(state.autoscale_cooldown_remaining) <= 0
+    ):
+        queue_ratio = float(pending_n) / float(max(target_queue, 1))
+        if queue_ratio >= float(policy.autoscale_up_pending_ratio) and int(
+            current_workers
+        ) < int(policy.autoscale_max_workers):
+            desired_workers = min(
+                int(policy.autoscale_max_workers),
+                int(current_workers) + int(policy.autoscale_step),
+            )
+            state.autoscale_cooldown_remaining = int(policy.autoscale_cooldown_cycles)
+            return {
+                "action": "autoscale_up",
+                "reason": "queue_pressure_high",
+                "desired_workers": int(desired_workers),
+                "parent_pair": None,
+                "backlog_pruned_count": 0,
+                "operator_shift_lock_cycles": int(state.operator_shift_lock_remaining),
+                "forced_action": None,
+            }
+        if queue_ratio <= float(policy.autoscale_down_pending_ratio) and int(
+            current_workers
+        ) > int(policy.autoscale_min_workers):
+            desired_workers = max(
+                int(policy.autoscale_min_workers),
+                int(current_workers) - int(policy.autoscale_step),
+            )
+            state.autoscale_cooldown_remaining = int(policy.autoscale_cooldown_cycles)
+            return {
+                "action": "autoscale_down",
+                "reason": "queue_pressure_low",
+                "desired_workers": int(desired_workers),
+                "parent_pair": None,
+                "backlog_pruned_count": 0,
+                "operator_shift_lock_cycles": int(state.operator_shift_lock_remaining),
+                "forced_action": None,
+            }
+    return None
+
+
+def _action_signature(
+    *,
+    action: str | None,
+    model_route: str | None,
+    parent_pair_hash: str | None,
+) -> str:
+    action_name = str(action).strip().lower() if action is not None else "none"
+    route_name = str(model_route).strip().lower() if model_route is not None else "none"
+    pair_hash = str(parent_pair_hash).strip().lower() if parent_pair_hash else "none"
+    return f"{action_name}|{route_name}|{pair_hash}"
+
+
+def _best_feasibility_candidate(
+    candidates: Sequence[CandidateRow],
+) -> CandidateRow | None:
+    pool = [
+        candidate
+        for candidate in candidates
+        if math.isfinite(float(candidate.feasibility))
+    ]
+    if not pool:
+        return None
+    return min(pool, key=lambda candidate: float(candidate.feasibility))
+
+
+def _best_feasible_objective_candidate(
+    candidates: Sequence[CandidateRow],
+    *,
+    profile: ProblemProfile,
+) -> CandidateRow | None:
+    feasible_pool: list[tuple[CandidateRow, float]] = []
+    for candidate in candidates:
+        if not candidate.is_feasible:
+            continue
+        objective_utility = _objective_for_profile(candidate, profile=profile)
+        if objective_utility is None:
+            continue
+        feasible_pool.append((candidate, float(objective_utility)))
+    if not feasible_pool:
+        return None
+    best_candidate, _best_utility = max(feasible_pool, key=lambda item: item[1])
+    return best_candidate
+
+
+def _best_objective_candidate(
+    candidates: Sequence[CandidateRow],
+    *,
+    profile: ProblemProfile,
+    exclude_hashes: set[str] | None = None,
+) -> CandidateRow | None:
+    excluded = exclude_hashes or set()
+    pool: list[tuple[CandidateRow, float]] = []
+    for candidate in candidates:
+        if candidate.design_hash in excluded:
+            continue
+        objective_utility = _objective_for_profile(candidate, profile=profile)
+        if objective_utility is None:
+            continue
+        pool.append((candidate, float(objective_utility)))
+    if not pool:
+        return None
+    best_candidate, _best_utility = max(pool, key=lambda item: item[1])
+    return best_candidate
+
+
+def _autonomous_focus_partner(
+    *,
+    candidates: list[CandidateRow],
+    profile: ProblemProfile,
+    strategy: str,
+) -> tuple[CandidateRow, CandidateRow | None] | None:
+    if strategy == "bridge_obj":
+        focus = _best_feasible_objective_candidate(candidates, profile=profile)
+        if focus is None:
+            focus = _best_feasibility_candidate(candidates)
+        if focus is None:
+            return None
+        partner = _best_objective_candidate(
+            candidates,
+            profile=profile,
+            exclude_hashes={focus.design_hash},
+        )
+        return focus, partner
+
+    if strategy == "exploit_feas":
+        pool = [
+            candidate
+            for candidate in candidates
+            if math.isfinite(float(candidate.feasibility))
+        ]
+        if not pool:
+            return None
+        ranked = sorted(pool, key=lambda candidate: float(candidate.feasibility))
+        focus = ranked[0]
+        partner = None
+        for candidate in ranked[1:]:
+            if candidate.design_hash != focus.design_hash:
+                partner = candidate
+                break
+        if partner is None:
+            partner = _best_feasible_objective_candidate(candidates, profile=profile)
+            if partner is not None and partner.design_hash == focus.design_hash:
+                partner = None
+        return focus, partner
+
+    return None
+
+
 def _focus_partner_via_shared_staged_plan(
     candidates: list[CandidateRow],
     *,
@@ -2205,7 +3204,9 @@ def _current_snapshot(
         """
         SELECT
             MIN(m.feasibility) AS best_feasibility,
-            SUM(CASE WHEN m.is_feasible = 1 THEN 1 ELSE 0 END) AS feasible_count
+            SUM(CASE WHEN m.is_feasible = 1 THEN 1 ELSE 0 END) AS feasible_count,
+            COUNT(*) AS metric_count,
+            MAX(CASE WHEN m.feasibility <= 0.01 THEN m.objective ELSE NULL END) AS best_objective_feasible
         FROM metrics m
         JOIN candidates c ON c.id = m.candidate_id
         WHERE c.experiment_id = ?
@@ -2214,15 +3215,23 @@ def _current_snapshot(
     ).fetchone()
     best_feasibility = None
     feasible_count = 0
+    metric_count = 0
+    best_objective_feasible = None
     if row is not None:
         best_feasibility = _as_finite_float(row["best_feasibility"])
         feasible_raw = row["feasible_count"]
         if feasible_raw is not None:
             feasible_count = int(feasible_raw)
+        metric_raw = row["metric_count"]
+        if metric_raw is not None:
+            metric_count = int(metric_raw)
+        best_objective_feasible = _as_finite_float(row["best_objective_feasible"])
     return {
         "best_feasibility": best_feasibility,
+        "best_objective_feasible": best_objective_feasible,
         "hv": float(hv_value),
         "feasible_count": int(feasible_count),
+        "metric_count": int(metric_count),
     }
 
 
@@ -3882,9 +4891,39 @@ def main(argv: list[str] | None = None) -> None:
         default=2,
         help="Retry count for in-session LLM self-repair on invalid/missing output.",
     )
+    parser.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="Enable self-driving loop: supervise workers and apply stall-driven steering.",
+    )
+    parser.add_argument(
+        "--autonomous-worker-script",
+        type=str,
+        default="scripts/p3_worker.py",
+        help="Worker script path used by autonomous supervisor.",
+    )
+    parser.add_argument(
+        "--autonomous-worker-limit",
+        type=int,
+        default=0,
+        help="Per-worker evaluation cap in autonomous mode (0 = unlimited).",
+    )
+    parser.add_argument(
+        "--autonomy-disable-run-surgery",
+        action="store_true",
+        help="Disable run-surgery controller actions (rebootstrap/prune/operator-shift).",
+    )
+    parser.add_argument(
+        "--autonomy-disable-autoscale",
+        action="store_true",
+        help="Disable autonomous worker autoscaling.",
+    )
     args = parser.parse_args(argv)
 
     profile = get_problem_profile(args.problem)
+    if bool(args.autonomous):
+        args.execute = True
+        args.loop = True
     proposal_script = (
         str(args.proposal_script)
         if args.proposal_script is not None
@@ -3907,8 +4946,20 @@ def main(argv: list[str] | None = None) -> None:
     run_seed = int(resume_manifest["run_seed"])
     llm_decision_file, llm_decision_command, _ = _resolve_llm_transport(args)
     recipe_synthesis_interval = max(1, int(args.recipe_synthesis_interval))
+    worker_script_path = _resolve_worker_script_path(str(args.autonomous_worker_script))
+    if bool(args.autonomous) and not worker_script_path.exists():
+        raise ValueError(
+            f"Autonomous worker script does not exist: {worker_script_path}"
+        )
 
-    target_queue = int(args.workers) * int(args.queue_multiplier)
+    current_workers = int(args.workers)
+    if bool(args.autonomous):
+        run_surgery_policy = profile.autonomy_policy.run_surgery
+        current_workers = max(
+            int(run_surgery_policy.autoscale_min_workers),
+            min(int(current_workers), int(run_surgery_policy.autoscale_max_workers)),
+        )
+    target_queue = int(current_workers) * int(args.queue_multiplier)
     max_cycles = max(0, int(args.max_cycles))
     max_runtime_sec = max(0.0, float(args.max_runtime_sec))
     stagnation_stop_cap = int(args.max_stagnation_cycles)
@@ -3920,6 +4971,7 @@ def main(argv: list[str] | None = None) -> None:
     proposal_cycles_emitted = 0
 
     conn = _connect(args.db)
+    worker_pool: dict[int, WorkerRuntime] = {}
     try:
         schema_compatible, schema_reason = _schema_compatibility_status(conn)
         if not schema_compatible:
@@ -3975,7 +5027,37 @@ def main(argv: list[str] | None = None) -> None:
         invalid_parent_failure_streak = 0
         zero_yield_streak = 0
         force_action_next_cycle: str | None = None
+        run_surgery_state = RunSurgeryState()
+        autonomy_progress = AutonomyProgress(
+            last_metric_count=0,
+            best_feasibility_seen=None,
+            best_objective_feasible_seen=None,
+            evals_since_feasibility_improve=0,
+            evals_since_objective_improve=0,
+        )
+        if bool(args.autonomous):
+            worker_pool = _start_worker_pool(
+                workers=int(current_workers),
+                problem=profile.problem,
+                db=args.db,
+                experiment_id=int(args.experiment_id),
+                run_dir=args.run_dir,
+                worker_script_path=worker_script_path,
+                worker_limit=int(args.autonomous_worker_limit),
+                worker_sleep_sec=max(float(args.sleep_sec) * 0.25, 1.0),
+            )
         while True:
+            if bool(args.autonomous):
+                _supervise_worker_pool(
+                    pool=worker_pool,
+                    problem=profile.problem,
+                    db=args.db,
+                    experiment_id=int(args.experiment_id),
+                    run_dir=args.run_dir,
+                    worker_script_path=worker_script_path,
+                    worker_limit=int(args.autonomous_worker_limit),
+                    worker_sleep_sec=max(float(args.sleep_sec) * 0.25, 1.0),
+                )
             if max_cycles > 0 and proposal_cycles_emitted >= max_cycles:
                 print(
                     "stop_policy:max_cycles"
@@ -4031,12 +5113,42 @@ def main(argv: list[str] | None = None) -> None:
                 experiment_id=exp_id,
                 hv_value=hv_value,
             )
+            autonomy_progress = _update_autonomy_progress(
+                snapshot=snapshot,
+                progress=autonomy_progress,
+            )
+            autonomous_strategy: str | None = None
+            if bool(args.autonomous):
+                objective_stall_window = int(
+                    profile.autonomy_policy.autonomous_objective_stall_eval_window
+                )
+                feasibility_stall_window = int(
+                    profile.autonomy_policy.autonomous_feasibility_stall_eval_window
+                )
+                feasible_count_snapshot = snapshot.get("feasible_count")
+                feasible_count = (
+                    int(feasible_count_snapshot)
+                    if isinstance(feasible_count_snapshot, int)
+                    and not isinstance(feasible_count_snapshot, bool)
+                    else 0
+                )
+                if (
+                    int(autonomy_progress.evals_since_objective_improve)
+                    >= objective_stall_window
+                    and feasible_count > 0
+                ):
+                    autonomous_strategy = "bridge_obj"
+                elif (
+                    int(autonomy_progress.evals_since_feasibility_improve)
+                    >= feasibility_stall_window
+                ):
+                    autonomous_strategy = "exploit_feas"
 
             print(
                 f"[{_utc_now_iso()}] exp={exp_id} pending={pending_n}/{target_queue} hv={hv_value:.6f} record={float(args.record_hv):.6f}"
             )
 
-            if pending_n >= target_queue:
+            if pending_n >= target_queue and not bool(args.autonomous):
                 if not args.loop:
                     break
                 time.sleep(float(args.sleep_sec))
@@ -4189,7 +5301,51 @@ def main(argv: list[str] | None = None) -> None:
             )
 
             parent_group_meta: dict[str, object] | None = None
-            if args.adaptive:
+            if bool(args.autonomous) and autonomous_strategy is not None:
+                autonomous_selection = _autonomous_focus_partner(
+                    candidates=candidates,
+                    profile=profile,
+                    strategy=autonomous_strategy,
+                )
+                if autonomous_selection is not None:
+                    focus, partner = autonomous_selection
+                    parent_group_meta = {
+                        "group": f"autonomous:{autonomous_strategy}",
+                        "score": None,
+                        "candidate_count": 0,
+                    }
+                elif args.adaptive:
+                    parent_selection = _select_parent_group(
+                        candidates,
+                        max_feasibility=float(args.max_focus_feas),
+                    )
+                    if parent_selection is None:
+                        print("No parent-group candidate found in recent window.")
+                        if not args.loop:
+                            break
+                        time.sleep(float(args.sleep_sec))
+                        continue
+                    focus = parent_selection.focus
+                    partner = parent_selection.partner
+                    parent_group_meta = {
+                        "group": parent_selection.group,
+                        "score": parent_selection.score,
+                        "candidate_count": parent_selection.candidate_count,
+                    }
+                else:
+                    focus = _choose_focus(
+                        candidates, max_feasibility=float(args.max_focus_feas)
+                    )
+                    if focus is None:
+                        print("No autonomous focus candidate found in recent window.")
+                        if not args.loop:
+                            break
+                        time.sleep(float(args.sleep_sec))
+                        continue
+                    worst_name, _worst_val = _worst_constraint(focus.violations)
+                    worst = str(worst_name) if worst_name is not None else ""
+                    partner = _choose_partner(candidates, worst_constraint=worst)
+            elif args.adaptive:
                 parent_selection = _select_parent_group(
                     candidates,
                     max_feasibility=float(args.max_focus_feas),
@@ -4362,6 +5518,159 @@ def main(argv: list[str] | None = None) -> None:
                     f" reached={int(stagnation)} cap={int(stagnation_stop_cap)}"
                 )
                 break
+
+            run_surgery_event = _empty_run_surgery_event()
+            run_surgery_forced_action: str | None = None
+            run_surgery_parent_a: Path | None = None
+            run_surgery_parent_b: Path | None = None
+            run_surgery_parent_pair_hash: str | None = None
+            run_surgery_post_restart_forced_action: str | None = None
+            hard_restart_plan = policy_restart_plan in {
+                "global_restart",
+                "circuit_break",
+            }
+            if bool(args.autonomous):
+                run_surgery_result = _maybe_run_surgery(
+                    conn=conn,
+                    experiment_id=exp_id,
+                    profile=profile,
+                    run_dir=args.run_dir,
+                    state=run_surgery_state,
+                    progress=_compute_frontier_progress(
+                        conn,
+                        experiment_id=exp_id,
+                        eval_window=profile.autonomy_policy.run_surgery.eval_window,
+                    ),
+                    pending_n=int(pending_n),
+                    target_queue=int(target_queue),
+                    current_workers=int(current_workers),
+                    invalid_parent_failure_streak=int(invalid_parent_failure_streak),
+                    partner_available=partner is not None,
+                    disable_run_surgery=bool(args.autonomy_disable_run_surgery)
+                    or bool(hard_restart_plan),
+                    disable_autoscale=bool(args.autonomy_disable_autoscale),
+                )
+                if run_surgery_result is not None:
+                    run_surgery_event["action"] = str(
+                        run_surgery_result.get("action", "none")
+                    )
+                    run_surgery_event["reason"] = run_surgery_result.get("reason")
+                    run_surgery_event["parent_pair"] = run_surgery_result.get(
+                        "parent_pair"
+                    )
+                    run_surgery_event["backlog_pruned_count"] = int(
+                        run_surgery_result.get("backlog_pruned_count", 0)
+                    )
+                    run_surgery_event["operator_shift_lock_cycles"] = int(
+                        run_surgery_result.get("operator_shift_lock_cycles", 0)
+                    )
+                    run_surgery_event["forced_action"] = run_surgery_result.get(
+                        "forced_action"
+                    )
+                    run_surgery_event["autoscale"] = run_surgery_result.get("autoscale")
+                    action_name = str(run_surgery_result.get("action", "none"))
+                    if action_name == "rebootstrap_pair":
+                        parent_a_raw = run_surgery_result.get("parent_a")
+                        parent_b_raw = run_surgery_result.get("parent_b")
+                        if isinstance(parent_a_raw, (str, Path)) and isinstance(
+                            parent_b_raw, (str, Path)
+                        ):
+                            run_surgery_parent_a = Path(str(parent_a_raw))
+                            run_surgery_parent_b = Path(str(parent_b_raw))
+                        parent_pair_payload = run_surgery_result.get("parent_pair")
+                        if isinstance(parent_pair_payload, Mapping):
+                            pair_hash_raw = parent_pair_payload.get("hash")
+                            if isinstance(pair_hash_raw, str) and pair_hash_raw.strip():
+                                run_surgery_parent_pair_hash = pair_hash_raw.strip()
+                    forced_action_raw = run_surgery_result.get("forced_action")
+                    if isinstance(forced_action_raw, str) and forced_action_raw.strip():
+                        run_surgery_forced_action = forced_action_raw.strip()
+                    post_restart_action_raw = run_surgery_result.get(
+                        "post_restart_forced_action"
+                    )
+                    if (
+                        isinstance(post_restart_action_raw, str)
+                        and post_restart_action_raw.strip()
+                    ):
+                        run_surgery_post_restart_forced_action = (
+                            post_restart_action_raw.strip()
+                        )
+                    if action_name in {"autoscale_up", "autoscale_down"}:
+                        desired_workers_raw = run_surgery_result.get("desired_workers")
+                        if (
+                            isinstance(desired_workers_raw, int)
+                            and not isinstance(desired_workers_raw, bool)
+                            and desired_workers_raw > 0
+                            and desired_workers_raw != int(current_workers)
+                        ):
+                            workers_before = int(current_workers)
+                            _resize_worker_pool(
+                                pool=worker_pool,
+                                desired_workers=int(desired_workers_raw),
+                                problem=profile.problem,
+                                db=args.db,
+                                experiment_id=exp_id,
+                                run_dir=args.run_dir,
+                                worker_script_path=worker_script_path,
+                                worker_limit=int(args.autonomous_worker_limit),
+                                worker_sleep_sec=max(float(args.sleep_sec) * 0.25, 1.0),
+                            )
+                            current_workers = int(desired_workers_raw)
+                            target_queue = int(current_workers) * int(
+                                args.queue_multiplier
+                            )
+                            run_surgery_event["autoscale"] = {
+                                "workers_before": int(workers_before),
+                                "workers_after": int(current_workers),
+                                "target_queue_after": int(target_queue),
+                            }
+                    if action_name == "backlog_prune":
+                        pending = conn.execute(
+                            "SELECT COUNT(*) AS n FROM candidates WHERE experiment_id = ? AND status = 'pending'",
+                            (exp_id,),
+                        ).fetchone()
+                        pending_n = int(pending["n"]) if pending is not None else 0
+                        conn.commit()
+            if pending_n >= target_queue:
+                if str(run_surgery_event.get("action", "none")) != "none":
+                    surgery_artifact = {
+                        "batch_id": int(batch_id),
+                        "commands": [],
+                        "model_route": "governor_policy/run_surgery_only",
+                        "recipe_mode": "run_surgery_only",
+                        "problem": profile.problem,
+                        "proposal_script": proposal_script,
+                        "run_seed": run_seed,
+                        "seed_base": int(seed_base),
+                        "created_at": _utc_now_iso(),
+                        "run_surgery": {
+                            "action": run_surgery_event.get("action", "none"),
+                            "reason": run_surgery_event.get("reason"),
+                            "parent_pair": run_surgery_event.get("parent_pair"),
+                            "backlog_pruned_count": int(
+                                run_surgery_event.get("backlog_pruned_count", 0)
+                            ),
+                            "operator_shift_lock_cycles": int(
+                                run_surgery_event.get("operator_shift_lock_cycles", 0)
+                            ),
+                            "autoscale": run_surgery_event.get("autoscale"),
+                        },
+                    }
+                    artifact_path = (
+                        args.run_dir
+                        / "governor"
+                        / f"governor_batch_{batch_id:03}_{_utc_stamp()}.json"
+                    )
+                    _write_json(artifact_path, surgery_artifact)
+                    with conn:
+                        _log_governor_artifact(
+                            conn, experiment_id=exp_id, path=artifact_path
+                        )
+                if not args.loop:
+                    break
+                time.sleep(float(args.sleep_sec))
+                continue
+
             if args.llm_enabled:
                 lesson_summary = _lesson_summary(candidates, limit=40)
                 if recipe_rules:
@@ -4403,6 +5712,32 @@ def main(argv: list[str] | None = None) -> None:
                             invalid_parent_failure_streak
                         ),
                         "invalid_basin_escape_due": bool(invalid_basin_escape_due),
+                        "autonomous_enabled": bool(args.autonomous),
+                        "autonomous_strategy_hint": autonomous_strategy,
+                        "evals_since_feasibility_improve": int(
+                            autonomy_progress.evals_since_feasibility_improve
+                        ),
+                        "evals_since_objective_improve": int(
+                            autonomy_progress.evals_since_objective_improve
+                        ),
+                        "run_surgery_state": {
+                            "no_objective_progress_windows": int(
+                                run_surgery_state.no_objective_progress_windows
+                            ),
+                            "no_feasibility_progress_windows": int(
+                                run_surgery_state.no_feasibility_progress_windows
+                            ),
+                            "same_action_windows": int(
+                                run_surgery_state.same_action_windows
+                            ),
+                            "operator_shift_lock_remaining": int(
+                                run_surgery_state.operator_shift_lock_remaining
+                            ),
+                            "autoscale_cooldown_remaining": int(
+                                run_surgery_state.autoscale_cooldown_remaining
+                            ),
+                        },
+                        "current_workers": int(current_workers),
                     },
                 )
                 try:
@@ -4453,6 +5788,7 @@ def main(argv: list[str] | None = None) -> None:
             }
 
             effective_action = llm_selected_action
+            autonomous_forced_action: str | None = None
             deterministic_action = _deterministic_restart_action(
                 profile_problem=profile.problem,
                 policy_restart_plan=policy_restart_plan,
@@ -4468,6 +5804,16 @@ def main(argv: list[str] | None = None) -> None:
                     llm_fallback_reason = "policy_override_blocked:hard_restart_trigger"
                 effective_action = deterministic_action
                 force_action_next_cycle = None
+            elif run_surgery_forced_action is not None:
+                effective_action = str(run_surgery_forced_action)
+                if llm_fallback_reason is None:
+                    run_surgery_reason = str(
+                        run_surgery_event.get("reason")
+                        or run_surgery_event.get("action")
+                    )
+                    llm_fallback_reason = (
+                        f"policy_override:run_surgery:{run_surgery_reason}"
+                    )
             elif force_action_next_cycle is not None:
                 zero_yield_forced_action = str(force_action_next_cycle)
                 effective_action = zero_yield_forced_action
@@ -4476,6 +5822,23 @@ def main(argv: list[str] | None = None) -> None:
                 force_action_next_cycle = None
             elif effective_action is None:
                 effective_action = deterministic_action
+            if (
+                bool(args.autonomous)
+                and autonomous_strategy is not None
+                and not hard_restart_lock
+            ):
+                desired_action = (
+                    "bridge"
+                    if profile.allows_action("bridge") and partner is not None
+                    else "repair"
+                )
+                if effective_action != desired_action:
+                    autonomous_forced_action = desired_action
+                    if llm_fallback_reason is None:
+                        llm_fallback_reason = (
+                            f"policy_override:autonomous_{autonomous_strategy}"
+                        )
+                    effective_action = desired_action
             should_circuit_break = policy_restart_plan == "circuit_break"
 
             route_prefix: str | None = None
@@ -4525,8 +5888,16 @@ def main(argv: list[str] | None = None) -> None:
                             focus=focus,
                             partner=partner,
                             candidates=candidates,
-                            bootstrap_parent_a=args.bootstrap_parent_a,
-                            bootstrap_parent_b=args.bootstrap_parent_b,
+                            bootstrap_parent_a=(
+                                run_surgery_parent_a
+                                if run_surgery_parent_a is not None
+                                else args.bootstrap_parent_a
+                            ),
+                            bootstrap_parent_b=(
+                                run_surgery_parent_b
+                                if run_surgery_parent_b is not None
+                                else args.bootstrap_parent_b
+                            ),
                             run_seed=run_seed,
                         )
                     )
@@ -4539,6 +5910,13 @@ def main(argv: list[str] | None = None) -> None:
                             t_step=float(args.bootstrap_t_step),
                         )
                     )
+                    if str(run_surgery_event.get("action")) == "rebootstrap_pair":
+                        restart_t_min = max(0.0, float(restart_t_min) - 0.05)
+                        restart_t_max = min(1.0, float(restart_t_max) + 0.05)
+                        restart_t_step = max(0.002, float(restart_t_step) * 0.75)
+                        restart_parent_source = (
+                            f"{restart_parent_source}+run_surgery_rebootstrap"
+                        )
                     restart_route = "governor_llm/global_restart"
                     restart_cmd = _build_blend_cmd(
                         proposal_script=proposal_script,
@@ -4894,6 +6272,18 @@ def main(argv: list[str] | None = None) -> None:
                 "selected": policy_restart_plan,
                 "invalid_basin_escape_due": bool(invalid_basin_escape_due),
             }
+            decision["run_surgery"] = {
+                "action": run_surgery_event.get("action", "none"),
+                "reason": run_surgery_event.get("reason"),
+                "parent_pair": run_surgery_event.get("parent_pair"),
+                "backlog_pruned_count": int(
+                    run_surgery_event.get("backlog_pruned_count", 0)
+                ),
+                "operator_shift_lock_cycles": int(
+                    run_surgery_event.get("operator_shift_lock_cycles", 0)
+                ),
+                "autoscale": run_surgery_event.get("autoscale"),
+            }
             decision["llm"] = {
                 "enabled": bool(args.llm_enabled),
                 "model": str(args.llm_model),
@@ -4935,6 +6325,15 @@ def main(argv: list[str] | None = None) -> None:
                 "expected_candidate_count": int(expected_candidate_count),
             }
             decision["autonomy_gates"] = {
+                "autonomous_enabled": bool(args.autonomous),
+                "autonomous_strategy_hint": autonomous_strategy,
+                "autonomous_forced_action": autonomous_forced_action,
+                "evals_since_feasibility_improve": int(
+                    autonomy_progress.evals_since_feasibility_improve
+                ),
+                "evals_since_objective_improve": int(
+                    autonomy_progress.evals_since_objective_improve
+                ),
                 "diversity_floor_min_candidates": int(diversity_floor),
                 "diversity_floor_triggered": bool(diversity_floor_triggered),
                 "diversity_forced_action": diversity_forced_action,
@@ -4949,6 +6348,13 @@ def main(argv: list[str] | None = None) -> None:
                 "knob_signature": knob_signature,
                 "invalid_parent_failure_streak": int(invalid_parent_failure_streak),
                 "invalid_basin_escape_due": bool(invalid_basin_escape_due),
+                "run_surgery_action": run_surgery_event.get("action", "none"),
+                "run_surgery_forced_action": run_surgery_forced_action,
+                "run_surgery_operator_shift_lock_remaining": int(
+                    run_surgery_state.operator_shift_lock_remaining
+                ),
+                "current_workers": int(current_workers),
+                "target_queue": int(target_queue),
             }
             decision["parent_sanitization"] = {
                 "focus_source": str(parent_sanitization.get("focus_source", "unknown")),
@@ -4963,6 +6369,16 @@ def main(argv: list[str] | None = None) -> None:
                 ),
             }
             model_route = str(decision.get("model_route", "unknown"))
+            if bool(args.autonomous):
+                action_signature = _action_signature(
+                    action=effective_action,
+                    model_route=model_route,
+                    parent_pair_hash=run_surgery_parent_pair_hash,
+                )
+                run_surgery_state.previous_action_signature = (
+                    run_surgery_state.last_action_signature
+                )
+                run_surgery_state.last_action_signature = action_signature
             _record_cycle_manifest(
                 manifest=resume_manifest,
                 path=manifest_path,
@@ -5058,9 +6474,19 @@ def main(argv: list[str] | None = None) -> None:
                         ),
                         "invalid_basin_escape_due": bool(invalid_basin_escape_due),
                         "parent_sanitization": dict(parent_sanitization),
+                        "autonomous_enabled": bool(args.autonomous),
+                        "autonomous_strategy_hint": autonomous_strategy,
+                        "autonomous_forced_action": autonomous_forced_action,
+                        "evals_since_feasibility_improve": int(
+                            autonomy_progress.evals_since_feasibility_improve
+                        ),
+                        "evals_since_objective_improve": int(
+                            autonomy_progress.evals_since_objective_improve
+                        ),
                         "phase_after_policy": phase_after_policy,
                         "restart_selected": policy_restart_plan,
                         "run_budget_remaining": run_budget_remaining,
+                        "run_surgery": dict(decision.get("run_surgery", {})),
                     },
                     outcome={
                         "pending_before": int(pending_n),
@@ -5068,6 +6494,7 @@ def main(argv: list[str] | None = None) -> None:
                         "hv_at_decision": float(hv_value),
                         "record_hv": float(args.record_hv),
                         "snapshot_at_decision": dict(snapshot),
+                        "current_workers": int(current_workers),
                     },
                 )
 
@@ -5098,7 +6525,13 @@ def main(argv: list[str] | None = None) -> None:
                         )
                 else:
                     zero_yield_streak = 0
-                    force_action_next_cycle = None
+                    if (
+                        run_surgery_post_restart_forced_action is not None
+                        and effective_action == "global_restart"
+                    ):
+                        force_action_next_cycle = run_surgery_post_restart_forced_action
+                    else:
+                        force_action_next_cycle = None
             proposal_cycles_emitted += 1
 
             if should_circuit_break:
@@ -5108,6 +6541,8 @@ def main(argv: list[str] | None = None) -> None:
                 break
             time.sleep(float(args.sleep_sec))
     finally:
+        if worker_pool:
+            _stop_worker_pool(pool=worker_pool)
         conn.close()
 
 

@@ -22,15 +22,20 @@ from ai_scientist.p3_enqueue import candidate_seed
 from ai_scientist.problem_profiles import get_problem_profile
 from scripts import p3_governor
 from scripts.p3_governor import (
+    AutonomyProgress,
     CandidateRow,
+    _autonomous_focus_partner,
     _build_blend_cmd,
     _build_jump_recipe_cmds,
     _build_llm_mutation_cmds,
     _build_scale_cmd,
     _choose_partner,
+    _consecutive_no_progress_action_repeats,
     _consecutive_transient_failures,
+    _sanitize_cycle_parents,
     _deterministic_restart_action,
     _dominant_violation_rate,
+    _empty_run_surgery_event,
     _fetch_candidates,
     _frontier_integrity_ok,
     _is_invalid_llm_override_reason,
@@ -39,6 +44,7 @@ from scripts.p3_governor import (
     _queue_desync_events_last20,
     _startup_replay_commands,
     _stagnation_cycles,
+    _update_autonomy_progress,
 )
 
 
@@ -1906,6 +1912,219 @@ def test_startup_replay_commands_skips_batches_with_pending_candidates(
     assert diagnostics["pending_skipped_batches"] == [9]
 
 
+def test_startup_replay_commands_allows_deferred_auto_prune_candidates(
+    tmp_path: Path,
+) -> None:
+    db = _make_db(tmp_path)
+    run_dir = tmp_path / "run"
+    (run_dir / "governor").mkdir(parents=True, exist_ok=True)
+    design_hash = "deferred_design_hash"
+    manifest = {
+        "experiment_id": 1,
+        "cycles": {
+            "1": {
+                "batch_id": 12,
+                "expected_candidates": 2,
+                "command_argvs": [
+                    [
+                        "python",
+                        "scripts/p3_propose.py",
+                        "--family",
+                        "blend",
+                        "--seed-base",
+                        "12000",
+                        "--t-min",
+                        "0.2",
+                        "--t-max",
+                        "0.4",
+                        "--t-step",
+                        "0.2",
+                    ]
+                ],
+            }
+        },
+    }
+    candidates_dir = run_dir / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    (candidates_dir / f"{design_hash}_meta.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": 1,
+                "batch_id": 12,
+                "seed": 12001,
+                "move_family": "blend",
+                "parents": [],
+                "knobs": {},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+    )
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            INSERT INTO candidates
+            (experiment_id, problem, params_json, seed, status, design_hash, operator_family, model_route)
+            VALUES (1, 'p3', '{}', 1, 'deferred:auto_prune:20260303T010101:stall', ?, 'blend', 'test')
+            """,
+            (design_hash,),
+        )
+        conn.commit()
+        cmds, diagnostics = _startup_replay_commands(
+            manifest=manifest,
+            run_dir=run_dir,
+            conn=conn,
+        )
+    finally:
+        conn.close()
+
+    assert len(cmds) == 1
+    assert diagnostics["pending_skipped_batches"] == []
+    assert diagnostics["partial_replay_batches"] == [12]
+
+
+def test_startup_replay_commands_skips_partial_batch_with_malformed_blend_numeric_flags(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "governor").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "experiment_id": 1,
+        "cycles": {
+            "1": {
+                "batch_id": 20,
+                "expected_candidates": 2,
+                "command_argvs": [
+                    [
+                        "python",
+                        "scripts/p3_propose.py",
+                        "--family",
+                        "blend",
+                        "--seed-base",
+                        "20000",
+                        "--t-min",
+                        "0.2",
+                        "--t-max",
+                        "0.4",
+                        "--t-step",
+                        "bad_step",
+                    ]
+                ],
+            }
+        },
+    }
+    candidates_dir = run_dir / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    (candidates_dir / "partial_bad_meta.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": 1,
+                "batch_id": 20,
+                "seed": 20001,
+                "move_family": "blend",
+                "parents": [],
+                "knobs": {},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+    )
+    cmds, diagnostics = _startup_replay_commands(manifest=manifest, run_dir=run_dir)
+    assert cmds == []
+    assert diagnostics["partial_replay_batches"] == []
+    assert diagnostics["partial_skipped_batches"] == [20]
+
+
+def test_startup_replay_commands_skips_partial_batch_with_invalid_seed_base(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "governor").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "experiment_id": 1,
+        "cycles": {
+            "1": {
+                "batch_id": 21,
+                "expected_candidates": 2,
+                "command_argvs": [
+                    [
+                        "python",
+                        "scripts/p3_propose.py",
+                        "--family",
+                        "blend",
+                        "--seed-base",
+                        "bad_seed",
+                        "--t-min",
+                        "0.2",
+                        "--t-max",
+                        "0.4",
+                        "--t-step",
+                        "0.2",
+                    ]
+                ],
+            }
+        },
+    }
+    candidates_dir = run_dir / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    (candidates_dir / "partial_bad_seed_meta.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": 1,
+                "batch_id": 21,
+                "seed": 21001,
+                "move_family": "blend",
+                "parents": [],
+                "knobs": {},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+    )
+    cmds, diagnostics = _startup_replay_commands(manifest=manifest, run_dir=run_dir)
+    assert cmds == []
+    assert diagnostics["partial_replay_batches"] == []
+    assert diagnostics["partial_skipped_batches"] == [21]
+
+
+def test_startup_replay_commands_skips_full_batch_with_malformed_command(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "governor").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "cycles": {
+            "1": {
+                "batch_id": 22,
+                "expected_candidates": 1,
+                "command_argvs": [
+                    [
+                        "python",
+                        "scripts/p3_propose.py",
+                        "--family",
+                        "scale_groups",
+                        "--seed-base",
+                        "not_an_int",
+                    ]
+                ],
+            }
+        }
+    }
+    cmds, diagnostics = _startup_replay_commands(manifest=manifest, run_dir=run_dir)
+    assert cmds == []
+    assert diagnostics["replay_batches"] == []
+    assert diagnostics["partial_skipped_batches"] == [22]
+
+
+def test_empty_run_surgery_event_contract_fields() -> None:
+    payload = _empty_run_surgery_event()
+    assert payload["action"] == "none"
+    assert "reason" in payload
+    assert "parent_pair" in payload
+    assert "backlog_pruned_count" in payload
+    assert "operator_shift_lock_cycles" in payload
+
+
 def test_dominant_violation_rate_uses_dominant_constraint_frequency() -> None:
     rows = [
         CandidateRow(
@@ -2353,3 +2572,299 @@ def test_governor_dry_run_profiles_llm_toggle(
     p3_governor.main()
     artifacts = sorted((run_dir / "governor").glob("governor_batch_*.json"))
     assert artifacts
+
+
+def _candidate_row_for_parent_tests(
+    *,
+    candidate_id: int,
+    design_hash: str,
+    params: dict | None,
+    is_feasible: bool = False,
+    feasibility: float = 0.2,
+) -> CandidateRow:
+    return CandidateRow(
+        candidate_id=candidate_id,
+        design_hash=design_hash,
+        seed=123 + candidate_id,
+        feasibility=float(feasibility),
+        is_feasible=bool(is_feasible),
+        lgradb=1.0,
+        aspect=8.0,
+        violations={"log10_qi": 0.2},
+        metrics={"aspect_ratio": 8.0, "lgradB": 1.0},
+        meta={},
+        lineage_parent_hashes=[],
+        novelty_score=0.1,
+        operator_family="scale_groups",
+        model_route="test",
+        params=params,
+    )
+
+
+def test_sanitize_cycle_parents_swaps_invalid_focus() -> None:
+    invalid_focus = _candidate_row_for_parent_tests(
+        candidate_id=1,
+        design_hash="invalid_focus",
+        params={
+            "r_cos": [[1.0, 0.0, "bad"]],
+            "z_sin": [[0.0, 0.0, 0.0]],
+            "n_field_periods": 3,
+            "is_stellarator_symmetric": True,
+        },
+    )
+    valid_parent = _candidate_row_for_parent_tests(
+        candidate_id=2,
+        design_hash="valid_parent",
+        params={
+            "r_cos": [[1.0, 0.0, 0.0]],
+            "z_sin": [[0.0, 0.0, 0.0]],
+            "n_field_periods": 3,
+            "is_stellarator_symmetric": True,
+        },
+        is_feasible=True,
+        feasibility=0.0,
+    )
+    focus, partner, details = _sanitize_cycle_parents(
+        focus=invalid_focus,
+        partner=None,
+        candidates=[invalid_focus, valid_parent],
+    )
+    assert focus is not None
+    assert focus.design_hash == "valid_parent"
+    assert partner is None
+    assert details["focus_source"] == "swapped_nearest_valid"
+    assert bool(details["invalid_parent_detected"])
+
+
+def test_consecutive_no_progress_action_repeats_counts_matching_signature(
+    tmp_path: Path,
+) -> None:
+    db = _make_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        for cycle in (1, 2):
+            conn.execute(
+                """
+                INSERT INTO scratchpad_events
+                (experiment_id, cycle, step, planner_intent_json, aso_action, intent_agreement,
+                 override_reason, diagnostics_json, outcome_json, created_at)
+                VALUES (?, ?, 0, '{}', 'repair', 'accepted', NULL, ?, '{}', '2026-01-01T00:00:00+00:00')
+                """,
+                (
+                    1,
+                    cycle,
+                    json.dumps(
+                        {
+                            "action": "repair",
+                            "predicted_target_metric": "log10_qi",
+                            "knob_signature": "sig_a",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO scratchpad_events
+                (experiment_id, cycle, step, planner_intent_json, aso_action, intent_agreement,
+                 override_reason, diagnostics_json, outcome_json, created_at)
+                VALUES (?, ?, 1, '{}', 'reflection', 'n/a', NULL, '{}', ?, '2026-01-01T00:00:00+00:00')
+                """,
+                (
+                    1,
+                    cycle,
+                    json.dumps(
+                        {
+                            "realized_feasibility_delta": 0.0,
+                            "realized_hv_delta": 0.0,
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
+        count = _consecutive_no_progress_action_repeats(
+            conn,
+            experiment_id=1,
+            action="repair",
+            target_constraint="log10_qi",
+            knob_signature="sig_a",
+        )
+        assert count == 2
+    finally:
+        conn.close()
+
+
+def test_update_autonomy_progress_tracks_eval_stall_windows() -> None:
+    progress = AutonomyProgress(
+        last_metric_count=0,
+        best_feasibility_seen=None,
+        best_objective_feasible_seen=None,
+        evals_since_feasibility_improve=0,
+        evals_since_objective_improve=0,
+    )
+    progress = _update_autonomy_progress(
+        snapshot={
+            "metric_count": 5,
+            "best_feasibility": 0.2,
+            "best_objective_feasible": 1.0,
+        },
+        progress=progress,
+    )
+    assert progress.last_metric_count == 5
+    assert progress.evals_since_feasibility_improve == 0
+    assert progress.evals_since_objective_improve == 0
+
+    progress = _update_autonomy_progress(
+        snapshot={
+            "metric_count": 8,
+            "best_feasibility": 0.2,
+            "best_objective_feasible": 1.0,
+        },
+        progress=progress,
+    )
+    assert progress.evals_since_feasibility_improve == 3
+    assert progress.evals_since_objective_improve == 3
+
+    progress = _update_autonomy_progress(
+        snapshot={
+            "metric_count": 10,
+            "best_feasibility": 0.19,
+            "best_objective_feasible": 1.1,
+        },
+        progress=progress,
+    )
+    assert progress.evals_since_feasibility_improve == 0
+    assert progress.evals_since_objective_improve == 0
+    assert progress.best_feasibility_seen == pytest.approx(0.19)
+    assert progress.best_objective_feasible_seen == pytest.approx(1.1)
+
+
+def test_autonomous_focus_partner_bridge_obj_uses_feasible_frontier_focus() -> None:
+    profile = get_problem_profile("p3")
+    candidates = [
+        CandidateRow(
+            candidate_id=1,
+            design_hash="a",
+            seed=1,
+            feasibility=0.009,
+            is_feasible=True,
+            lgradb=4.0,
+            aspect=9.0,
+            violations={},
+            metrics={"aspect_ratio": 9.0, "lgradB": 4.0},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=0.1,
+            operator_family="blend",
+            model_route="test",
+            params={
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            },
+        ),
+        CandidateRow(
+            candidate_id=2,
+            design_hash="b",
+            seed=2,
+            feasibility=0.05,
+            is_feasible=False,
+            lgradb=6.0,
+            aspect=11.0,
+            violations={"log10_qi": 0.2},
+            metrics={"aspect_ratio": 11.0, "lgradB": 6.0},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=0.1,
+            operator_family="scale_groups",
+            model_route="test",
+            params={
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            },
+        ),
+        CandidateRow(
+            candidate_id=3,
+            design_hash="c",
+            seed=3,
+            feasibility=0.02,
+            is_feasible=True,
+            lgradb=5.0,
+            aspect=10.0,
+            violations={},
+            metrics={"aspect_ratio": 10.0, "lgradB": 5.0},
+            meta={},
+            lineage_parent_hashes=[],
+            novelty_score=0.1,
+            operator_family="blend",
+            model_route="test",
+            params={
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            },
+        ),
+    ]
+    selection = _autonomous_focus_partner(
+        candidates=candidates,
+        profile=profile,
+        strategy="bridge_obj",
+    )
+    assert selection is not None
+    focus, partner = selection
+    assert focus.candidate_id == 3
+    assert partner is not None
+    assert partner.candidate_id == 2
+
+
+def test_autonomous_focus_partner_exploit_feas_uses_top_two_feasibility() -> None:
+    profile = get_problem_profile("p3")
+    candidates = [
+        _candidate_row_for_parent_tests(
+            candidate_id=10,
+            design_hash="f0",
+            params={
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            },
+            feasibility=0.01,
+        ),
+        _candidate_row_for_parent_tests(
+            candidate_id=11,
+            design_hash="f1",
+            params={
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            },
+            feasibility=0.02,
+        ),
+        _candidate_row_for_parent_tests(
+            candidate_id=12,
+            design_hash="f2",
+            params={
+                "r_cos": [[1.0]],
+                "z_sin": [[0.0]],
+                "n_field_periods": 3,
+                "is_stellarator_symmetric": True,
+            },
+            feasibility=0.03,
+        ),
+    ]
+    selection = _autonomous_focus_partner(
+        candidates=candidates,
+        profile=profile,
+        strategy="exploit_feas",
+    )
+    assert selection is not None
+    focus, partner = selection
+    assert focus.candidate_id == 10
+    assert partner is not None
+    assert partner.candidate_id == 11
