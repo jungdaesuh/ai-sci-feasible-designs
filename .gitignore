@@ -1,6 +1,7 @@
 # Runtime artifacts (kept out of VCS)
 artifacts/
 reports/
+runs/
 .cache/
 logs/
 *.h5
@@ -29,6 +30,10 @@ __pycache__/
 # IDE/editor directories
 .idea/
 .vscode/
+.codex/
+
+# Archived planning/doc dumps
+docs/archive/
 
 .hypothesis/
 
