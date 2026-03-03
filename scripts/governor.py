@@ -16,15 +16,16 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shlex
 import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -41,7 +42,7 @@ from ai_scientist.llm_controller import (
 from ai_scientist.model_router_reward import compute_model_router_reward
 from ai_scientist.novelty_gate import NoveltyCandidate, apply_two_stage_novelty_gate
 from ai_scientist.p3_data_plane import DataPlaneSample, summarize_data_plane
-from ai_scientist.p3_enqueue import candidate_seed
+from ai_scientist.p3_enqueue import candidate_seed, sanitize_candidate_boundary
 from ai_scientist.problem_profiles import (
     FrontierRecipeConfig,
     ProblemProfile,
@@ -198,6 +199,79 @@ def _expected_candidates_for_command(cmd: ProposalCommand) -> int:
         return 0
     count = int(math.floor((t_max_f - t_min_f) / t_step_f + 1e-12)) + 1
     return max(count, 0)
+
+
+def _expected_candidate_volume(cmds: Sequence[ProposalCommand]) -> int:
+    return int(sum(_expected_candidates_for_command(cmd) for cmd in cmds))
+
+
+def _command_knob_signature(cmds: Sequence[ProposalCommand]) -> str:
+    fingerprints = sorted(_command_fingerprint(cmd) for cmd in cmds)
+    payload = json.dumps(fingerprints, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _consecutive_no_progress_action_repeats(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    action: str,
+    target_constraint: str,
+    knob_signature: str,
+    limit: int = 20,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT
+            r.cycle AS cycle,
+            r.outcome_json AS reflection_outcome_json,
+            p.diagnostics_json AS plan_diagnostics_json
+        FROM scratchpad_events r
+        LEFT JOIN scratchpad_events p
+          ON p.experiment_id = r.experiment_id
+         AND p.cycle = r.cycle
+         AND p.step = 0
+        WHERE r.experiment_id = ?
+          AND r.step = 1
+          AND r.aso_action = 'reflection'
+        ORDER BY r.id DESC
+        LIMIT ?
+        """,
+        (int(experiment_id), int(limit)),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    count = 0
+    for row in rows:
+        try:
+            plan_diag = json.loads(str(row["plan_diagnostics_json"]))
+            outcome = json.loads(str(row["reflection_outcome_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            break
+        if not isinstance(plan_diag, dict) or not isinstance(outcome, dict):
+            break
+
+        row_action = str(plan_diag.get("action", ""))
+        row_target = str(plan_diag.get("predicted_target_metric", ""))
+        row_signature = str(plan_diag.get("knob_signature", ""))
+        if (
+            row_action != str(action)
+            or row_target != str(target_constraint)
+            or row_signature != str(knob_signature)
+        ):
+            break
+
+        realized_feas = _as_finite_float(outcome.get("realized_feasibility_delta"))
+        realized_hv = _as_finite_float(outcome.get("realized_hv_delta"))
+        has_progress = (realized_feas is not None and realized_feas > 0.0) or (
+            realized_hv is not None and realized_hv > 0.0
+        )
+        if has_progress:
+            break
+        count += 1
+
+    return count
 
 
 def _record_cycle_manifest(
@@ -513,7 +587,14 @@ def _startup_replay_commands(
     partial_replay_batches: list[int] = []
     partial_skipped_batches: list[int] = []
     pending_skipped_batches: list[int] = []
-    for key in sorted(cycles_raw.keys(), key=lambda item: int(str(item))):
+    sortable_cycle_keys: list[tuple[int, object]] = []
+    for key in cycles_raw.keys():
+        try:
+            sort_key = int(str(key))
+        except (TypeError, ValueError):
+            continue
+        sortable_cycle_keys.append((sort_key, key))
+    for _sort_key, key in sorted(sortable_cycle_keys, key=lambda item: item[0]):
         cycle_payload = cycles_raw.get(key)
         if not isinstance(cycle_payload, Mapping):
             continue
@@ -605,6 +686,19 @@ def _startup_replay_commands(
         "replay_command_count": len(replay_cmds),
     }
     return replay_cmds, diagnostics
+
+
+def _replay_cycle_emissions(diagnostics: Mapping[str, object]) -> int:
+    emitted: set[int] = set()
+    for key in ("replay_batches", "partial_replay_batches"):
+        values = diagnostics.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            emitted.add(int(value))
+    return len(emitted)
 
 
 def _table_columns(conn: sqlite3.Connection, *, table: str) -> set[str]:
@@ -887,6 +981,20 @@ def _next_batch_id(run_dir: Path) -> int:
     return max_batch + 1
 
 
+def _next_batch_id_from_manifest(
+    *, manifest: Mapping[str, object], run_dir: Path
+) -> int:
+    """Monotonic cycle clock: manifest first, filesystem only as compatibility floor."""
+    manifest_last_cycle = manifest.get("last_cycle")
+    manifest_next = 1
+    if isinstance(manifest_last_cycle, int) and not isinstance(
+        manifest_last_cycle, bool
+    ):
+        manifest_next = max(1, int(manifest_last_cycle) + 1)
+    fs_next = _next_batch_id(run_dir)
+    return max(manifest_next, int(fs_next))
+
+
 @dataclass(frozen=True)
 class CandidateRow:
     candidate_id: int
@@ -904,6 +1012,166 @@ class CandidateRow:
     operator_family: str
     model_route: str
     params: dict | None = None
+
+
+def _sanitize_candidate_params(candidate: CandidateRow) -> CandidateRow | None:
+    if not isinstance(candidate.params, dict):
+        return None
+    try:
+        sanitized = sanitize_candidate_boundary(candidate.params)
+    except ValueError:
+        return None
+    return replace(candidate, params=sanitized)
+
+
+def _boundary_vector(payload: Mapping[str, object]) -> list[float] | None:
+    try:
+        sanitized = sanitize_candidate_boundary(payload)
+    except ValueError:
+        return None
+    vector: list[float] = []
+    for matrix_key in ("r_cos", "z_sin"):
+        matrix = sanitized.get(matrix_key)
+        if not isinstance(matrix, list):
+            return None
+        for row in matrix:
+            if not isinstance(row, list):
+                return None
+            for value in row:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+                vector.append(float(value))
+    return vector
+
+
+def _boundary_distance(left: Sequence[float], right: Sequence[float]) -> float:
+    min_len = min(len(left), len(right))
+    max_len = max(len(left), len(right))
+    if min_len == 0:
+        return float(max_len)
+    total = 0.0
+    for idx in range(min_len):
+        diff = float(left[idx]) - float(right[idx])
+        total += diff * diff
+    total += float(max_len - min_len)
+    return float(math.sqrt(total))
+
+
+def _nearest_valid_parent(
+    *,
+    reference: CandidateRow,
+    valid_candidates: Sequence[CandidateRow],
+    exclude_hashes: set[str] | None = None,
+) -> CandidateRow | None:
+    excluded = exclude_hashes or set()
+    pool = [
+        candidate
+        for candidate in valid_candidates
+        if candidate.design_hash not in excluded
+    ]
+    if not pool:
+        return None
+
+    ref_vector = None
+    if isinstance(reference.params, dict):
+        ref_vector = _boundary_vector(reference.params)
+
+    if ref_vector is None:
+        return min(
+            pool,
+            key=lambda candidate: (
+                0 if candidate.is_feasible else 1,
+                float(candidate.feasibility),
+                -float(
+                    candidate.novelty_score
+                    if candidate.novelty_score is not None
+                    else 0.0
+                ),
+            ),
+        )
+
+    best: CandidateRow | None = None
+    best_dist = float("inf")
+    for candidate in pool:
+        if not isinstance(candidate.params, dict):
+            continue
+        vector = _boundary_vector(candidate.params)
+        if vector is None:
+            continue
+        dist = _boundary_distance(ref_vector, vector)
+        if dist < best_dist:
+            best = candidate
+            best_dist = dist
+    if best is not None:
+        return best
+    return min(
+        pool,
+        key=lambda candidate: (
+            0 if candidate.is_feasible else 1,
+            float(candidate.feasibility),
+        ),
+    )
+
+
+def _sanitize_cycle_parents(
+    *,
+    focus: CandidateRow,
+    partner: CandidateRow | None,
+    candidates: Sequence[CandidateRow],
+) -> tuple[CandidateRow | None, CandidateRow | None, dict]:
+    valid_candidates: list[CandidateRow] = []
+    seen_hashes: set[str] = set()
+    for candidate in candidates:
+        if candidate.design_hash in seen_hashes:
+            continue
+        seen_hashes.add(candidate.design_hash)
+        sanitized = _sanitize_candidate_params(candidate)
+        if sanitized is not None:
+            valid_candidates.append(sanitized)
+
+    details = {
+        "focus_source": "original",
+        "partner_source": "original" if partner is not None else "none",
+        "invalid_parent_detected": False,
+        "valid_parent_pool_size": len(valid_candidates),
+    }
+
+    sanitized_focus = _sanitize_candidate_params(focus)
+    if sanitized_focus is None:
+        details["invalid_parent_detected"] = True
+        swapped_focus = _nearest_valid_parent(
+            reference=focus,
+            valid_candidates=valid_candidates,
+        )
+        if swapped_focus is None:
+            details["focus_source"] = "missing"
+            return None, None, details
+        sanitized_focus = swapped_focus
+        details["focus_source"] = "swapped_nearest_valid"
+
+    sanitized_partner: CandidateRow | None = None
+    if partner is not None:
+        sanitized_partner = _sanitize_candidate_params(partner)
+        if sanitized_partner is None:
+            details["invalid_parent_detected"] = True
+            swapped_partner = _nearest_valid_parent(
+                reference=partner,
+                valid_candidates=valid_candidates,
+                exclude_hashes={sanitized_focus.design_hash},
+            )
+            if swapped_partner is None:
+                details["partner_source"] = "dropped_invalid"
+            else:
+                sanitized_partner = swapped_partner
+                details["partner_source"] = "swapped_nearest_valid"
+        if (
+            sanitized_partner is not None
+            and sanitized_partner.design_hash == sanitized_focus.design_hash
+        ):
+            sanitized_partner = None
+            details["partner_source"] = "dropped_duplicate_focus"
+
+    return sanitized_focus, sanitized_partner, details
 
 
 def _fetch_candidates(
@@ -957,9 +1225,17 @@ def _fetch_candidates(
         margins = (
             payload.get("constraint_margins", {}) if isinstance(payload, dict) else {}
         )
-        if not isinstance(margins, dict):
-            margins = payload.get("violations", {}) if isinstance(payload, dict) else {}
-        violations = margins if isinstance(margins, dict) else {}
+        violations_payload = (
+            payload.get("violations", {}) if isinstance(payload, dict) else {}
+        )
+        if isinstance(margins, dict) and margins:
+            violations = margins
+        elif isinstance(violations_payload, dict):
+            violations = violations_payload
+        elif isinstance(margins, dict):
+            violations = margins
+        else:
+            violations = {}
         meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
 
         aspect = None
@@ -1665,7 +1941,11 @@ def _derive_restart_parent_payloads(
             continue
         if not isinstance(candidate.params, dict):
             continue
-        selected.append(json.loads(json.dumps(candidate.params)))
+        try:
+            sanitized = sanitize_candidate_boundary(candidate.params)
+        except ValueError:
+            continue
+        selected.append(json.loads(json.dumps(sanitized)))
         seen_hashes.add(candidate.design_hash)
         if len(selected) >= 2:
             break
@@ -1711,6 +1991,76 @@ def _materialize_restart_parent_pair(
     _write_json(parent_a_path, parent_a_payload)
     _write_json(parent_b_path, parent_b_payload)
     return parent_a_path, parent_b_path
+
+
+def _clamp_float(value: float, *, low: float, high: float) -> float:
+    return max(float(low), min(float(value), float(high)))
+
+
+def _restart_blend_schedule(
+    *,
+    run_seed: int,
+    batch_id: int,
+    t_min: float,
+    t_max: float,
+    t_step: float,
+) -> tuple[float, float, float]:
+    """Deterministic jitter to prevent identical restart replays across cycles."""
+    base_min = float(t_min)
+    base_max = float(t_max)
+    base_step = max(1e-6, float(t_step))
+    shift_options = (0.0, 0.01, -0.01, 0.005, -0.005)
+    shift_idx = int((int(run_seed) + int(batch_id)) % len(shift_options))
+    shift = float(shift_options[shift_idx])
+    out_min = _clamp_float(base_min + shift, low=0.0, high=0.99)
+    out_max = _clamp_float(base_max + shift, low=out_min + 0.001, high=1.0)
+    step_options = (
+        base_step,
+        max(0.002, base_step * 1.2),
+        max(0.002, base_step * 0.8),
+    )
+    step_idx = int((int(run_seed) + int(batch_id) * 3) % len(step_options))
+    out_step = float(step_options[step_idx])
+    span = max(0.001, out_max - out_min)
+    out_step = min(out_step, span)
+    return out_min, out_max, max(out_step, 0.001)
+
+
+def _resolve_global_restart_parent_pair(
+    *,
+    run_dir: Path,
+    batch_id: int,
+    focus: CandidateRow,
+    partner: CandidateRow | None,
+    candidates: list[CandidateRow],
+    bootstrap_parent_a: Path | None,
+    bootstrap_parent_b: Path | None,
+    run_seed: int,
+) -> tuple[Path, Path, str]:
+    parent_a = bootstrap_parent_a
+    parent_b = bootstrap_parent_b
+    source = "bootstrap"
+    if parent_a is None or parent_b is None:
+        auto_pair = _materialize_restart_parent_pair(
+            run_dir=run_dir,
+            batch_id=batch_id,
+            focus=focus,
+            partner=partner,
+            candidates=candidates,
+        )
+        if auto_pair is None:
+            raise ValueError(
+                "global_restart requested but no restart parents were available."
+            )
+        parent_a, parent_b = auto_pair
+        source = "auto_archive"
+    assert parent_a is not None
+    assert parent_b is not None
+    # Deterministically permute parent order so repeated restart actions are not static.
+    if int((int(run_seed) + int(batch_id)) % 2) == 1:
+        parent_a, parent_b = parent_b, parent_a
+        source = f"{source}_swapped"
+    return parent_a, parent_b, source
 
 
 def _build_scale_cmd(
@@ -2123,7 +2473,12 @@ def _load_candidate_boundary(
     boundary = json.loads(str(row["params_json"]))
     if not isinstance(boundary, dict):
         raise TypeError("Candidate params_json must be a JSON object.")
-    return boundary
+    try:
+        return sanitize_candidate_boundary(boundary)
+    except ValueError as exc:
+        raise ValueError(
+            f"Candidate {design_hash!r} has invalid boundary payload: {exc}"
+        ) from exc
 
 
 def _build_llm_mutation_cmds(
@@ -2425,12 +2780,14 @@ def _select_frontier_recipe(
         )
         partner_boundary = None
         if partner is not None:
-            row = active_conn.execute(
-                "SELECT params_json FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
-                (experiment_id, partner.design_hash),
-            ).fetchone()
-            if row is not None:
-                partner_boundary = json.loads(str(row["params_json"]))
+            try:
+                partner_boundary = _load_candidate_boundary(
+                    active_conn,
+                    experiment_id=experiment_id,
+                    design_hash=partner.design_hash,
+                )
+            except ValueError:
+                partner_boundary = None
     finally:
         if owns_conn:
             active_conn.close()
@@ -2573,13 +2930,11 @@ def _select_static_recipe(
         active_conn = _connect(db)
         owns_conn = True
     try:
-        row = active_conn.execute(
-            "SELECT params_json FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
-            (experiment_id, focus.design_hash),
-        ).fetchone()
-        if row is None:
-            raise ValueError("Focus candidate missing from candidates table.")
-        focus_boundary = json.loads(str(row["params_json"]))
+        focus_boundary = _load_candidate_boundary(
+            active_conn,
+            experiment_id=experiment_id,
+            design_hash=focus.design_hash,
+        )
 
         focus_path = _ensure_parent_file(
             run_dir, design_hash=focus.design_hash, boundary=focus_boundary
@@ -2784,13 +3139,14 @@ def _select_static_recipe(
 
         # Blend sweep towards a partner that is better on the worst constraint.
         if partner is not None:
-            row2 = active_conn.execute(
-                "SELECT params_json FROM candidates WHERE experiment_id = ? AND design_hash = ? LIMIT 1",
-                (experiment_id, partner.design_hash),
-            ).fetchone()
-            partner_boundary = (
-                json.loads(str(row2["params_json"])) if row2 is not None else None
-            )
+            try:
+                partner_boundary = _load_candidate_boundary(
+                    active_conn,
+                    experiment_id=experiment_id,
+                    design_hash=partner.design_hash,
+                )
+            except ValueError:
+                partner_boundary = None
 
             if partner_boundary is not None:
                 partner_path = _ensure_parent_file(
@@ -2947,9 +3303,268 @@ def _select_adaptive_recipe(
     return selected_cmds, decision
 
 
-def _run_cmds(cmds: Iterable[ProposalCommand]) -> None:
+def _build_bridge_cmd(
+    *,
+    proposal_script: str,
+    problem: str,
+    db: Path,
+    conn: sqlite3.Connection,
+    experiment_id: int,
+    run_dir: Path,
+    batch_id: int,
+    seed_base: int,
+    focus: CandidateRow,
+    partner: CandidateRow,
+    route_prefix: str,
+) -> ProposalCommand:
+    focus_boundary = _load_candidate_boundary(
+        conn,
+        experiment_id=experiment_id,
+        design_hash=focus.design_hash,
+    )
+    partner_boundary = _load_candidate_boundary(
+        conn,
+        experiment_id=experiment_id,
+        design_hash=partner.design_hash,
+    )
+    focus_path = _ensure_parent_file(
+        run_dir,
+        design_hash=focus.design_hash,
+        boundary=focus_boundary,
+    )
+    partner_path = _ensure_parent_file(
+        run_dir,
+        design_hash=partner.design_hash,
+        boundary=partner_boundary,
+    )
+    return _build_blend_cmd(
+        proposal_script=proposal_script,
+        problem=problem,
+        db=db,
+        experiment_id=experiment_id,
+        run_dir=run_dir,
+        batch_id=batch_id,
+        seed_base=seed_base,
+        parent_a=focus_path,
+        parent_b=partner_path,
+        t_min=0.20,
+        t_max=0.80,
+        t_step=0.15,
+        model_route=f"{route_prefix}/bridge",
+    )
+
+
+def _build_forced_action_plan(
+    *,
+    action: str,
+    proposal_script: str,
+    problem: str,
+    db: Path,
+    conn: sqlite3.Connection,
+    profile: ProblemProfile,
+    experiment_id: int,
+    run_dir: Path,
+    batch_id: int,
+    run_seed: int,
+    seed_base: int,
+    focus: CandidateRow,
+    partner: CandidateRow | None,
+    candidates: list[CandidateRow],
+    target_constraint_override: str | None,
+    bootstrap_parent_a: Path | None,
+    bootstrap_parent_b: Path | None,
+    bootstrap_t_min: float,
+    bootstrap_t_max: float,
+    bootstrap_t_step: float,
+    route_prefix: str,
+) -> tuple[list[ProposalCommand], dict, str]:
+    normalized = str(action).strip().lower()
+    if normalized == "repair":
+        cmds, decision = _select_static_recipe(
+            proposal_script=proposal_script,
+            problem=problem,
+            db=db,
+            conn=conn,
+            experiment_id=experiment_id,
+            run_dir=run_dir,
+            batch_id=batch_id,
+            seed_base=seed_base,
+            focus=focus,
+            partner=None,
+            route_prefix=f"{route_prefix}/repair",
+            target_constraint_override=target_constraint_override,
+        )
+        return cmds, decision, "repair"
+
+    if normalized == "jump" and profile.allows_action("jump"):
+        cmds, jump_diag = _build_jump_recipe_cmds(
+            proposal_script=proposal_script,
+            problem=problem,
+            db=db,
+            conn=conn,
+            jump_delta_cap=profile.mutation_budget.jump_delta_cap,
+            experiment_id=experiment_id,
+            run_dir=run_dir,
+            batch_id=batch_id,
+            seed_base=seed_base,
+            focus=focus,
+            partner=partner,
+            route_prefix=route_prefix,
+        )
+        decision = {
+            "batch_id": batch_id,
+            "commands": [_cmd_str(cmd) for cmd in cmds],
+            "model_route": f"{route_prefix}/jump",
+            "recipe_mode": "policy_jump",
+            "jump_policy": jump_diag,
+            "created_at": _utc_now_iso(),
+        }
+        return cmds, decision, "jump"
+
+    if (
+        normalized == "bridge"
+        and partner is not None
+        and profile.allows_action("bridge")
+    ):
+        try:
+            bridge_cmd = _build_bridge_cmd(
+                proposal_script=proposal_script,
+                problem=problem,
+                db=db,
+                conn=conn,
+                experiment_id=experiment_id,
+                run_dir=run_dir,
+                batch_id=batch_id,
+                seed_base=seed_base,
+                focus=focus,
+                partner=partner,
+                route_prefix=route_prefix,
+            )
+        except ValueError:
+            bridge_cmd = None
+        if bridge_cmd is not None:
+            cmds = [bridge_cmd]
+            decision = {
+                "batch_id": batch_id,
+                "commands": [_cmd_str(bridge_cmd)],
+                "model_route": f"{route_prefix}/bridge",
+                "recipe_mode": "policy_bridge",
+                "created_at": _utc_now_iso(),
+            }
+            return cmds, decision, "bridge"
+
+    restart_parent_a, restart_parent_b, restart_parent_source = (
+        _resolve_global_restart_parent_pair(
+            run_dir=run_dir,
+            batch_id=batch_id,
+            focus=focus,
+            partner=partner,
+            candidates=candidates,
+            bootstrap_parent_a=bootstrap_parent_a,
+            bootstrap_parent_b=bootstrap_parent_b,
+            run_seed=run_seed,
+        )
+    )
+    restart_t_min, restart_t_max, restart_t_step = _restart_blend_schedule(
+        run_seed=run_seed,
+        batch_id=batch_id,
+        t_min=float(bootstrap_t_min),
+        t_max=float(bootstrap_t_max),
+        t_step=float(bootstrap_t_step),
+    )
+    restart_cmd = _build_blend_cmd(
+        proposal_script=proposal_script,
+        problem=problem,
+        db=db,
+        experiment_id=experiment_id,
+        run_dir=run_dir,
+        batch_id=batch_id,
+        seed_base=seed_base,
+        parent_a=restart_parent_a,
+        parent_b=restart_parent_b,
+        t_min=restart_t_min,
+        t_max=restart_t_max,
+        t_step=restart_t_step,
+        model_route=f"{route_prefix}/global_restart",
+    )
+    decision = {
+        "batch_id": batch_id,
+        "commands": [_cmd_str(restart_cmd)],
+        "model_route": f"{route_prefix}/global_restart",
+        "recipe_mode": "policy_global_restart",
+        "restart_parent_source": restart_parent_source,
+        "restart_schedule": {
+            "t_min": restart_t_min,
+            "t_max": restart_t_max,
+            "t_step": restart_t_step,
+        },
+        "created_at": _utc_now_iso(),
+    }
+    return [restart_cmd], decision, "global_restart"
+
+
+def _diversity_escalation_order(
+    *,
+    profile: ProblemProfile,
+    current_action: str | None,
+    partner_available: bool,
+) -> list[str]:
+    order: list[str] = []
+    if partner_available and profile.allows_action("bridge"):
+        order.append("bridge")
+    if profile.allows_action("jump"):
+        order.append("jump")
+    if profile.allows_action("repair"):
+        order.append("repair")
+    order.append("global_restart")
+    normalized_current = str(current_action).strip().lower() if current_action else None
+    return [item for item in order if item != normalized_current] or ["global_restart"]
+
+
+def _distinct_action_for_anti_repeat(
+    *,
+    profile: ProblemProfile,
+    current_action: str | None,
+    partner_available: bool,
+) -> str:
+    candidates = _diversity_escalation_order(
+        profile=profile,
+        current_action=current_action,
+        partner_available=partner_available,
+    )
+    return candidates[0] if candidates else "global_restart"
+
+
+def _run_cmds(cmds: Iterable[ProposalCommand]) -> dict[str, int | bool]:
+    inserted_total = 0
+    skipped_total = 0
+    parsed_any = False
     for cmd in cmds:
-        subprocess.run(cmd.argv, check=True)
+        result = subprocess.run(
+            cmd.argv,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        stdout_text = str(result.stdout or "")
+        stderr_text = str(result.stderr or "")
+        if stdout_text:
+            print(stdout_text, end="")
+        if stderr_text:
+            print(stderr_text, end="", file=sys.stderr)
+        insert_match = re.search(r"(?:^|\s)inserted=(\d+)", stdout_text)
+        skip_match = re.search(r"(?:^|\s)skipped=(\d+)", stdout_text)
+        if insert_match is not None:
+            parsed_any = True
+            inserted_total += int(insert_match.group(1))
+        if skip_match is not None:
+            parsed_any = True
+            skipped_total += int(skip_match.group(1))
+    return {
+        "inserted": int(inserted_total),
+        "skipped": int(skipped_total),
+        "parsed": bool(parsed_any),
+    }
 
 
 def _log_model_router_reward_event(
@@ -3308,7 +3923,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         schema_compatible, schema_reason = _schema_compatibility_status(conn)
         if not schema_compatible:
-            batch_id = _next_batch_id(args.run_dir)
+            batch_id = _next_batch_id_from_manifest(
+                manifest=resume_manifest,
+                run_dir=args.run_dir,
+            )
             decision = {
                 "batch_id": batch_id,
                 "commands": [],
@@ -3338,17 +3956,25 @@ def main(argv: list[str] | None = None) -> None:
         )
         if replay_cmds:
             replay_batches = replay_diagnostics.get("replay_batches", [])
+            replay_cycle_count = _replay_cycle_emissions(replay_diagnostics)
             print(
-                f"startup_replay: batches={replay_batches} commands={len(replay_cmds)}"
+                "startup_replay:"
+                f" batches={replay_batches}"
+                f" commands={len(replay_cmds)}"
+                f" cycles_counted={replay_cycle_count}"
             )
             for cmd in replay_cmds:
                 print(_cmd_str(cmd))
             if args.execute:
                 _run_cmds(replay_cmds)
+            proposal_cycles_emitted += int(replay_cycle_count)
             if not args.loop:
                 return
         recipe_rules_cache: list[dict] = []
         recipe_rules_cache_reflection_id = -1
+        invalid_parent_failure_streak = 0
+        zero_yield_streak = 0
+        force_action_next_cycle: str | None = None
         while True:
             if max_cycles > 0 and proposal_cycles_emitted >= max_cycles:
                 print(
@@ -3432,7 +4058,10 @@ def main(argv: list[str] | None = None) -> None:
                     time.sleep(float(args.sleep_sec))
                     continue
 
-                batch_id = _next_batch_id(args.run_dir)
+                batch_id = _next_batch_id_from_manifest(
+                    manifest=resume_manifest,
+                    run_dir=args.run_dir,
+                )
                 seed_base = int(run_seed) + int(batch_id) * 1_000
                 with conn:
                     _log_reflection_for_previous_cycle(
@@ -3482,9 +4111,50 @@ def main(argv: list[str] | None = None) -> None:
                     / f"governor_bootstrap_batch_{batch_id:03}_{_utc_stamp()}.json"
                 )
                 _write_json(artifact_path, decision)
+                bootstrap_target_metric = (
+                    profile.constraints[0].name if profile.constraints else "unknown"
+                )
                 with conn:
                     _log_governor_artifact(
                         conn, experiment_id=exp_id, path=artifact_path
+                    )
+                    _log_scratchpad_event(
+                        conn,
+                        experiment_id=exp_id,
+                        cycle=int(batch_id),
+                        step=0,
+                        planner_intent={},
+                        aso_action="bootstrap",
+                        intent_agreement="disabled",
+                        override_reason=None,
+                        diagnostics={
+                            "model_route": bootstrap_route,
+                            "problem": profile.problem,
+                            "action": "bootstrap",
+                            "predicted_target_metric": bootstrap_target_metric,
+                            "predicted_direction": _constraint_direction(
+                                profile,
+                                constraint=bootstrap_target_metric,
+                            ),
+                            "predicted_expected_effect": "bootstrap_blend_seed_bank",
+                            "knob_signature": _command_knob_signature([cmd]),
+                            "batch_id": int(batch_id),
+                            "command_count": 1,
+                            "expected_candidate_count": int(
+                                _expected_candidate_volume([cmd])
+                            ),
+                            "phase_after_policy": str(
+                                resume_manifest.get("phase", "feasibility_recovery")
+                            ),
+                            "restart_selected": "continue",
+                        },
+                        outcome={
+                            "pending_before": int(pending_n),
+                            "target_queue": int(target_queue),
+                            "hv_at_decision": float(hv_value),
+                            "record_hv": float(args.record_hv),
+                            "snapshot_at_decision": dict(snapshot),
+                        },
                     )
                 print(_cmd_str(cmd))
                 if args.execute:
@@ -3587,7 +4257,36 @@ def main(argv: list[str] | None = None) -> None:
                     else:
                         focus, partner = shared_selection
 
-            batch_id = _next_batch_id(args.run_dir)
+            focus, partner, parent_sanitization = _sanitize_cycle_parents(
+                focus=focus,
+                partner=partner,
+                candidates=candidates,
+            )
+            if bool(parent_sanitization.get("invalid_parent_detected")):
+                invalid_parent_failure_streak += 1
+            else:
+                invalid_parent_failure_streak = 0
+            invalid_basin_escape_due = int(invalid_parent_failure_streak) >= int(
+                profile.autonomy_policy.invalid_basin_max_consecutive_parent_failures
+            )
+            if focus is None:
+                print(
+                    "No valid sanitized focus candidate found; cannot issue local proposals."
+                )
+                if args.bootstrap_parent_a is None or args.bootstrap_parent_b is None:
+                    if not args.loop:
+                        break
+                    time.sleep(float(args.sleep_sec))
+                    continue
+                # Placeholder for global restart path that uses explicit bootstrap parents.
+                focus = candidates[0]
+                partner = None
+                invalid_basin_escape_due = True
+
+            batch_id = _next_batch_id_from_manifest(
+                manifest=resume_manifest,
+                run_dir=args.run_dir,
+            )
             seed_base = int(run_seed) + int(batch_id) * 1_000
             with conn:
                 _log_reflection_for_previous_cycle(
@@ -3652,6 +4351,8 @@ def main(argv: list[str] | None = None) -> None:
                 schema_compatible=schema_compatible,
                 frontier_integrity_ok=frontier_integrity_ok,
             )
+            if invalid_basin_escape_due and policy_restart_plan != "circuit_break":
+                policy_restart_plan = "global_restart"
             if (
                 int(stagnation) >= int(stagnation_stop_cap)
                 and policy_restart_plan != "global_restart"
@@ -3697,6 +4398,11 @@ def main(argv: list[str] | None = None) -> None:
                         "invalid_llm_outputs_last20": int(invalid_outputs),
                         "frontier_integrity_ok": bool(frontier_integrity_ok),
                         "policy_restart_plan": str(policy_restart_plan),
+                        "parent_sanitization": dict(parent_sanitization),
+                        "invalid_parent_failure_streak": int(
+                            invalid_parent_failure_streak
+                        ),
+                        "invalid_basin_escape_due": bool(invalid_basin_escape_due),
                     },
                 )
                 try:
@@ -3752,6 +4458,7 @@ def main(argv: list[str] | None = None) -> None:
                 policy_restart_plan=policy_restart_plan,
                 partner_available=partner is not None,
             )
+            zero_yield_forced_action: str | None = None
             if hard_restart_lock:
                 if (
                     effective_action is not None
@@ -3760,6 +4467,13 @@ def main(argv: list[str] | None = None) -> None:
                 ):
                     llm_fallback_reason = "policy_override_blocked:hard_restart_trigger"
                 effective_action = deterministic_action
+                force_action_next_cycle = None
+            elif force_action_next_cycle is not None:
+                zero_yield_forced_action = str(force_action_next_cycle)
+                effective_action = zero_yield_forced_action
+                if llm_fallback_reason is None:
+                    llm_fallback_reason = f"policy_override:zero_yield_recovery:{zero_yield_forced_action}"
+                force_action_next_cycle = None
             elif effective_action is None:
                 effective_action = deterministic_action
             should_circuit_break = policy_restart_plan == "circuit_break"
@@ -3804,23 +4518,27 @@ def main(argv: list[str] | None = None) -> None:
                 }
             else:
                 if effective_action == "global_restart":
-                    restart_parent_a = args.bootstrap_parent_a
-                    restart_parent_b = args.bootstrap_parent_b
-                    restart_parent_source = "bootstrap"
-                    if restart_parent_a is None or restart_parent_b is None:
-                        auto_parent_pair = _materialize_restart_parent_pair(
+                    restart_parent_a, restart_parent_b, restart_parent_source = (
+                        _resolve_global_restart_parent_pair(
                             run_dir=args.run_dir,
                             batch_id=batch_id,
                             focus=focus,
                             partner=partner,
                             candidates=candidates,
+                            bootstrap_parent_a=args.bootstrap_parent_a,
+                            bootstrap_parent_b=args.bootstrap_parent_b,
+                            run_seed=run_seed,
                         )
-                        if auto_parent_pair is None:
-                            raise ValueError(
-                                "global_restart requested but no restart parents were available."
-                            )
-                        restart_parent_a, restart_parent_b = auto_parent_pair
-                        restart_parent_source = "auto_archive"
+                    )
+                    restart_t_min, restart_t_max, restart_t_step = (
+                        _restart_blend_schedule(
+                            run_seed=run_seed,
+                            batch_id=batch_id,
+                            t_min=float(args.bootstrap_t_min),
+                            t_max=float(args.bootstrap_t_max),
+                            t_step=float(args.bootstrap_t_step),
+                        )
+                    )
                     restart_route = "governor_llm/global_restart"
                     restart_cmd = _build_blend_cmd(
                         proposal_script=proposal_script,
@@ -3832,9 +4550,9 @@ def main(argv: list[str] | None = None) -> None:
                         seed_base=seed_base,
                         parent_a=restart_parent_a,
                         parent_b=restart_parent_b,
-                        t_min=float(args.bootstrap_t_min),
-                        t_max=float(args.bootstrap_t_max),
-                        t_step=float(args.bootstrap_t_step),
+                        t_min=restart_t_min,
+                        t_max=restart_t_max,
+                        t_step=restart_t_step,
                         model_route=restart_route,
                     )
                     cmds = [restart_cmd]
@@ -3844,6 +4562,11 @@ def main(argv: list[str] | None = None) -> None:
                         "model_route": restart_route,
                         "recipe_mode": "llm_global_restart",
                         "restart_parent_source": restart_parent_source,
+                        "restart_schedule": {
+                            "t_min": restart_t_min,
+                            "t_max": restart_t_max,
+                            "t_step": restart_t_step,
+                        },
                         "created_at": _utc_now_iso(),
                     }
                 else:
@@ -3914,6 +4637,7 @@ def main(argv: list[str] | None = None) -> None:
                                 experiment_id=exp_id,
                                 run_dir=args.run_dir,
                                 batch_id=batch_id,
+                                run_seed=run_seed,
                                 seed_base=seed_base,
                                 focus=focus,
                                 partner=partner_for_recipe,
@@ -3999,11 +4723,149 @@ def main(argv: list[str] | None = None) -> None:
             ):
                 llm_fallback_reason = "policy_override:mutations_ignored_for_restart"
 
+            predicted_target_metric: str | None = (
+                str(target_constraint_override)
+                if target_constraint_override is not None
+                else None
+            )
+            if predicted_target_metric is None:
+                focus_payload = decision.get("focus")
+                if isinstance(focus_payload, Mapping):
+                    worst_constraint = focus_payload.get("worst_constraint")
+                    if isinstance(worst_constraint, str) and worst_constraint.strip():
+                        predicted_target_metric = str(worst_constraint).strip().lower()
+            if predicted_target_metric is None:
+                predicted_target_metric = "unknown"
+
             cap_applied = False
             max_candidates = int(profile.mutation_budget.max_candidates_per_cycle)
             if len(cmds) > max_candidates:
                 cap_applied = True
                 cmds = cmds[:max_candidates]
+
+            diversity_floor = max(
+                1,
+                min(
+                    int(profile.autonomy_policy.diversity_floor_min_candidates),
+                    max_candidates,
+                ),
+            )
+            diversity_floor_triggered = False
+            diversity_forced_action: str | None = None
+            expected_candidate_count = _expected_candidate_volume(cmds)
+            if cmds and expected_candidate_count < diversity_floor:
+                diversity_floor_triggered = True
+                for forced_action in _diversity_escalation_order(
+                    profile=profile,
+                    current_action=effective_action,
+                    partner_available=partner is not None,
+                ):
+                    try:
+                        forced_cmds, forced_decision, applied_action = (
+                            _build_forced_action_plan(
+                                action=forced_action,
+                                proposal_script=proposal_script,
+                                problem=profile.problem,
+                                db=args.db,
+                                conn=conn,
+                                profile=profile,
+                                experiment_id=exp_id,
+                                run_dir=args.run_dir,
+                                batch_id=batch_id,
+                                run_seed=run_seed,
+                                seed_base=seed_base,
+                                focus=focus,
+                                partner=partner,
+                                candidates=candidates,
+                                target_constraint_override=target_constraint_override,
+                                bootstrap_parent_a=args.bootstrap_parent_a,
+                                bootstrap_parent_b=args.bootstrap_parent_b,
+                                bootstrap_t_min=float(args.bootstrap_t_min),
+                                bootstrap_t_max=float(args.bootstrap_t_max),
+                                bootstrap_t_step=float(args.bootstrap_t_step),
+                                route_prefix="governor_policy/diversity_floor",
+                            )
+                        )
+                    except ValueError:
+                        continue
+                    cmds = forced_cmds
+                    decision = forced_decision
+                    effective_action = applied_action
+                    diversity_forced_action = applied_action
+                    expected_candidate_count = _expected_candidate_volume(cmds)
+                    if (
+                        expected_candidate_count >= diversity_floor
+                        or applied_action == "global_restart"
+                    ):
+                        break
+                if len(cmds) > max_candidates:
+                    cap_applied = True
+                    cmds = cmds[:max_candidates]
+                    expected_candidate_count = _expected_candidate_volume(cmds)
+
+            anti_repeat_triggered = False
+            anti_repeat_repeat_count = 0
+            anti_repeat_forced_action: str | None = None
+            knob_signature = _command_knob_signature(cmds) if cmds else ""
+            action_for_repeat = (
+                str(effective_action)
+                if effective_action is not None
+                else ("adaptive_recipe" if bool(args.adaptive) else "static_recipe")
+            )
+            if cmds:
+                anti_repeat_repeat_count = _consecutive_no_progress_action_repeats(
+                    conn,
+                    experiment_id=exp_id,
+                    action=action_for_repeat,
+                    target_constraint=str(predicted_target_metric),
+                    knob_signature=knob_signature,
+                )
+                if anti_repeat_repeat_count >= int(
+                    profile.autonomy_policy.anti_repeat_no_progress_cycles
+                ):
+                    anti_repeat_triggered = True
+                    forced_action = _distinct_action_for_anti_repeat(
+                        profile=profile,
+                        current_action=effective_action,
+                        partner_available=partner is not None,
+                    )
+                    try:
+                        forced_cmds, forced_decision, applied_action = (
+                            _build_forced_action_plan(
+                                action=forced_action,
+                                proposal_script=proposal_script,
+                                problem=profile.problem,
+                                db=args.db,
+                                conn=conn,
+                                profile=profile,
+                                experiment_id=exp_id,
+                                run_dir=args.run_dir,
+                                batch_id=batch_id,
+                                seed_base=seed_base,
+                                focus=focus,
+                                partner=partner,
+                                candidates=candidates,
+                                target_constraint_override=target_constraint_override,
+                                bootstrap_parent_a=args.bootstrap_parent_a,
+                                bootstrap_parent_b=args.bootstrap_parent_b,
+                                bootstrap_t_min=float(args.bootstrap_t_min),
+                                bootstrap_t_max=float(args.bootstrap_t_max),
+                                bootstrap_t_step=float(args.bootstrap_t_step),
+                                route_prefix="governor_policy/anti_repeat",
+                            )
+                        )
+                        cmds = forced_cmds
+                        decision = forced_decision
+                        effective_action = applied_action
+                        anti_repeat_forced_action = applied_action
+                        if len(cmds) > max_candidates:
+                            cap_applied = True
+                            cmds = cmds[:max_candidates]
+                        expected_candidate_count = _expected_candidate_volume(cmds)
+                        knob_signature = _command_knob_signature(cmds) if cmds else ""
+                    except ValueError:
+                        anti_repeat_forced_action = None
+
             if "commands" in decision:
                 decision["commands"] = [_cmd_str(cmd) for cmd in cmds]
 
@@ -4028,7 +4890,10 @@ def main(argv: list[str] | None = None) -> None:
                 "accepted_feasible_last10": accepted_feasible_last10,
                 "dominant_violation_rate_last20": dominant_violation_rate_last20,
             }
-            decision["restart_policy"] = {"selected": policy_restart_plan}
+            decision["restart_policy"] = {
+                "selected": policy_restart_plan,
+                "invalid_basin_escape_due": bool(invalid_basin_escape_due),
+            }
             decision["llm"] = {
                 "enabled": bool(args.llm_enabled),
                 "model": str(args.llm_model),
@@ -4067,6 +4932,35 @@ def main(argv: list[str] | None = None) -> None:
                 "max_candidates_per_cycle": max_candidates,
                 "applied": cap_applied,
                 "final_command_count": len(cmds),
+                "expected_candidate_count": int(expected_candidate_count),
+            }
+            decision["autonomy_gates"] = {
+                "diversity_floor_min_candidates": int(diversity_floor),
+                "diversity_floor_triggered": bool(diversity_floor_triggered),
+                "diversity_forced_action": diversity_forced_action,
+                "anti_repeat_threshold": int(
+                    profile.autonomy_policy.anti_repeat_no_progress_cycles
+                ),
+                "anti_repeat_repeat_count": int(anti_repeat_repeat_count),
+                "anti_repeat_triggered": bool(anti_repeat_triggered),
+                "anti_repeat_forced_action": anti_repeat_forced_action,
+                "zero_yield_streak": int(zero_yield_streak),
+                "zero_yield_forced_action": zero_yield_forced_action,
+                "knob_signature": knob_signature,
+                "invalid_parent_failure_streak": int(invalid_parent_failure_streak),
+                "invalid_basin_escape_due": bool(invalid_basin_escape_due),
+            }
+            decision["parent_sanitization"] = {
+                "focus_source": str(parent_sanitization.get("focus_source", "unknown")),
+                "partner_source": str(
+                    parent_sanitization.get("partner_source", "unknown")
+                ),
+                "invalid_parent_detected": bool(
+                    parent_sanitization.get("invalid_parent_detected", False)
+                ),
+                "valid_parent_pool_size": int(
+                    parent_sanitization.get("valid_parent_pool_size", 0)
+                ),
             }
             model_route = str(decision.get("model_route", "unknown"))
             _record_cycle_manifest(
@@ -4088,17 +4982,6 @@ def main(argv: list[str] | None = None) -> None:
                 window_size=int(_ROUTER_REWARD_WINDOW),
             )
             decision["model_router_reward"] = reward_event
-            predicted_target_metric: str | None = (
-                str(target_constraint_override)
-                if target_constraint_override is not None
-                else None
-            )
-            if predicted_target_metric is None:
-                focus_payload = decision.get("focus")
-                if isinstance(focus_payload, Mapping):
-                    worst_constraint = focus_payload.get("worst_constraint")
-                    if isinstance(worst_constraint, str) and worst_constraint.strip():
-                        predicted_target_metric = str(worst_constraint).strip().lower()
             predicted_direction = _constraint_direction(
                 profile,
                 constraint=predicted_target_metric,
@@ -4160,8 +5043,21 @@ def main(argv: list[str] | None = None) -> None:
                         "predicted_target_metric": predicted_target_metric,
                         "predicted_direction": predicted_direction,
                         "predicted_expected_effect": predicted_expected_effect,
+                        "knob_signature": knob_signature,
                         "batch_id": int(batch_id),
                         "command_count": len(cmds),
+                        "expected_candidate_count": int(expected_candidate_count),
+                        "diversity_floor_min_candidates": int(diversity_floor),
+                        "diversity_floor_triggered": bool(diversity_floor_triggered),
+                        "diversity_forced_action": diversity_forced_action,
+                        "anti_repeat_repeat_count": int(anti_repeat_repeat_count),
+                        "anti_repeat_triggered": bool(anti_repeat_triggered),
+                        "anti_repeat_forced_action": anti_repeat_forced_action,
+                        "invalid_parent_failure_streak": int(
+                            invalid_parent_failure_streak
+                        ),
+                        "invalid_basin_escape_due": bool(invalid_basin_escape_due),
+                        "parent_sanitization": dict(parent_sanitization),
                         "phase_after_policy": phase_after_policy,
                         "restart_selected": policy_restart_plan,
                         "run_budget_remaining": run_budget_remaining,
@@ -4177,8 +5073,32 @@ def main(argv: list[str] | None = None) -> None:
 
             for cmd in cmds:
                 print(_cmd_str(cmd))
+            execution_summary: dict[str, int | bool] | None = None
             if args.execute and cmds:
-                _run_cmds(cmds)
+                execution_summary = _run_cmds(cmds)
+                decision["execution"] = {
+                    "inserted": int(execution_summary.get("inserted", 0)),
+                    "skipped": int(execution_summary.get("skipped", 0)),
+                    "parsed": bool(execution_summary.get("parsed", False)),
+                }
+                _write_json(artifact_path, decision)
+                inserted_count = int(execution_summary.get("inserted", 0))
+                parsed_summary = bool(execution_summary.get("parsed", False))
+                if parsed_summary and inserted_count <= 0:
+                    zero_yield_streak += 1
+                    if should_circuit_break:
+                        force_action_next_cycle = None
+                    elif effective_action == "global_restart":
+                        force_action_next_cycle = "global_restart"
+                    else:
+                        force_action_next_cycle = _distinct_action_for_anti_repeat(
+                            profile=profile,
+                            current_action=effective_action,
+                            partner_available=partner is not None,
+                        )
+                else:
+                    zero_yield_streak = 0
+                    force_action_next_cycle = None
             proposal_cycles_emitted += 1
 
             if should_circuit_break:
