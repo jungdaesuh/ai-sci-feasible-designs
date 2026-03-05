@@ -5,7 +5,7 @@ Document Role: Index and status board
 Status: Active
 Owner: Harness maintainers
 Last Updated: 2026-03-04
-Applies To: `chore/docs-cleanup`
+Applies To: `harness/` package implementation
 
 ## Purpose
 Single index for the autonomous harness documentation set.
