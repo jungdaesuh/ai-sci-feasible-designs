@@ -53,7 +53,7 @@ def test_all_types_instantiate():
     assert prop.source == "print(1)"
 
     bundle = CandidateBundle.of(boundary={"r_cos": [[1]]}, metadata={"k": "v"})
-    assert bundle.boundary["r_cos"] == [[1]]
+    assert bundle.boundary["r_cos"] == ((1,),)
     assert isinstance(bundle.boundary, MappingProxyType)
     assert isinstance(bundle.metadata, MappingProxyType)
 
@@ -68,6 +68,21 @@ def test_all_types_instantiate():
 
 
 def test_candidate_bundle_deeply_immutable():
-    bundle = CandidateBundle.of(boundary={"r_cos": [[1, 2]]}, metadata={"key": "val"})
+    original = {"r_cos": [[1, 2]], "nested": {"a": [3]}}
+    bundle = CandidateBundle.of(boundary=original, metadata={"key": "val"})
+
+    # Top-level key assignment blocked.
     with pytest.raises(TypeError):
         bundle.boundary["r_cos"] = [[9]]  # type: ignore[index]
+
+    # Nested list is frozen to tuple — in-place mutation impossible.
+    assert isinstance(bundle.boundary["r_cos"], tuple)
+    assert isinstance(bundle.boundary["r_cos"][0], tuple)
+
+    # Nested dict is also frozen.
+    with pytest.raises(TypeError):
+        bundle.boundary["nested"]["a"] = [99]  # type: ignore[index]
+
+    # Caller aliasing: mutating the original dict must not affect the bundle.
+    original["r_cos"][0][0] = 999
+    assert bundle.boundary["r_cos"][0][0] == 1

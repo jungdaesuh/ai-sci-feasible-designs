@@ -45,11 +45,25 @@ class ProposalScript:
     latency_ms: int
 
 
+def _deep_freeze(obj: object) -> object:
+    """Recursively freeze a nested structure of dicts/lists/scalars.
+
+    - dict  → MappingProxyType (keys/values recursively frozen)
+    - list  → tuple            (elements recursively frozen)
+    - other → returned as-is   (ints, floats, strings are already immutable)
+    """
+    if isinstance(obj, dict):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return tuple(_deep_freeze(item) for item in obj)
+    return obj
+
+
 @dataclass(frozen=True)
 class CandidateBundle:
     """A validated candidate boundary with metadata.
 
-    Both fields are wrapped in MappingProxyType for deep immutability.
+    Both fields are deeply frozen (dicts → MappingProxyType, lists → tuples).
     Construct via CandidateBundle.of(boundary_dict, metadata_dict).
     """
 
@@ -62,8 +76,8 @@ class CandidateBundle:
         metadata: dict,
     ) -> CandidateBundle:
         return CandidateBundle(
-            boundary=MappingProxyType(boundary),
-            metadata=MappingProxyType(metadata),
+            boundary=_deep_freeze(boundary),  # type: ignore[arg-type]
+            metadata=_deep_freeze(metadata),  # type: ignore[arg-type]
         )
 
 
