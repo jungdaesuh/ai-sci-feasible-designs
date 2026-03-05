@@ -18,11 +18,13 @@ Single index for the autonomous harness documentation set.
 | Code-generation harness plan | Implementation plan (active) | `docs/harness/HARNESS_CODEGEN_PLAN.md` |
 | Literature ideas | Research synthesis feeding into codegen plan | `docs/harness/CODEGEN_IDEAS_FROM_LITERATURE.md` |
 | Post-mortem report | Historical evidence from 2026-03-04 session | `docs/harness/AUTONOMOUS_HARNESS_REPORT_2026-03-04.md` |
+| Implementation tracker | Checkboxes + build order | `docs/harness/HARNESS_IMPL_TRACKER.md` |
 
 ## Reading Order
 1. Strategy (`AUTONOMOUS_HARNESS_PLAN.md`)
 2. Codegen plan (`HARNESS_CODEGEN_PLAN.md`)
-3. Literature ideas (`CODEGEN_IDEAS_FROM_LITERATURE.md`) — reference for where enhancements came from
+3. Implementation tracker (`HARNESS_IMPL_TRACKER.md`) — build order + checkboxes for implementers
+4. Literature ideas (`CODEGEN_IDEAS_FROM_LITERATURE.md`) — reference for where enhancements came from
 
 ## Archived Docs (Superseded by Codegen Plan)
 

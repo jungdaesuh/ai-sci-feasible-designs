@@ -652,6 +652,15 @@ This harness is a new package (`harness/`), not a migration of the existing gove
 6. **Chase notes as prior art in prompt** — encodes winning patterns from Jan sessions
 7. **No error swallowing** — every failure is logged at ERROR, recorded in DB with full context, and fed into next cycle's traces; circuit breaker stops run after N consecutive failures
 
+## Implementation Progress
+
+Track detailed progress in `docs/harness/HARNESS_IMPL_TRACKER.md`. Summary:
+
+- [ ] **Phase A: Foundation** (M0-M1) — types, problem_adapter, recorder, auth stub
+- [ ] **Phase B: Core Pipeline** (M2-M4) — state_reader, sandbox, FileClient, diagnosis, observation
+- [ ] **Phase C: Governor MVP** (M5-M6) — governor loop, experience distillation, Gate 1 + 2
+- [ ] **Phase D: Live Client** (M7) — OpenAICodexClient, full auth, Gate 3
+
 ## Relationship to Strategy Doc
 
 The strategy doc (`AUTONOMOUS_HARNESS_PLAN.md`) defines shared runtime rules (governor ownership, SSOT, bounded actions, stop policy). This plan implements those rules via code generation instead of the original schema-bounded interface. See the "Why Code Generation" table above for the full comparison.
