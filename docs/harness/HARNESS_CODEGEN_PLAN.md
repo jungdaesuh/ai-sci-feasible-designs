@@ -22,6 +22,7 @@ The Codex session (Jan 5-9) that found P1/P2/P3 records worked by: reading the c
 ```
 harness/
 ├── __init__.py
+├── types.py             # ~60 lines. Shared frozen dataclasses (prevents circular imports)
 ├── governor.py          # ~220 lines. Cycle loop + stop controller
 ├── state_reader.py      # Read DB snapshot, compute diagnostics
 ├── diagnosis.py         # Analyze last cycle + adaptive explore/exploit mode
@@ -123,8 +124,8 @@ Additive schema (new table, does not modify existing):
             │  [subprocess]                              │
             │    L1: static analysis (forbidden imports) │
             │    L2: filesystem confinement (tempdir)    │
-            │    L3: post-exec validation (no escapes)   │
             │  [governor process, post-subprocess]       │
+            │    L3: post-exec validation (no escapes)   │
             │    novelty dedup (cosine sim > 0.95, DB)   │
             │  → list[CandidateBundle]                   │
             └──────────┬─────────────────┬────────────┘
@@ -545,6 +546,7 @@ Write Python that generates candidate boundary JSONs. Each file should contain:
 | File | Lines (est) | What it does |
 |---|---|---|
 | `harness/__init__.py` | 5 | Package init |
+| `harness/types.py` | 60 | Shared frozen dataclasses: CycleSnapshot, CycleDiagnosis, ProposalScript, CandidateBundle, EnqueueResult, StopDecision |
 | `harness/governor.py` | 220 | Main loop: read → diagnose → decide → sandbox → dedup → enqueue → record → experience → stop |
 | `harness/state_reader.py` | 170 | Query DB for snapshot + diverse parent selection (frontier, near-feasible, stepping stone) |
 | `harness/diagnosis.py` | 130 | Analyze last cycle outcomes, binding constraints, adaptive explore/exploit mode |
@@ -556,10 +558,10 @@ Write Python that generates candidate boundary JSONs. Each file should contain:
 | `harness/decision_client.py` | 150 | Protocol + OpenAICodexClient (v1, subscription OAuth) + ClaudeClient + FileClient |
 | `harness/auth.py` | 120 | OAuth PKCE flow, token storage/refresh for ChatGPT subscription |
 | `harness/prompt_templates/proposal.py` | 100 | Prompt template with chase notes + explore/exploit + traces + experience |
-| **Total** | **~1535** | |
+| **Total** | **~1595** | |
 
-### Phase 2: Stop controller + worker pool + literature enhancements
-- Stop controller logic (target, stall, budget, manual, circuit-break)
+### Phase 2: Stop-controller hardening + worker pool + literature enhancements
+- Stop-controller hardening (configurable thresholds, stall detection tuning, budget tracking)
 - Worker pool supervision (reuse patterns from existing governor.py)
 - `--autonomous` mode that spawns workers
 - Surrogate pre-filter before VMEC++ (from DGM/SkyDiscover/ExLLM cascade evaluation):
@@ -575,7 +577,6 @@ Write Python that generates candidate boundary JSONs. Each file should contain:
 
 ### Phase 3: Hardening
 - Per-cycle manifest for audit replay and resume (script source + hash + snapshot already recorded; manifest adds runtime metadata for exact reconstruction)
-- Cycle budget tracking
 - Self-evolving search strategy (from SkyDiscover EvoX / DGM): when stalled, LLM evolves the prompt template itself — see `CODEGEN_IDEAS_FROM_LITERATURE.md` §7 for design
 
 ### Phase 4: Transport reliability (clawdbot-style)
@@ -657,8 +658,8 @@ This harness is a new package (`harness/`), not a migration of the existing gove
 Track detailed progress in `docs/harness/HARNESS_IMPL_TRACKER.md`. Summary:
 
 - [ ] **Phase A: Foundation** (M0-M1) — types, problem_adapter, recorder, auth stub
-- [ ] **Phase B: Core Pipeline** (M2-M4) — state_reader, sandbox, FileClient, diagnosis, observation
-- [ ] **Phase C: Governor MVP** (M5-M6) — governor loop, experience distillation, Gate 1 + 2
+- [ ] **Phase B: Core Pipeline** (M2-M4) — state_reader, sandbox, FileClient, diagnosis, observation, Gate 1
+- [ ] **Phase C: Governor MVP** (M5-M6) — governor loop, experience distillation, Gate 2
 - [ ] **Phase D: Live Client** (M7) — OpenAICodexClient, full auth, Gate 3
 
 ## Relationship to Strategy Doc
