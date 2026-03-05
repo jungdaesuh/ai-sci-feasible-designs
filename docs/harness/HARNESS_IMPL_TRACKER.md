@@ -107,7 +107,7 @@ Layer 0 (no internal deps)        Layer 1             Layer 2                Lay
 
 ## Milestone 2: State Reading (Layer 1)
 
-- [ ] **`harness/state_reader.py`** (~170 lines)
+- [x] **`harness/state_reader.py`** (~170 lines)
   - **Purpose:** Query DB for cycle snapshot + diverse parent selection (frontier best, near-feasible best, stepping stone via cosine distance).
   - **Internal deps:** `harness.types.CycleSnapshot`.
   - **External deps:** `sqlite3`, `numpy` (cosine similarity).
