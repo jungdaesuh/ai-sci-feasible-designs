@@ -18,35 +18,8 @@ from ai_scientist.problem_profiles import P2_PROFILE
 from harness.problem_adapter import ProblemAdapter
 from harness.state_reader import read_snapshot, select_diverse_parents
 
-
-def _insert_candidate(
-    conn,
-    *,
-    boundary: dict,
-    experiment_id: int = 1,
-    problem: str = "p2",
-    feasibility: float,
-    is_feasible: int,
-    objective: float,
-) -> int:
-    """Insert a candidate + metric row into the DB, return candidate_id."""
-    design_hash = hash_payload(boundary)
-    cursor = conn.execute(
-        "INSERT INTO candidates "
-        "(experiment_id, problem, params_json, seed, status, design_hash, operator_family, model_route) "
-        "VALUES (?, ?, ?, 1, 'done', ?, 'test', 'test')",
-        (experiment_id, problem, json.dumps(boundary), design_hash),
-    )
-    candidate_id = cursor.lastrowid
-    assert candidate_id is not None
-    raw = {"metrics": {"lgradB": objective, "aspect_ratio": 8.0}}
-    conn.execute(
-        "INSERT INTO metrics (candidate_id, raw_json, feasibility, objective, hv, is_feasible) "
-        "VALUES (?, ?, ?, ?, NULL, ?)",
-        (candidate_id, json.dumps(raw), feasibility, objective, is_feasible),
-    )
-    conn.commit()
-    return int(candidate_id)
+# Re-exported from conftest (not directly importable without __init__.py).
+from conftest import insert_candidate_with_metric
 
 
 def _make_boundary(r00: float, z11: float) -> dict:
@@ -77,13 +50,13 @@ class TestReadSnapshot:
         b_nf = _make_boundary(0.5, 0.3)  # near-feasible (infeasible, low feasibility)
         _seed_files(run_dir, b_low, b_best, b_nf)
 
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b_low, feasibility=0.0, is_feasible=1, objective=7.5
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b_best, feasibility=0.0, is_feasible=1, objective=9.0
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b_nf, feasibility=0.01, is_feasible=0, objective=5.0
         )
 
@@ -161,19 +134,18 @@ class TestReadSnapshot:
         run_dir = tmp_path / "run"
 
         b_inside = _make_boundary(1.0, 0.1)  # feasibility=0.015 <= 0.02 → near-feasible
-        b_outside = _make_boundary(
-            0.9, 0.2
-        )  # feasibility=0.05 > 0.02 → NOT near-feasible
+        # feasibility=0.05 > 0.02 → NOT near-feasible
+        b_outside = _make_boundary(0.9, 0.2)
         _seed_files(run_dir, b_inside, b_outside)
 
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db,
             boundary=b_inside,
             feasibility=0.015,
             is_feasible=0,
             objective=5.0,
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db,
             boundary=b_outside,
             feasibility=0.05,
@@ -197,16 +169,16 @@ class TestDiverseParents:
         b4 = _make_boundary(0.1, 0.9)
         _seed_files(run_dir, b1, b2, b3, b4)
 
-        cid1 = _insert_candidate(
+        cid1 = insert_candidate_with_metric(
             harness_db, boundary=b1, feasibility=0.0, is_feasible=1, objective=9.0
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b2, feasibility=0.0, is_feasible=1, objective=7.0
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b3, feasibility=0.01, is_feasible=0, objective=5.0
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b4, feasibility=0.0, is_feasible=1, objective=6.0
         )
 
@@ -243,17 +215,17 @@ class TestDiverseParents:
         }
         _seed_files(run_dir, frontier_b, close_b, distant_b)
 
-        frontier_cid = _insert_candidate(
+        frontier_cid = insert_candidate_with_metric(
             harness_db,
             boundary=frontier_b,
             feasibility=0.0,
             is_feasible=1,
             objective=9.0,
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=close_b, feasibility=0.0, is_feasible=1, objective=7.0
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db,
             boundary=distant_b,
             feasibility=0.0,
@@ -280,7 +252,7 @@ class TestDiverseParents:
         b = _make_boundary(1.0, 0.1)
         _seed_files(run_dir, b)
 
-        cid = _insert_candidate(
+        cid = insert_candidate_with_metric(
             harness_db, boundary=b, feasibility=0.0, is_feasible=1, objective=8.0
         )
 
@@ -320,14 +292,14 @@ class TestDiverseParents:
         b_other = _make_boundary(0.5, 0.5)
         _seed_files(run_dir, b_frontier, b_other)
 
-        frontier_cid = _insert_candidate(
+        frontier_cid = insert_candidate_with_metric(
             harness_db,
             boundary=b_frontier,
             feasibility=0.0,
             is_feasible=1,
             objective=9.0,
         )
-        _insert_candidate(
+        insert_candidate_with_metric(
             harness_db, boundary=b_other, feasibility=0.0, is_feasible=1, objective=6.0
         )
 

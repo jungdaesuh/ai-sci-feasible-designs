@@ -212,7 +212,7 @@ def select_diverse_parents(
         for r in rows:
             if int(r[0]) in exclude_ids:
                 continue
-            if r[4] != 1:
+            if not r[4]:
                 # Only consider feasible candidates for the stepping stone.
                 continue
             vec = _flatten_boundary(r[2])
