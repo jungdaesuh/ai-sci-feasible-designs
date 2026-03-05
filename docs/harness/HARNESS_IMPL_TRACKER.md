@@ -2,7 +2,7 @@
 
 Date: 2026-03-04
 Document Role: Build-order checklist for the code-generation harness
-Status: Draft — no milestones started
+Status: Phase A complete (M0-M1)
 Design Spec: `docs/harness/HARNESS_CODEGEN_PLAN.md`
 
 ## How to Use This File
@@ -42,7 +42,7 @@ Layer 0 (no internal deps)        Layer 1             Layer 2                Lay
 
 ## Milestone 0: Shared Types
 
-- [ ] **`harness/types.py`** (~60 lines)
+- [x] **`harness/types.py`** (~60 lines)
   - **Purpose:** 6 frozen dataclasses shared across 8+ modules. Prevents circular imports between state_reader ↔ diagnosis ↔ observation.
   - **Internal deps:** None (leaf module).
   - **External deps:** `dataclasses`, `typing`.
@@ -62,11 +62,11 @@ Layer 0 (no internal deps)        Layer 1             Layer 2                Lay
 
 ## Milestone 1: Foundation (Layer 0)
 
-- [ ] **`harness/__init__.py`** (5 lines)
+- [x] **`harness/__init__.py`** (5 lines)
   - **Purpose:** Package marker + version string.
   - **Acceptance:** `import harness` succeeds, `harness.__version__` is a string.
 
-- [ ] **`harness/problem_adapter.py`** (~100 lines)
+- [x] **`harness/problem_adapter.py`** (~100 lines)
   - **Purpose:** Wraps `ProblemProfile` with frontier/target logic for P1/P2/P3.
   - **Internal deps:** `harness.types.CycleSnapshot`.
   - **External deps:** `ai_scientist.problem_profiles`.
@@ -82,7 +82,7 @@ Layer 0 (no internal deps)        Layer 1             Layer 2                Lay
     - `test_target_reached_true_when_exceeded`
     - `test_binding_constraints_returns_closest`
 
-- [ ] **`harness/recorder.py`** (~90 lines)
+- [x] **`harness/recorder.py`** (~90 lines)
   - **Purpose:** Creates `harness_cycles` table (additive, never modifies existing tables) and persists cycle audit records.
   - **Internal deps:** `harness.types.CycleSnapshot`, `harness.types.EnqueueResult`.
   - **External deps:** `sqlite3`.
@@ -95,7 +95,7 @@ Layer 0 (no internal deps)        Layer 1             Layer 2                Lay
     - `test_record_cycle_persists`
     - `test_record_cycle_with_error_context`
 
-- [ ] **`harness/auth.py`** (~120 lines) — **stub only in M1**
+- [x] **`harness/auth.py`** (~120 lines) — **stub only in M1**
   - **Purpose:** Define `CodexCredentials` dataclass and `load_codex_credentials` / `refresh_if_expired` signatures. Bodies raise `NotImplementedError` with message "Full auth in M7".
   - **Internal deps:** None.
   - **Acceptance:** Import succeeds; calling functions raises `NotImplementedError`.
