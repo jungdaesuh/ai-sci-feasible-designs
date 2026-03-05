@@ -657,7 +657,7 @@ This harness is a new package (`harness/`), not a migration of the existing gove
 
 Track detailed progress in `docs/harness/HARNESS_IMPL_TRACKER.md`. Summary:
 
-- [ ] **Phase A: Foundation** (M0-M1) — types, problem_adapter, recorder, auth stub
+- [x] **Phase A: Foundation** (M0-M1) — types, problem_adapter, recorder, auth stub
 - [ ] **Phase B: Core Pipeline** (M2-M4) — state_reader, sandbox, FileClient, diagnosis, observation, Gate 1
 - [ ] **Phase C: Governor MVP** (M5-M6) — governor loop, experience distillation, Gate 2
 - [ ] **Phase D: Live Client** (M7) — OpenAICodexClient, full auth, Gate 3
