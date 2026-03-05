@@ -48,7 +48,7 @@ full = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ai_scientist*"]
+include = ["ai_scientist*", "harness*"]
 exclude = ["tests*", "constellaration*", "vmecpp*", "orchestration*"]
 
 [tool.ruff]
@@ -83,6 +83,7 @@ exclude = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
